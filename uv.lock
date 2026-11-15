@@ -947,7 +947,7 @@ source = { editable = "." }
 dependencies = [
     { name = "auryn-bash" },
     { name = "auryn-c" },
-    { name = "auryn-core", extra = ["embedded"] },
+    { name = "auryn-core" },
     { name = "auryn-cpp" },
     { name = "auryn-csharp" },
     { name = "auryn-cuda" },
@@ -1106,7 +1106,7 @@ requires-dist = [
     { name = "auryn-c", editable = "packages/c" },
     { name = "auryn-c", marker = "extra == 'all'", editable = "packages/c" },
     { name = "auryn-c", marker = "extra == 'c'", editable = "packages/c" },
-    { name = "auryn-core", extras = ["embedded"], editable = "packages/core" },
+    { name = "auryn-core", editable = "packages/core" },
     { name = "auryn-core", extras = ["embedded"], marker = "extra == 'embedded'", editable = "packages/core" },
     { name = "auryn-cpp", editable = "packages/cpp" },
     { name = "auryn-cpp", marker = "extra == 'all'", editable = "packages/cpp" },

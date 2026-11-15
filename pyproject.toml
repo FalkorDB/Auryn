@@ -35,13 +35,18 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Operating System :: OS Independent",
 ]
-# Batteries-included: `pip install falkordb-auryn` graphs any repo out of the box (every file-based
-# language + the in-process embedded FalkorDB + the cross-ingestor hooks). The only things NOT pulled
-# by default are the COMPILED live-DB drivers (oracledb / postgres / mysql) -- opt-in via the `[all]`,
-# `[oracle-live]`, `[sql-all]` extras. For a lean install, depend on a single `auryn-<lang>` plugin
-# directly (each pulls `auryn-core`), bypassing this umbrella.
+# Batteries-included: `pip install falkordb-auryn` graphs any repo out of the box -- every file-based
+# language plugin + the cross-ingestor hooks, all PURE-PYTHON wheels (incl. Windows). Deliberately NOT
+# hard-depended on here:
+#   * the embedded FalkorDB (`auryn-core[embedded]` -> falkordblite) -- POSIX-only, with wheels only for
+#     recent-glibc Linux + macOS, so forcing it would break `pip install` on Windows and older-glibc
+#     Linux (Ubuntu 22.04 etc.). `auryn quickstart` auto-fetches it at runtime where supported, and
+#     degrades to a remote backend otherwise; `[embedded]` pre-installs it opt-in.
+#   * the COMPILED live-DB drivers (oracledb / postgres / mysql) -- opt-in via `[all]`/`[oracle-live]`/
+#     `[sql-all]`.
+# For a lean install, depend on a single `auryn-<lang>` plugin directly (each pulls `auryn-core`).
 dependencies = [
-    "auryn-core[embedded]",
+    "auryn-core",
     "auryn-python", "auryn-csharp", "auryn-c", "auryn-cpp", "auryn-cuda",
     "auryn-typescript", "auryn-java", "auryn-go", "auryn-rust", "auryn-php",
     "auryn-julia", "auryn-ruby", "auryn-kotlin", "auryn-swift", "auryn-bash",

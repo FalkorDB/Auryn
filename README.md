@@ -47,11 +47,12 @@ auryn quickstart path/to/your/repo
 The graph persists at `<path>/.auryn/graph.db`, so re-running reuses it. First pass parses
 everything; after that, re-ingestion is a delta — unchanged files are a no-op.
 
-> **Requirements** — Python ≥ 3.12. macOS or Linux (on Windows use WSL2). `falkordb-auryn` is
-> batteries-included — every language + the in-process database, no extras needed. Add live-DB
-> drivers with `"falkordb-auryn[all]"` (oracledb / postgres / mysql). Prefer an isolated tool
-> install? `uv tool install falkordb-auryn`. Working from a clone instead? `uv sync` then
-> `uv run auryn quickstart`.
+> **Requirements** — Python ≥ 3.12. `falkordb-auryn` is batteries-included: every language plugin
+> out of the box (pure-Python, all platforms incl. Windows). The in-process database is fetched
+> automatically on first `auryn quickstart` (macOS / Linux; pre-install it with
+> `"falkordb-auryn[embedded]"`). On Windows or an older-glibc Linux, point at a remote FalkorDB via
+> `auryn install --backend remote`. Add live-DB drivers with `"falkordb-auryn[all]"`. Prefer an
+> isolated tool install? `uv tool install falkordb-auryn`. From a clone? `uv sync` then `uv run auryn quickstart`.
 
 ## Give your agent the graph
 
