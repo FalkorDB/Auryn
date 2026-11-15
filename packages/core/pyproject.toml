@@ -13,7 +13,7 @@ dependencies = [
     # <2.1 deliberately: mcp 2.1 masks tool exceptions as a generic "Error executing
     # tool X", dropping our helpful ValueError messages (missing-node id, "call
     # locate() first"). Revisit as its own task -- see MCP error-surfacing follow-up.
-    "mcp>=1.2,<2.1",
+    "mcp>=1.2,<2.3",
     "tomli-w>=1.0",  # write ~/.auryn/config.toml (install manifest); reads use stdlib tomllib
 ]
 
