@@ -107,6 +107,36 @@ def test_autoinstall_skips_already_claimed(monkeypatch):
     assert out is langs and installed == []
 
 
+# -- _install_command: target the RUNNING interpreter -----------------------------------
+
+def test_install_command_uv_targets_running_interpreter_in_a_venv(monkeypatch):
+    # uv available + a venv (prefix != base_prefix): `uv pip install --python <exe>`, NO --system,
+    # so a runtime auto-install lands in THIS interpreter's env (incl. a uv-tool venv), not elsewhere.
+    monkeypatch.setattr(plugins.shutil, "which", lambda name: "/usr/bin/uv")
+    monkeypatch.setattr(plugins.sys, "prefix", "/venv")
+    monkeypatch.setattr(plugins.sys, "base_prefix", "/usr")
+    cmd = plugins._install_command("pkg")
+    assert cmd[:3] == ["uv", "pip", "install"]
+    assert "--python" in cmd and plugins.sys.executable in cmd
+    assert "--system" not in cmd
+    assert cmd[-1] == "pkg"
+
+
+def test_install_command_uv_adds_system_for_a_non_venv_interpreter(monkeypatch):
+    # uv available + a system/global interpreter (prefix == base_prefix): uv refuses without --system.
+    monkeypatch.setattr(plugins.shutil, "which", lambda name: "/usr/bin/uv")
+    monkeypatch.setattr(plugins.sys, "prefix", "/usr")
+    monkeypatch.setattr(plugins.sys, "base_prefix", "/usr")
+    assert "--system" in plugins._install_command("pkg")
+
+
+def test_install_command_pip_fallback_targets_sys_executable(monkeypatch):
+    # no uv: fall back to the interpreter's own pip, which always targets the running interpreter.
+    monkeypatch.setattr(plugins.shutil, "which", lambda name: None)
+    cmd = plugins._install_command("pkg")
+    assert cmd == [plugins.sys.executable, "-m", "pip", "install", "pkg"]
+
+
 # -- ensure_importable: on-demand optional-dependency install --------------------------
 
 def test_ensure_importable_returns_already_present_module():

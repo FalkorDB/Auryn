@@ -29,7 +29,7 @@ Sixteen languages. Live SQL and Oracle schemas too. No server, no Docker to get 
 Two commands, zero infrastructure. You'll be looking at a real graph in about a second.
 
 ```bash
-pip install "falkordb-auryn[all,embedded]"
+pip install falkordb-auryn
 auryn quickstart
 ```
 
@@ -47,10 +47,11 @@ auryn quickstart path/to/your/repo
 The graph persists at `<path>/.auryn/graph.db`, so re-running reuses it. First pass parses
 everything; after that, re-ingestion is a delta — unchanged files are a no-op.
 
-> **Requirements** — Python ≥ 3.12. macOS or Linux (on Windows use WSL2). `[all,embedded]`
-> pulls every language plus the in-process database; for just Python use
-> `"falkordb-auryn[python,embedded]"`. Prefer an isolated tool install?
-> `uv tool install "falkordb-auryn[all,embedded]"`. Working from a clone instead?
+> **Requirements** — Python ≥ 3.12. `falkordb-auryn` is batteries-included: every language plugin out
+> of the box. The in-process database is fetched automatically on first `auryn quickstart` on macOS /
+> Linux (recent glibc); on native Windows or older-glibc Linux, point at a remote FalkorDB via
+> `auryn install --backend remote`. Add live-DB drivers with `"falkordb-auryn[all]"`. For an isolated
+> tool install, include the DB up front: `uv tool install "falkordb-auryn[embedded]"`. From a clone?
 > `uv sync` then `uv run auryn quickstart`.
 
 ## Give your agent the graph
@@ -125,8 +126,9 @@ touches nothing but `~/.auryn` and your agent's config.
 ## What it can read
 
 Everything file-based is **auto-detected** by `auryn ingest` in a single pass. Live
-databases are read via `auryn run <name>`. Install only what you need —
-`pip install "falkordb-auryn[python,csharp]"` — or everything with `[all]`.
+databases are read via `auryn run <name>`. `pip install falkordb-auryn` includes every language by
+default; for a lean, single-language install instead, `pip install auryn-python` (each plugin pulls
+`auryn-core`).
 
 <details>
 <summary><b>All sources and engines</b></summary>
