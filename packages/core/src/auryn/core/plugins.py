@@ -86,9 +86,13 @@ def packages_for_suffixes(suffixes: set[str]) -> dict[str, str]:
 
 
 def _install_command(package: str) -> list[str]:
-    """Prefer the project's toolchain (`uv pip install`) when available, else pip."""
+    """Prefer the project's toolchain (`uv pip install`) when available, else pip. Both forms target
+    the RUNNING interpreter explicitly (`--python sys.executable` / `sys.executable -m pip`) so a
+    runtime auto-install lands in the environment auryn is actually running from -- including an
+    isolated `uv tool install` venv, where a bare `uv pip install` would target the current project's
+    venv (or none) instead, leaving the package unimportable this process."""
     if shutil.which("uv"):
-        return ["uv", "pip", "install", package]
+        return ["uv", "pip", "install", "--python", sys.executable, package]
     return [sys.executable, "-m", "pip", "install", package]
 
 
