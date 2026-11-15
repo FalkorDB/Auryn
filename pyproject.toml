@@ -6,10 +6,9 @@
 # a consumer only pays for the languages they install. This root is the umbrella
 # `falkordb-auryn` distribution whose extras pull the language plugins in:
 #
-#     pip install falkordb-auryn                 # core only (registry, MCP, viewer, CLI)
-#     pip install "falkordb-auryn[python]"       # + Jedi-backed Python plugin
-#     pip install "falkordb-auryn[python,csharp]"
-#     pip install "falkordb-auryn[all]"          # every bundled language
+#     pip install falkordb-auryn                 # batteries-included: every language + embedded DB + hooks
+#     pip install "falkordb-auryn[all]"          # + live-DB drivers (oracledb / postgres / mysql)
+#     pip install auryn-python                   # lean: a single language plugin (pulls auryn-core)
 #
 # For local development, `uv sync` installs the whole workspace editable (all members
 # are in the dev group below), so the full test suite and benchmarks run unchanged.
@@ -36,7 +35,19 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Operating System :: OS Independent",
 ]
-dependencies = ["auryn-core"]
+# Batteries-included: `pip install falkordb-auryn` graphs any repo out of the box (every file-based
+# language + the in-process embedded FalkorDB + the cross-ingestor hooks). The only things NOT pulled
+# by default are the COMPILED live-DB drivers (oracledb / postgres / mysql) -- opt-in via the `[all]`,
+# `[oracle-live]`, `[sql-all]` extras. For a lean install, depend on a single `auryn-<lang>` plugin
+# directly (each pulls `auryn-core`), bypassing this umbrella.
+dependencies = [
+    "auryn-core[embedded]",
+    "auryn-python", "auryn-csharp", "auryn-c", "auryn-cpp", "auryn-cuda",
+    "auryn-typescript", "auryn-java", "auryn-go", "auryn-rust", "auryn-php",
+    "auryn-julia", "auryn-ruby", "auryn-kotlin", "auryn-swift", "auryn-bash",
+    "auryn-oracle", "auryn-sql",
+    "auryn-http", "auryn-orm", "auryn-grpc", "auryn-events",
+]
 
 [project.urls]
 Homepage = "https://github.com/FalkorDB/Auryn"
