@@ -90,9 +90,14 @@ def _install_command(package: str) -> list[str]:
     the RUNNING interpreter explicitly (`--python sys.executable` / `sys.executable -m pip`) so a
     runtime auto-install lands in the environment auryn is actually running from -- including an
     isolated `uv tool install` venv, where a bare `uv pip install` would target the current project's
-    venv (or none) instead, leaving the package unimportable this process."""
+    venv (or none) instead, leaving the package unimportable this process. `uv` refuses to touch a
+    non-venv (system/global) interpreter without `--system`, so add it when sys.executable isn't in a
+    venv."""
     if shutil.which("uv"):
-        return ["uv", "pip", "install", "--python", sys.executable, package]
+        cmd = ["uv", "pip", "install", "--python", sys.executable]
+        if sys.prefix == sys.base_prefix:  # system/global interpreter, not a virtualenv
+            cmd.append("--system")
+        return [*cmd, package]
     return [sys.executable, "-m", "pip", "install", package]
 
 
