@@ -1,0 +1,44 @@
+[project]
+name = "auryn-core"
+version = "0.1.0"
+description = "Core of Auryn: registry/plugin discovery, git+local sources, the FalkorDB graph layer, the MCP server, the viewer, and the `auryn` CLI. Language support ships as separate `auryn-<lang>` plugins."
+authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
+requires-python = ">=3.12"
+license = { text = "SSPL-1.0" }
+dependencies = [
+    "falkordb>=1.5.0",
+    "click>=8.1",
+    "flask>=3.1.3",
+    "gitpython>=3.1.57",
+    # <2.1 deliberately: mcp 2.1 masks tool exceptions as a generic "Error executing
+    # tool X", dropping our helpful ValueError messages (missing-node id, "call
+    # locate() first"). Revisit as its own task -- see MCP error-surfacing follow-up.
+    "mcp>=1.2,<2.1",
+    "tomli-w>=1.0",  # write ~/.auryn/config.toml (install manifest); reads use stdlib tomllib
+]
+
+[project.optional-dependencies]
+# Optional AI enrichment for the viewer: naming detected graph communities via
+# Claude (viewer/community_names.py). Imported lazily and degraded gracefully, so
+# the viewer runs fine without it -- install `auryn-core[llm]` + set
+# ANTHROPIC_API_KEY to enable semantic community names.
+llm = ["anthropic>=0.40"]
+# Optional embedded/serverless FalkorDB: bundles Redis + the FalkorDB module in-process
+# (no separate server, no Docker) via falkordblite. Imported lazily -- and auto-installed
+# on demand (opt-out) -- in graph_client.connect_client only when a config requests
+# embedded mode, so the normal server path never carries it. Powers `auryn quickstart`.
+embedded = ["falkordblite>=0.10"]
+
+[project.scripts]
+auryn = "auryn.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# PEP 420 namespace package: there is no src/auryn/__init__.py, so several
+# distributions (this core + each auryn-<lang>) all contribute submodules to the
+# shared `auryn` namespace. hatchling maps src/auryn/** -> auryn/** and
+# includes the viewer's static assets (non-.py) that live under the tree.
+[tool.hatch.build.targets.wheel]
+packages = ["src/auryn"]

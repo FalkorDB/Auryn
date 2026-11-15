@@ -1,0 +1,54 @@
+[project]
+name = "auryn-oracle"
+version = "0.1.0"
+description = "Oracle-stack plugins for Auryn: live-DB and file-based PL/SQL (vendored ANTLR grammar) and Redgate schema-catalog reconstruction (oraschema). (The generic relational-DB schema ingestor now lives in auryn-sql.)"
+authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
+requires-python = ">=3.12"
+license = { text = "SSPL-1.0" }
+dependencies = [
+    "auryn-core",
+    # oraschema (Redgate schema-catalog reconstruction) reuses the generic relational
+    # schema graph model -- ingestors/oraschema/schema.py imports auryn.ingestors.sql
+    # at load, so the `sql` package is a hard dependency, not an optional extra.
+    "auryn-sql",
+    "click>=8.1",
+    # must exactly match the ANTLR tool version used to generate ingestors/plsql/grammar/
+    "antlr4-python3-runtime==4.13.2",
+    # Pure-Python SQL parser -- the fast primary path for the file-based schema-catalog ingestor
+    # (`oraschema`); the ANTLR grammar above is its fallback for Oracle physical-storage DDL sqlglot
+    # can't parse, and remains the sole parser for the PL/SQL *code* ingestors.
+    "sqlglot>=25",
+]
+
+# python-oracledb, the driver for the *connection-based* live `oracle` PL/SQL auryn. The
+# file-based `plsql` ingestor (the common deploy target) needs none of it, so it's kept out
+# of the base install to keep it lean (~40MB smaller). A live run imports it on demand and
+# auto-installs it (see core.plugins.ensure_importable), so `auryn-oracle[live]` is a
+# convenience/offline pre-install, not a hard requirement. (The generic, DB-agnostic SQL
+# schema ingestor -- and its SQLAlchemy + postgres/mysql drivers -- now lives in its own
+# `auryn-sql` package; use `auryn-sql[oracle]` to reflect an Oracle schema generically.)
+[project.optional-dependencies]
+live = ["oracledb>=4.0.2"]
+
+# Split by concern (core/registry.py): `auryn.languages` -> import-light lazy plsql
+# GitLanguage (no ANTLR/oracledb at discovery); `auryn.ingestors` -> the live-DB
+# BaseIngestors, loaded only by `auryn run` (each entry targets the specific module that
+# registers it).
+[project.entry-points."auryn.languages"]
+plsql = "auryn.ingestors.plsql.plugin"
+
+[project.entry-points."auryn.ingestors"]
+oracle = "auryn.ingestors.plsql.ingestor"
+plsql = "auryn.ingestors.plsql.file_ingestor"
+# File-based schema-catalog reconstruction from a Redgate scripts-folder export. Reuses the
+# vendored ANTLR grammar (no live-DB drivers), so it stays in the lean install like `plsql`.
+oraschema = "auryn.ingestors.oraschema.ingestor"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Includes the vendored ANTLR grammar under src/auryn/ingestors/plsql/grammar/
+# (all generated as .py modules, so they ride along as ordinary package modules).
+[tool.hatch.build.targets.wheel]
+packages = ["src/auryn"]

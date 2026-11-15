@@ -1,0 +1,23 @@
+[project]
+name = "auryn-kotlin"
+version = "0.1.0"
+description = "Kotlin language plugin for Auryn: a fast tree-sitter-kotlin engine extracting packages/classes/objects/interfaces/enums/methods/functions/fields/params, the type hierarchy (EXTENDS/IMPLEMENTS), and calls. A deep pass (Kotlin compiler / kotlin-language-server symbol resolution) is the planned second phase."
+authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
+requires-python = ">=3.12"
+license = { text = "SSPL-1.0" }
+dependencies = [
+    "auryn-core",
+    "tree-sitter>=0.26.0",
+    "tree-sitter-kotlin>=1.1.0",
+]
+
+# Import-light lazy GitLanguage (no tree-sitter import at discovery). See core/registry.py.
+[project.entry-points."auryn.languages"]
+kotlin = "auryn.ingestors.kotlin.plugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auryn"]

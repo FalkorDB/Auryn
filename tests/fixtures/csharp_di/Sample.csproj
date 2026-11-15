@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Dependency-free on purpose: the DI (IServiceCollection/AddScoped) and MVC
+       (ControllerBase, [ApiController]/[HttpGet]/[Route]) surfaces the extractor keys
+       off are declared locally in Framework.cs, so this fixture restores and builds
+       offline with only the .NET SDK (no ASP.NET Core / DI NuGet packages needed).
+       The Roslyn extractor recognizes DI registrations and controllers by the same
+       well-known names whether they come from the real packages or these shims. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+</Project>

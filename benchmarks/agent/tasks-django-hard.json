@@ -1,0 +1,41 @@
+{
+  "target_repo": "https://github.com/django/django",
+  "graph_name": "django",
+  "project_name": "django",
+  "notes": "Round 2: harder, transitive questions where grep/read is expensive AND completeness is hard to reconstruct, so accuracy and/or tokens should separate. Gold facts verified against the Django code graph. HT1 steers to a single behavioral_inventory call; HT2 is a wide transitive-impact question grep cannot answer; HT3 is transitive cross-cutting callers.",
+  "tasks": [
+    {
+      "id": "HT1_reverse_full_closure",
+      "capability": "behavioral_inventory (complete transitive closure)",
+      "question": "What is the COMPLETE set of functions that django.urls.base.reverse() reaches transitively -- its entire call closure, not just direct calls? List them.",
+      "gold_facts": [
+        "reverse reaches get_resolver and _get_cached_resolver",
+        "it reaches URLResolver._reverse_with_prefix and URLResolver._populate",
+        "it reaches get_ns_resolver, get_urlconf and get_script_prefix",
+        "it reaches URL-pattern helpers such as normalize, flatten_result and walk_to_end",
+        "the full closure is roughly 19 functions, spread across django.urls.base, django.urls.resolvers and django.utils"
+      ]
+    },
+    {
+      "id": "HT2_get_resolver_impact",
+      "capability": "impact_of (wide transitive blast radius)",
+      "question": "If you changed the behavior of django.urls.resolvers.get_resolver, roughly how many functions across the whole Django codebase would be transitively affected (they call it directly or indirectly), and which subsystems does that reach?",
+      "gold_facts": [
+        "get_resolver is called directly by reverse and by the resolver-caching / URL-resolution machinery",
+        "because reverse and URL resolution are used pervasively, hundreds of functions (on the order of 400+) transitively depend on get_resolver",
+        "the affected functions span the URL layer, views, the admin (django.contrib.admin) and template/response handling",
+        "get_resolver is a central, high-impact function -- a change to it has a very wide blast radius"
+      ]
+    },
+    {
+      "id": "HT3_import_string_transitive",
+      "capability": "who_calls (transitive, cross-cutting)",
+      "question": "Which functions call import_string (from django.utils.module_loading), directly or transitively a couple of levels up? Roughly how many direct callers are there, and which Django apps use it?",
+      "gold_facts": [
+        "there are roughly 40 direct callers, including AppConfig.create, django.contrib.auth.load_backend, get_hashers and get_password_validators",
+        "direct callers are spread across django.apps, django.contrib.auth, django.contrib.admin and django.contrib.messages",
+        "counting transitive callers (functions that call those callers) the number is substantially larger than the ~40 direct ones"
+      ]
+    }
+  ]
+}

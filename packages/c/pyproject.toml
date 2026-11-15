@@ -1,0 +1,23 @@
+[project]
+name = "auryn-c"
+version = "0.1.0"
+description = "C language plugin for Auryn: fast tree-sitter-c engine (functions/structs/unions/enums/typedefs/globals/macros/#includes/calls, no build config). A deep libclang engine (resolved types, header<->.c linking, cross-TU calls) is the planned second phase."
+authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
+requires-python = ">=3.12"
+license = { text = "SSPL-1.0" }
+dependencies = [
+    "auryn-core",
+    "tree-sitter>=0.26.0",
+    "tree-sitter-c>=0.23.0",
+]
+
+# Import-light lazy GitLanguage (no tree-sitter import at discovery). See core/registry.py.
+[project.entry-points."auryn.languages"]
+c = "auryn.ingestors.c.plugin"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auryn"]

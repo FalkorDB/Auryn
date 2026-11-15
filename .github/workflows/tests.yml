@@ -1,0 +1,125 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:      # lets release.yml invoke the whole suite as a pre-publish gate
+
+# Least privilege: the suite only needs to read the checked-out code.
+permissions:
+  contents: read
+
+# A newer push to the same branch/PR supersedes an in-flight run.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The only test areas that reach outside the process for a Docker container or the .NET SDK.
+  # Kept here once so the fast `test` job (which skips them) and the `integration` job (which
+  # runs exactly them) can't drift about what "heavy" means:
+  #   - plsql        -> Oracle XE testcontainer
+  #   - sql live     -> PostgreSQL + MySQL testcontainers (self-skip without Docker)
+  #   - csharp roslyn -> publishes the net8.0 Roslyn extractor (self-skips without `dotnet`)
+  # Everything else runs against the serverless embedded FalkorDB (falkordblite) with no server.
+  HEAVY_TESTS: >-
+    tests/ingestors/plsql/test_plsql_ingestor.py
+    tests/ingestors/sql/test_sql_live_engines.py
+    tests/ingestors/csharp/test_roslyn.py
+
+jobs:
+  # Fast signal on every push/PR: the whole workspace suite on the embedded FalkorDB backend,
+  # no Docker, no .NET. This is the bulk of the 700+ tests.
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # The suite runs against the in-process embedded FalkorDB by default, but one test
+      # (tests/core/test_clone_into_cwd.py) drives the `ingest repo` CLI against a real server on
+      # localhost:6379. Provide one so it passes; every other test still uses the embedded backend.
+      falkordb:
+        image: falkordb/falkordb:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # Installs the whole workspace editable (all language plugins + test deps) using the
+      # pinned Python from .python-version and the locked dependency set from uv.lock.
+      - name: Sync workspace
+        run: uv sync --frozen
+
+      - name: Run core suite (embedded FalkorDB)
+        # Cap parallelism at -n 2 (overriding the pyproject `-n auto` default): each xdist worker
+        # runs its own in-process embedded FalkorDB, and `auto` on a hosted runner can exhaust
+        # memory and fail unrelated to the test -- which, since release.yml gates publishing on this
+        # suite, could flake-block a release. 2 keeps a speedup without the memory pressure.
+        run: |
+          ignores=""
+          for t in $HEAVY_TESTS; do ignores="$ignores --ignore=$t"; done
+          uv run pytest $ignores -n 2 --cov=auryn --cov-report=term-missing
+
+  # Dedicated performance-regression gate. The whole value of delta-sync is that editing one file
+  # re-parses ~one file, not the repo -- a change that drags a file's whole package/module back in is
+  # still node-for-node correct (the `test` job passes) but slow. `test_delta_blast_radius.py` catches
+  # exactly that by asserting on FILES RE-PARSED (deterministic -- no wall-clock flake on a shared
+  # runner), across every delta-capable language. It already runs inside the `test` job, but that job
+  # is `-n auto` (parallel), where the in-process embedded backend can exhaust memory and fail for
+  # reasons unrelated to perf; running the guard here SERIALLY (-n0) gives a clean, isolated signal so a
+  # real blast-radius regression is an unambiguous red check, not noise lost in a parallel-suite flake.
+  # (The benchmarks/ suite measures wall-clock throughput and clones real repos -- useful locally, too
+  # flaky/slow to GATE CI, so it stays out of here by design.)
+  perf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync workspace
+        run: uv sync --frozen
+
+      - name: Delta-sync blast-radius perf gate (serial, deterministic)
+        run: uv run pytest tests/sync/test_delta_blast_radius.py -n0 -q
+
+  # The container/SDK-backed integration tests, isolated so their slower setup can't hold up
+  # the fast signal above. ubuntu-latest ships a running Docker daemon (used by testcontainers).
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync workspace
+        run: uv sync --frozen
+
+      - name: Run integration suite (Oracle / PostgreSQL / MySQL / Roslyn)
+        # -n0 overrides the default `-n auto` (pyproject addopts): these tests share session-scoped
+        # Oracle/PostgreSQL/MySQL testcontainers that must NOT be spun up once per xdist worker.
+        run: uv run pytest $HEAVY_TESTS -n0

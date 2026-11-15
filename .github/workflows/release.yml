@@ -1,0 +1,145 @@
+name: release
+
+# Builds every distribution (the `falkordb-auryn` umbrella + every `auryn-*` package under
+# packages/) and publishes them to PyPI in one lockstep release, authenticated with a PyPI API
+# token stored as a GitHub Actions secret.
+#
+# Publishing is GATED on the full test suite (tests.yml, reused): if the suite is red, neither
+# publish job runs, so a broken version can't be released.
+#
+# Two ways to run it:
+#   * Cut a GitHub Release (tag `vX.Y.Z`)  -> builds that version and publishes to PyPI.
+#   * Manually (workflow_dispatch)         -> pick TestPyPI (dry run) or PyPI, and a version.
+#
+# ONE-TIME SETUP:
+#   1. Create an ACCOUNT-SCOPED PyPI API token at https://pypi.org/manage/account/token/ and add
+#      it to this repo as the Actions secret `PYPI_API_TOKEN`. Account scope is required for the
+#      first release because the projects don't exist yet; afterwards you can rotate to a token
+#      scoped to just these projects.
+#   2. Same on https://test.pypi.org/manage/account/token/ -> repo secret `TEST_PYPI_API_TOKEN`.
+#
+# (A token is used rather than Trusted Publishing because PyPI's *pending* publishers require a
+# unique workflow config per project, which a multi-package monorepo sharing one workflow can't
+# satisfy. Once the projects exist you may migrate to per-project trusted publishers.)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to publish"
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
+      version:
+        description: "Version to build (e.g. 0.2.0). Blank = derive from the release tag."
+        type: string
+        default: ""
+
+# The workflow only reads the repo; publishing authenticates with the PyPI API token secret.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Full test suite (tests.yml, reused) — a hard gate: nothing publishes unless it passes.
+  # Runs in parallel with `build`; the publish jobs below require BOTH to succeed.
+  test:
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Resolve version (dispatch input, else release tag)
+        id: ver
+        run: |
+          v="${{ github.event.inputs.version }}"
+          [ -z "$v" ] && v="${GITHUB_REF_NAME#v}"
+          [ -z "$v" ] && { echo "::error::could not resolve a version"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Releasing version $v"
+
+      - name: Stamp the version into every package (single source of truth = the tag)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          python - <<'PY'
+          import os, re, pathlib
+          version = os.environ["VERSION"]
+          files = [pathlib.Path("pyproject.toml"), *sorted(pathlib.Path("packages").glob("*/pyproject.toml"))]
+          for f in files:
+              text = f.read_text()
+              new, n = re.subn(r'(?m)^version = "[^"]*"', f'version = "{version}"', text, count=1)
+              assert n == 1, f"no [project] version line found in {f}"
+              f.write_text(new)
+              print(f"{f} -> {version}")
+          print(f"stamped {len(files)} packages")
+          PY
+
+      - name: Build the umbrella + every member package
+        run: |
+          rm -rf dist && mkdir -p dist
+          uv build --out-dir dist .                    # falkordb-auryn (umbrella)
+          for d in packages/*/; do
+            uv build --out-dir dist "$d"               # auryn-core + every language/feature dist
+          done
+
+      - name: Sanity check — one wheel per workspace package (+ umbrella)
+        run: |
+          ls -1 dist
+          n=$(ls -1 dist/*.whl | wc -l)
+          members=$(ls -1d packages/*/ | wc -l)
+          expected=$(( members + 1 ))   # every packages/* member + the umbrella
+          echo "built $n wheels; expected $expected ($members members + umbrella)"
+          test "$n" -eq "$expected" || { echo "::error::expected $expected wheels, got $n"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # Manual dry run: workflow_dispatch with target=testpypi.
+  publish-testpypi:
+    needs: [build, test]
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          skip-existing: true
+          attestations: false
+
+  # Real publish: on a GitHub Release, or manual dispatch with target=pypi.
+  publish-pypi:
+    needs: [build, test]
+    if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+          attestations: false

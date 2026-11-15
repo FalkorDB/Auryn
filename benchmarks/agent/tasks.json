@@ -1,0 +1,74 @@
+{
+  "target_repo": "https://github.com/FalkorDB/falkordb-py",
+  "graph_name": "falkordb_py",
+  "project_name": "falkordb-py",
+  "notes": "Gold key-facts verified against the FalkorDB-py source + code graph. Grading = (covered + 0.5*partial)/total per graphify's methodology. Tasks span locate / who-calls / inheritance / inventory / call-closure / (a file-favorable exception control). T5 deliberately includes a fact the graph can't see (external execute_command) to test whether the graph-armed agent notices the gap.",
+  "tasks": [
+    {
+      "id": "T1_locate",
+      "capability": "locate + callees",
+      "question": "In the falkordb Python package, which method on the `Graph` class runs a Cypher query against the database, and what internal method does it delegate to? Name both.",
+      "gold_facts": [
+        "The public method is Graph.query (in falkordb/graph.py)",
+        "Graph.query delegates to the internal method Graph._query"
+      ]
+    },
+    {
+      "id": "T2_who_calls",
+      "capability": "who_calls",
+      "question": "Which methods of the falkordb `Graph` class call its internal `_query` method?",
+      "gold_facts": [
+        "Graph.query calls _query",
+        "Graph.ro_query calls _query",
+        "Graph.call_procedure calls _query"
+      ]
+    },
+    {
+      "id": "T3_inheritance",
+      "capability": "inheritance / locate",
+      "question": "Does falkordb provide an asynchronous version of the `Graph` class? If so, name the class, say what it inherits from, and give the file it's defined in.",
+      "gold_facts": [
+        "The async class is AsyncGraph",
+        "AsyncGraph inherits from (extends) Graph",
+        "AsyncGraph is defined in falkordb/asyncio/graph.py"
+      ]
+    },
+    {
+      "id": "T4_inventory",
+      "capability": "inventory (methods by prefix)",
+      "question": "List every index-or-constraint creation method on the falkordb `Graph` class (its methods whose names start with `create_`).",
+      "gold_facts": [
+        "create_node_range_index",
+        "create_node_fulltext_index",
+        "create_node_vector_index",
+        "create_node_unique_constraint",
+        "create_node_mandatory_constraint",
+        "create_edge_range_index",
+        "create_edge_fulltext_index",
+        "create_edge_vector_index",
+        "create_edge_unique_constraint",
+        "create_edge_mandatory_constraint"
+      ]
+    },
+    {
+      "id": "T5_closure",
+      "capability": "call-closure / behavior (with a real graph gap)",
+      "question": "Trace what happens when Graph.query() is called: what does it call internally, and how does the query ultimately get sent to the FalkorDB server?",
+      "gold_facts": [
+        "Graph.query calls the internal _query method",
+        "_query builds a parameters header (via _build_params_header)",
+        "the query is ultimately sent to the server by issuing a Redis command through the connection (execute_command / GRAPH.QUERY)"
+      ]
+    },
+    {
+      "id": "T6_exception_control",
+      "capability": "exception (file-favorable control)",
+      "question": "What exception does falkordb raise on a graph schema version mismatch, what does it inherit from, and where (which file) is it defined?",
+      "gold_facts": [
+        "The exception is SchemaVersionMismatchException",
+        "it inherits from the built-in Exception",
+        "it is defined in falkordb/exceptions.py"
+      ]
+    }
+  ]
+}

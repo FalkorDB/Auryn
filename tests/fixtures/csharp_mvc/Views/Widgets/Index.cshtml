@@ -1,0 +1,23 @@
+@model IEnumerable<Sample.Web.WidgetDto>
+
+<h2>Widgets</h2>
+
+@(Html.Kendo().Grid<Sample.Web.WidgetDto>()
+    .Name("widgetsGrid")
+    .Columns(columns =>
+    {
+        columns.Bound(w => w.Id);
+        columns.Bound(w => w.Name);
+    })
+    .DataSource(dataSource => dataSource
+        .Ajax()
+        .Read(read => read.Action("List", "Widgets"))
+        .Update(update => update.Action("Save", "Widgets"))
+    )
+    .Events(events => events.Change("onWidgetChange"))
+)
+
+@using (Html.BeginForm("Save", "Widgets"))
+{
+    <input type="submit" value="Save" />
+}

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Dependency-free: the MVC surfaces (Controller base, ActionResult/JsonResult)
+       are declared locally in Mvc.cs so the C# builds offline. The .cshtml view is
+       parsed as text by the Kendo ingestor (never compiled), so it may reference the
+       Kendo HtmlHelper API freely without any package. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultContentItems>false</EnableDefaultContentItems>
+  </PropertyGroup>
+
+</Project>

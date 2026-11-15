@@ -1,0 +1,9 @@
+[project]
+name = "meridian-platform-core"
+version = "1.4.0"
+description = "Meridian shared domain service: billing, accounts, ledger, audit."
+requires-python = ">=3.10"
+dependencies = ["fastapi>=0.110"]
+
+[tool.setuptools]
+packages = ["meridian"]

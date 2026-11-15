@@ -1,0 +1,31 @@
+[project]
+name = "auryn-csharp"
+version = "0.1.0"
+description = "C# language plugin for Auryn: fast tree-sitter parse + deep Roslyn extractor (bundled source, built on demand; requires the .NET SDK)."
+authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
+requires-python = ">=3.12"
+license = { text = "SSPL-1.0" }
+dependencies = [
+    "auryn-core",
+    "click>=8.1",
+    "tree-sitter>=0.26.0",
+    "tree-sitter-c-sharp>=0.23.5",
+]
+
+# `auryn.languages` -> import-light lazy GitLanguage (no tree-sitter/Roslyn at
+# discovery); `auryn.ingestors` -> the live-DB CSharpIngestor, loaded only by
+# `auryn run`. See core/registry.py.
+[project.entry-points."auryn.languages"]
+csharp = "auryn.ingestors.csharp.plugin"
+
+[project.entry-points."auryn.ingestors"]
+csharp = "auryn.ingestors.csharp.ingestor"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auryn"]
+# Ship the bundled Roslyn extractor's source (.cs/.csproj) but never any local build output.
+exclude = ["**/roslyn_extractor/bin/**", "**/roslyn_extractor/obj/**"]

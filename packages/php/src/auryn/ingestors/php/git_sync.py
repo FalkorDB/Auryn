@@ -1,0 +1,134 @@
+"""Git-tracked (and directory) PHP ingestion: moves a project's PHP subgraph to a target
+commit/tree by fully recomputing the target state and diffing it against the graph
+(graph_sync.compute_delta) -- the same recompute-and-delta model as the Java/C/C#/Python
+ingestors (resolution is global -- the project-wide type/method/function index -- so a file-level
+diff can't tell which untouched files a change affects).
+
+Fast engine only for now: tree-sitter-php streams each `.php` blob (no disk materialization,
+no autoloader/composer resolution) -> RawFile -> resolution.resolve(). A deep pass (full PHP
+name-resolution: use-statement aliasing, PSR-4 autoloading, trait-flattened and inherited-member
+call targets) would be added as the GitLanguage's `deep_sync` (see plugin.py). Registered as the
+`php` GitLanguage for the multi-language endpoint (core/ingest.py) in both ingest_repository (git)
+and ingest_directory (local)."""
+
+from __future__ import annotations
+
+import itertools
+import logging
+import time
+from dataclasses import dataclass
+
+from auryn.core.parallel import parse_blobs_ordered
+from auryn.core.graph_model import GraphNode
+from auryn.core.graph_sync import stream_apply
+from auryn.core.registry import LanguageIngestResult
+from auryn.ingestors.php import resolution
+from auryn.ingestors.php.file_parser import parse_source
+from auryn.ingestors.php.ids import project_id
+from auryn.ingestors.php.plugin import EXCLUDED_DIR_NAMES as _EXCLUDED_DIR_NAMES
+from auryn.ingestors.php.plugin import FILE_SUFFIXES as _FILE_SUFFIXES
+from auryn.ingestors.php.schema import NODE_SCHEMAS
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SyncStats:
+    nodes_added: int = 0
+    nodes_updated: int = 0
+    nodes_removed: int = 0
+    edges_added: int = 0
+    edges_updated: int = 0
+    edges_removed: int = 0
+    commit_sha: str = ""
+    elapsed_seconds: float = 0.0
+    files_parsed: int = 0
+    files_cached: int = 0
+
+
+def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, ref: str | None) -> SyncStats:
+    """Recompute the whole PHP subgraph at `target_sha` and delta it onto the graph. `source`
+    is duck-typed (GitRepoCache or LocalDirectorySource): only list_files/read_blob used."""
+    started = time.monotonic()
+    proj_id = project_id(project_name)
+
+    writer.setup_schema(NODE_SCHEMAS)  # brings the graph key into existence before the first read
+    if writer.get_property("Project", {"id": proj_id}, "commit_sha") == target_sha:
+        return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
+
+    entries = [
+        (path, blob_sha)
+        for suffix in _FILE_SUFFIXES
+        for path, blob_sha in source.list_files(target_sha, suffix, set(_EXCLUDED_DIR_NAMES))
+    ]
+    files = parse_blobs_ordered(
+        entries, source.read_blob, parse_source,
+        preload=["auryn.ingestors.php.file_parser"], logger=logger,
+    )
+
+    project_node = GraphNode(
+        "Project", {"id": proj_id}, {"name": project_name, "repo_uri": repo_uri, "commit_sha": target_sha, "ref": ref}
+    )
+
+    def make_target():  # re-iterable: stream_apply runs it once for nodes, once for edges
+        return itertools.chain([project_node], resolution.resolve(files, proj_id))
+
+    return _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(files))
+
+
+def _apply(writer, proj_id: str, make_target, target_sha: str, started: float, files_parsed: int) -> SyncStats:
+    # Cross-repo reconciliation (ADR 0004): fold placeholder<->definer pairs among the linkages
+    # this ingest touched -- targeted index seeks, no scan. No-op unless the graph holds >1 repo.
+    from auryn.core.linkage import reconcile_linkages
+
+    # stream_apply writes the delta without materialising the target graph, and returns the
+    # linkage strings collected inline (see graph_sync.stream_apply / core.linkage).
+    labels = [s.label for s in NODE_SCHEMAS]
+    stats, reals, placeholders = stream_apply(writer, proj_id, labels, make_target)
+    reconcile_linkages(writer, reals, placeholders)
+
+    return SyncStats(
+        nodes_added=stats.nodes_added,
+        nodes_updated=stats.nodes_updated,
+        nodes_removed=stats.nodes_removed,
+        edges_added=stats.edges_added,
+        edges_updated=stats.edges_updated,
+        edges_removed=stats.edges_removed,
+        commit_sha=target_sha,
+        elapsed_seconds=time.monotonic() - started,
+        files_parsed=files_parsed,
+        files_cached=0,
+    )
+
+
+def _git_language_sync(
+    writer,
+    source,
+    target_sha: str,
+    *,
+    repo_uri: str,
+    project_name: str,
+    solution_name: str | None,
+    ref: str | None,
+    cache_root=None,
+) -> LanguageIngestResult:
+    """GitLanguage adapter for the multi-language endpoint (PHP has no solution/cache knobs --
+    accepted for the shared interface and ignored)."""
+    s = sync_at(writer, source, target_sha, project_name=project_name, repo_uri=repo_uri, ref=ref)
+    return LanguageIngestResult(
+        nodes_added=s.nodes_added,
+        nodes_updated=s.nodes_updated,
+        nodes_removed=s.nodes_removed,
+        edges_added=s.edges_added,
+        edges_updated=s.edges_updated,
+        edges_removed=s.edges_removed,
+        files_parsed=s.files_parsed,
+        files_cached=s.files_cached,
+        commit_sha=s.commit_sha,
+        elapsed_seconds=s.elapsed_seconds,
+    )
+
+
+# The GitLanguage is registered by the import-light plugin.py (the entry-point target), whose
+# lazy `sync` thunk calls `_git_language_sync` above -- so importing this tree-sitter engine
+# module is deferred until a source actually contains PHP files.

@@ -1,0 +1,81 @@
+{
+  "meta": {
+    "title": "Auryn — live agent demo",
+    "system": "Meridian: web-portal (TS) · api-gateway (C#) · platform-core (Python) · platform-db (SQL)",
+    "note": "Faithful condensation of a real agent session; every tool call and result is grounded in actual auryn output."
+  },
+  "conversation": [
+    {
+      "user": "new here — how does a checkout actually flow through this system?",
+      "plan": "Nothing indexed yet — I'll build the graph across the repos, find the checkout action, then trace it.",
+      "actions": [
+        {
+          "tool": "auryn",
+          "call": "index_repository ×4",
+          "result": ["\"meridian\": 225 nodes · TS · C# · Python · SQL"]
+        },
+        {
+          "tool": "auryn",
+          "call": "locate(\"checkout\")",
+          "result": ["CheckoutButton (web-portal)"]
+        },
+        {
+          "tool": "auryn",
+          "call": "trace_entrypoint(CheckoutButton)",
+          "result": [
+            "web-portal     CheckoutButton → placeOrder        ──POST /api/orders──▶",
+            "api-gateway    PlaceOrder → Checkout              ──POST /charge──▶",
+            "platform-core  charge_endpoint → billing.charge → authorize · ledger.record · audit.write · db"
+          ]
+        }
+      ],
+      "answer": "One checkout crosses 3 languages and 2 services — a single traced path."
+    },
+    {
+      "user": "can any user-supplied input reach a dangerous sink?",
+      "plan": "I'll list the risky external calls, see what invokes the worst one, then trace its public endpoint.",
+      "actions": [
+        {
+          "tool": "auryn",
+          "call": "run_cypher(\"MATCH (f:Function) WHERE f.resolved = false AND f.name IN ['eval','exec','system','run'] RETURN f.qualified_name\")",
+          "result": ["builtins.eval  ⚠", "subprocess.run"]
+        },
+        {
+          "tool": "auryn",
+          "call": "who_calls(\"builtins.eval\")",
+          "result": ["meridian.billing.apply_promo"]
+        },
+        {
+          "tool": "auryn",
+          "call": "trace_entrypoint(\"POST /api/promotions\")",
+          "result": [
+            "ApplyPromo → promo_endpoint → apply_promo → eval(code)  ⚠"
+          ]
+        }
+      ],
+      "answer": "Yes — the public POST /api/promotions endpoint reaches builtins.eval via apply_promo. A promo code from the UI runs as code in platform-core. RCE."
+    },
+    {
+      "user": "fix it — and confirm nothing reaches eval anymore",
+      "plan": "I'll replace the eval with a fixed lookup at the sink, commit, then re-run the same trace.",
+      "actions": [
+        {
+          "tool": "editor",
+          "call": "apply_promo → fixed promo lookup table",
+          "result": ["eval removed"]
+        },
+        {
+          "tool": "shell",
+          "call": "git commit",
+          "result": ["commit-hook → graph re-synced automatically"]
+        },
+        {
+          "tool": "auryn",
+          "call": "trace_entrypoint(\"POST /api/promotions\")",
+          "result": ["ApplyPromo → promo_endpoint → apply_promo → billing.charge   (no eval)"]
+        }
+      ],
+      "answer": "Fixed. The graph re-synced itself on commit — the promotions path now reaches only billing.charge. eval is gone."
+    }
+  ]
+}

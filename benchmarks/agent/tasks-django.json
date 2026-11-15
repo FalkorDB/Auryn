@@ -1,0 +1,51 @@
+{
+  "target_repo": "https://github.com/django/django",
+  "graph_name": "django",
+  "project_name": "django",
+  "notes": "Large repo (~2,900 files) so the no-graph arm must grep/read widely. Gold facts verified against the Django source + code graph. T1/T2 are cross-cutting/transitive (expensive without a graph); T3 inheritance; T4 a trivial locate control (where the graph's fixed overhead may not pay off).",
+  "tasks": [
+    {
+      "id": "T1_who_calls_import_string",
+      "capability": "who_calls (cross-cutting)",
+      "question": "Across the Django codebase, which functions or methods call `import_string` (the helper defined in django.utils.module_loading)? Name the callers you find and roughly how widespread it is.",
+      "gold_facts": [
+        "AppConfig.create (django/apps/config.py) calls import_string",
+        "django.contrib.auth.load_backend calls import_string",
+        "get_hashers in django.contrib.auth.hashers calls import_string",
+        "get_password_validators in django.contrib.auth.password_validation calls import_string",
+        "import_string is called from many places (on the order of ~40) spread across django.apps, django.contrib.auth, django.contrib.admin and django.contrib.messages"
+      ]
+    },
+    {
+      "id": "T2_reverse_closure",
+      "capability": "behavioral_inventory / callees (transitive)",
+      "question": "Trace what django.urls.base.reverse() does when called: which functions does it call directly, and what does it reach transitively down into the URL resolver internals?",
+      "gold_facts": [
+        "reverse calls get_resolver (django.urls.resolvers)",
+        "reverse calls URLResolver._reverse_with_prefix",
+        "reverse calls get_urlconf and get_script_prefix (from django.urls.base)",
+        "reverse calls get_ns_resolver for namespaced URL names",
+        "transitively it reaches URLResolver._populate, which builds the reverse-lookup tables"
+      ]
+    },
+    {
+      "id": "T3_model_inheritance",
+      "capability": "inheritance",
+      "question": "What does django.db.models.base.Model inherit from? Give its base class(es), the metaclass it is built with, and its method resolution order (MRO).",
+      "gold_facts": [
+        "Model inherits from AltersData (django.db.models.utils.AltersData)",
+        "Model is created with the ModelBase metaclass",
+        "Model's MRO is Model -> AltersData -> object"
+      ]
+    },
+    {
+      "id": "T4_locate_control",
+      "capability": "locate (trivial control)",
+      "question": "Where is the `reverse` URL helper defined (which file), and what is its call signature?",
+      "gold_facts": [
+        "reverse is defined in django/urls/base.py",
+        "its signature takes viewname plus urlconf, args, kwargs, current_app (and, in recent versions, query and fragment)"
+      ]
+    }
+  ]
+}

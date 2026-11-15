@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Code Graph</title>
+<link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+
+<!-- Full-bleed WebGL canvas -->
+<div id="stage">
+  <div id="graph"></div>
+  <div id="veil" class="veil">
+    <div class="glyph">◍</div>
+    <div class="hint" id="veil-hint">Select a graph to begin</div>
+  </div>
+</div>
+
+<!-- Top-left: brand, graph picker, search -->
+<section class="panel command">
+  <div class="brandline">
+    <span class="brandmark" aria-hidden="true"></span>
+    <h1>Code Graph</h1>
+    <span class="sep"></span>
+    <select id="graph-picker" class="graph-picker" aria-label="Graph">
+      <option value="">No graph</option>
+    </select>
+  </div>
+  <div class="search" role="search">
+    <span class="icon" aria-hidden="true">⌕</span>
+    <input id="search-input" type="text" placeholder="Search entities…" autocomplete="off"
+           aria-label="Search entities" spellcheck="false" />
+    <button id="search-mode" class="search-mode" type="button" aria-pressed="false"
+            aria-label="Toggle semantic search — find code by meaning, not name"
+            title="Semantic search — find code by meaning, not name">✨</button>
+    <select id="search-scope" class="scope" aria-label="Restrict search to a category">
+      <option value="">any</option>
+    </select>
+  </div>
+  <ul id="results" class="results scroll" role="listbox" aria-label="Search results"></ul>
+</section>
+
+<!-- Left: legend / display controls / git -->
+<section class="panel legend">
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" data-tab="display" aria-selected="true">Display</button>
+    <button class="tab" role="tab" data-tab="path" aria-selected="false">Path</button>
+    <button class="tab" role="tab" data-tab="query" aria-selected="false">Query</button>
+    <button class="tab" role="tab" data-tab="schema" aria-selected="false">Schema</button>
+    <button class="tab" role="tab" data-tab="git" aria-selected="false">Sources</button>
+  </div>
+
+  <!-- Display: per-category colour + visibility + global prefs -->
+  <div class="tabpage" data-tab="display" data-active="true">
+    <div class="prefs">
+      <div class="pref">
+        <label for="pref-captions">Node captions</label>
+        <span class="switch"><input type="checkbox" id="pref-captions" checked /><span class="track"></span><span class="thumb"></span></span>
+      </div>
+      <div class="pref">
+        <label for="pref-edge-labels">Relationship labels</label>
+        <span class="switch"><input type="checkbox" id="pref-edge-labels" /><span class="track"></span><span class="thumb"></span></span>
+      </div>
+      <div class="pref">
+        <label for="pref-communities">Colour by community</label>
+        <span class="switch"><input type="checkbox" id="pref-communities" /><span class="track"></span><span class="thumb"></span></span>
+      </div>
+    </div>
+    <div class="body scroll">
+      <div class="cat-toolbar">
+        <span class="eyebrow">Categories</span>
+        <button class="linkbtn" id="cats-all">Show all</button>
+        <button class="linkbtn" id="cats-none">Hide all</button>
+        <button class="linkbtn" id="cats-reset">Reset colours</button>
+      </div>
+      <ul id="cats" class="cats"></ul>
+      <p class="placeholder" id="cats-empty">Select a graph to see its categories.</p>
+
+      <!-- Community legend: shown only while "Colour by community" is on -->
+      <div id="community-legend" class="community-legend" hidden>
+        <div class="cat-toolbar"><span class="eyebrow" id="community-legend-title">Communities</span></div>
+        <ul id="community-list" class="cats"></ul>
+        <p class="cat-hint" id="community-hint"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Path finder: shortest connection between two entities -->
+  <div class="tabpage" data-tab="path">
+    <div class="path-pane scroll">
+      <div class="path-ends">
+        <div class="path-end">
+          <span class="eyebrow">From</span>
+          <div class="path-picker">
+            <div class="path-inputrow">
+              <span class="pdot" id="path-from-dot" hidden></span>
+              <input id="path-from" class="path-input mono" type="text" placeholder="Start entity…"
+                     autocomplete="off" spellcheck="false" aria-label="Path start entity" />
+              <button class="path-clear" id="path-from-clear" title="Clear" aria-label="Clear start" hidden>✕</button>
+            </div>
+            <ul id="path-from-results" class="results path-results scroll" role="listbox" aria-label="Start matches"></ul>
+          </div>
+        </div>
+
+        <button id="path-swap" class="path-swap" title="Swap endpoints" aria-label="Swap endpoints">⇅</button>
+
+        <div class="path-end">
+          <span class="eyebrow">To</span>
+          <div class="path-picker">
+            <div class="path-inputrow">
+              <span class="pdot" id="path-to-dot" hidden></span>
+              <input id="path-to" class="path-input mono" type="text" placeholder="End entity…"
+                     autocomplete="off" spellcheck="false" aria-label="Path end entity" />
+              <button class="path-clear" id="path-to-clear" title="Clear" aria-label="Clear end" hidden>✕</button>
+            </div>
+            <ul id="path-to-results" class="results path-results scroll" role="listbox" aria-label="End matches"></ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="path-opts">
+        <label class="path-opt" for="path-directed">
+          <span>Follow edge direction</span>
+          <span class="switch"><input type="checkbox" id="path-directed" checked /><span class="track"></span><span class="thumb"></span></span>
+        </label>
+        <label class="path-opt" for="path-depth">
+          <span>Max hops</span>
+          <input type="number" id="path-depth" class="path-depth mono" min="1" max="10" value="6" />
+        </label>
+      </div>
+
+      <div class="path-actions">
+        <button id="path-find" class="btn-primary">Find path</button>
+        <button id="path-clear-btn" class="linkbtn">Clear</button>
+        <span class="query-status" id="path-status"></span>
+      </div>
+
+      <div id="path-result" class="path-result"></div>
+
+      <p class="query-hint">Pick two entities — or right-click a node on the canvas and choose
+        <em>Path from</em> / <em>Path to</em>. The shortest connection is traced on the graph.</p>
+    </div>
+  </div>
+
+  <!-- Cypher query -->
+  <div class="tabpage" data-tab="query">
+    <div class="query-pane">
+      <textarea id="query-input" class="query-input" spellcheck="false" autocomplete="off"
+        placeholder="MATCH (n:Class)-[r:CALLS]->(m) RETURN n, r, m LIMIT 50"></textarea>
+      <div class="query-actions">
+        <button id="query-run" class="btn-primary">Run</button>
+        <button id="query-clear" class="linkbtn">Clear canvas</button>
+        <span class="query-status" id="query-status"></span>
+      </div>
+      <p class="query-hint">Read-only Cypher, added to the canvas. Return nodes and relationships (e.g. <code>RETURN n, r, m</code>) to draw them. <kbd>⌘/Ctrl</kbd>+<kbd>↵</kbd> to run.</p>
+    </div>
+  </div>
+
+  <!-- Schema: relationship types -->
+  <div class="tabpage" data-tab="schema">
+    <div class="body scroll">
+      <div class="cat-toolbar"><span class="eyebrow">Relationships</span></div>
+      <ul id="rels" class="rels"></ul>
+      <p class="placeholder" id="rels-empty">Select a graph to see its relationships.</p>
+    </div>
+  </div>
+
+  <!-- Git-tracked sources -->
+  <div class="tabpage" data-tab="git">
+    <div class="body scroll">
+      <div id="git-list" class="git-list"></div>
+      <p class="placeholder" id="git-empty">Select a graph to see its tracked sources.</p>
+    </div>
+  </div>
+</section>
+
+<!-- Right: node inspector -->
+<aside class="panel inspector" id="inspector" aria-live="polite">
+  <div class="insp-head">
+    <button class="close" id="insp-close" aria-label="Close inspector">✕</button>
+    <span class="insp-badge" id="insp-badge"><span class="dot"></span><span class="cat"></span></span>
+    <div class="insp-name mono" id="insp-name"></div>
+  </div>
+  <div class="insp-actions" id="insp-actions"></div>
+  <div class="insp-body scroll" id="insp-body"></div>
+</aside>
+
+<!-- Bottom-left: live status -->
+<section class="panel status" id="status" hidden>
+  <span class="metric"><b id="stat-nodes">0</b> nodes</span>
+  <span class="divider"></span>
+  <span class="metric"><b id="stat-edges">0</b> edges</span>
+  <span class="note" id="stat-note"></span>
+</section>
+
+<!-- Bottom-right: canvas controls -->
+<section class="panel controls" id="controls" hidden>
+  <button id="ctl-expand" class="wide" title="Load the whole graph">＋ Expand all</button>
+  <button id="ctl-clear" class="wide" title="Remove everything from the canvas">⌫ Clear</button>
+  <span class="sep"></span>
+  <button id="ctl-relayout" title="Re-run layout">↻</button>
+  <button id="ctl-zoom-in" title="Zoom in">＋</button>
+  <button id="ctl-zoom-out" title="Zoom out">－</button>
+  <button id="ctl-fit" title="Fit to view">⊡</button>
+</section>
+
+<!-- Top-center: multi-selection toolbar (shown only when something is selected) -->
+<section class="panel selbar" id="selbar" hidden aria-live="polite">
+  <span class="sel-count" id="sel-count">0 selected</span>
+  <span class="sep"></span>
+  <button id="sel-expand" class="linkbtn" title="Load neighbours of the selected nodes">Expand</button>
+  <button id="sel-remove" class="linkbtn danger" title="Remove the selection from the canvas">Remove</button>
+  <button id="sel-clear" class="linkbtn" title="Clear the selection">Deselect</button>
+</section>
+
+<div class="toast" id="toast" role="status"></div>
+
+<!-- Vendored WebGL graph stack (UMD → window globals) -->
+<script src="/js/vendor/graphology.umd.min.js"></script>
+<script src="/js/vendor/graphology-library.min.js"></script>
+<script src="/js/vendor/sigma.min.js"></script>
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>
