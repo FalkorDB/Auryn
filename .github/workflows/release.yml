@@ -1,8 +1,9 @@
 name: release
 
 # Builds every distribution (the `falkordb-auryn` umbrella + every `auryn-*` package under
-# packages/) and publishes them to PyPI in one lockstep release, authenticated with a PyPI API
-# token stored as a GitHub Actions secret.
+# packages/) and publishes members before the umbrella, authenticated with a PyPI API token
+# stored as a GitHub Actions secret. An isolated install/quickstart check verifies member
+# availability on the target index before the umbrella is uploaded.
 #
 # Publishing is GATED on the full test suite (tests.yml, reused): if the suite is red, neither
 # publish job runs, so a broken version can't be released.
@@ -90,20 +91,23 @@ jobs:
 
       - name: Build the umbrella + every member package
         run: |
-          rm -rf dist && mkdir -p dist
-          uv build --out-dir dist .                    # falkordb-auryn (umbrella)
+          mkdir -p dist/umbrella dist/members
+          uv build --out-dir dist/umbrella .           # falkordb-auryn (umbrella)
           for d in packages/*/; do
-            uv build --out-dir dist "$d"               # auryn-core + every language/feature dist
+            uv build --out-dir dist/members "$d"        # auryn-core + every language/feature dist
           done
 
       - name: Sanity check — one wheel per workspace package (+ umbrella)
         run: |
-          ls -1 dist
-          n=$(ls -1 dist/*.whl | wc -l)
+          ls -1 dist/umbrella dist/members
+          n=$(find dist -name '*.whl' | wc -l)
           members=$(ls -1d packages/*/ | wc -l)
           expected=$(( members + 1 ))   # every packages/* member + the umbrella
           echo "built $n wheels; expected $expected ($members members + umbrella)"
           test "$n" -eq "$expected" || { echo "::error::expected $expected wheels, got $n"; exit 1; }
+
+      - name: Check wheel install and bundled quickstart outside the workspace
+        run: uv run --no-project --python 3.12 tools/check_release.py dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -117,12 +121,24 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi' }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          packages-dir: dist/members/
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          skip-existing: true
+          attestations: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify published members before exposing the umbrella
+        run: uv run --no-project --python 3.12 tools/check_release.py dist --index-url https://test.pypi.org/simple/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/umbrella/
           repository-url: https://test.pypi.org/legacy/
           password: ${{ secrets.TEST_PYPI_API_TOKEN }}
           skip-existing: true
@@ -134,12 +150,23 @@ jobs:
     if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi') }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          packages-dir: dist/members/
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+          attestations: false
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify published members before exposing the umbrella
+        run: uv run --no-project --python 3.12 tools/check_release.py dist --index-url https://pypi.org/simple/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/umbrella/
           password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
           attestations: false

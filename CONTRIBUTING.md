@@ -103,4 +103,23 @@ asserts that parity, and changing the scheme means changing it in both places (P
   are consistent on purpose; a new one should read like a sibling.
 - Note anything you deliberately left to a future pass (like a deep semantic engine) in the
   module docstring, the way the current ingestors do.
+
+## Publishing
+
+The `release` workflow builds every workspace distribution and publishes the member packages
+before `falkordb-auryn`. Before uploading the umbrella, it downloads every exact member version
+from the target index, installs the umbrella wheel in a fresh environment outside the checkout,
+and runs the bundled quickstart through ingestion and the viewer's HTTP handlers. The blocking
+viewer server loop is replaced for this check; the embedded database and Python plugin are real.
+TestPyPI supplies only the member wheels; third-party dependencies come from PyPI, without using
+an extra index to hide missing members. The same wheel/quickstart check runs on pull requests.
+
+PyPI uploads are not atomic. A first release that creates many projects can fail with
+`429 Too many new projects created`, leaving only some members available. After the account's
+project-creation limit resets (or PyPI support increases it), manually dispatch `release` on the
+fixed branch with the **same version** and target index. `skip-existing` preserves uploaded
+files and resumes the remaining uploads. Only reuse the version for identical release contents;
+changed package contents need a new version. Do not remove required plugins to bypass the error.
+An already-published umbrella becomes installable once all its missing dependencies are uploaded.
+Merging a workflow fix alone does not publish those distributions.
 </content>

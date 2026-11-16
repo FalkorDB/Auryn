@@ -30,6 +30,21 @@ env:
     tests/ingestors/csharp/test_roslyn.py
 
 jobs:
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Test release availability gate
+        run: uv run --no-project --python 3.12 -m unittest discover -s tools -p 'test_release.py' -v
+      - name: Build release wheels
+        run: |
+          uv build --all-packages --out-dir dist/members
+          mkdir -p dist/umbrella
+          mv dist/members/falkordb_auryn-* dist/umbrella/
+      - name: Check isolated install and bundled quickstart
+        run: uv run --no-project --python 3.12 tools/check_release.py dist
+
   # Fast signal on every push/PR: the whole workspace suite on the embedded FalkorDB backend,
   # no Docker, no .NET. This is the bulk of the 700+ tests.
   test:
