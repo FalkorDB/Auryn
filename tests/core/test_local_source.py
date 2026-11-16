@@ -1,7 +1,8 @@
 """Unit tests for LocalDirectorySource -- the directory-backed stand-in that lets the
 git ingestion pipeline run over a plain folder. Pure filesystem, no graph/git needed.
 It must present the same list_files/read_blob/working_tree surface as GitRepoCache so
-core/ingest.py can treat the two interchangeably.
+core/ingest.py can treat the two interchangeably. (The one WorkingTreeSource test at the
+end does build a real git repo: its change detection is `git diff`.)
 """
 
 from __future__ import annotations
@@ -160,7 +161,7 @@ def test_changed_since_never_runs_the_base_commit_as_an_option(tmp_path):
     """`base_commit` is the commit read back from the graph: a value there that starts with `-`
     must fail as a bad revision (-> the caller's full-resync fallback), not run as a git option."""
     root = tmp_path / "repo"
-    repo = git.Repo.init(str(root), initial_branch="main")
+    repo = git.Repo.init(str(root))
     with repo.config_writer() as cw:
         cw.set_value("user", "email", "test@example.com")
         cw.set_value("user", "name", "Test")
