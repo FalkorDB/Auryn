@@ -72,6 +72,13 @@ def test_loopback_viewer_serves_loopback_host_names_only(falkordb_connection):
         assert other.get("/api/graphs", headers={"Host": "evil.example:8080"}).status_code == 403, bind
         assert other.get("/api/graphs", headers={"Host": "127.0.0.1:8080"}).status_code == 200, bind
 
+    # ...including spellings only the OS resolver accepts (all bind 127.0.0.1); an unresolvable
+    # bind name fails closed
+    for bind in ("127.1", "2130706433", "0x7f.1", "no-such-host.invalid"):
+        other = create_app(falkordb_connection, bind).test_client()
+        assert other.get("/api/graphs", headers={"Host": "evil.example:8080"}).status_code == 403, bind
+        assert other.get("/api/graphs", headers={"Host": f"{bind}:8080"}).status_code == 200, bind
+
     exposed = create_app(falkordb_connection, "0.0.0.0").test_client()
     assert exposed.get("/api/graphs", headers={"Host": "box.lan:8080"}).status_code == 200
 
