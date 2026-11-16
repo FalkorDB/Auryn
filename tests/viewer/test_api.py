@@ -61,10 +61,16 @@ def test_loopback_viewer_serves_loopback_host_names_only(falkordb_connection):
     name in Host. Bound to loopback (the default) it answers only to loopback names; bound
     elsewhere on purpose (`--host 0.0.0.0`) it serves whatever name it is reached under."""
     client = create_app(falkordb_connection).test_client()
-    for host in ("localhost", "localhost:8080", "127.0.0.1:8080", "[::1]:8080", "[::1]"):
+    for host in ("localhost", "LOCALHOST:8080", "127.0.0.1:8080", "127.0.0.2:8080", "[::1]:8080", "[::1]"):
         assert client.get("/api/graphs", headers={"Host": host}).status_code == 200, host
-    for host in ("evil.example", "evil.example:8080", "localhost.evil.example:8080"):
+    for host in ("evil.example", "evil.example:8080", "localhost.evil.example:8080", "10.0.0.5:8080"):
         assert client.get("/api/graphs", headers={"Host": host}).status_code == 403, host
+
+    # a loopback bind is one whatever its spelling -- the guard must not depend on the literal
+    for bind in ("localhost", "127.0.0.2", "::1", "0:0:0:0:0:0:0:1"):
+        other = create_app(falkordb_connection, bind).test_client()
+        assert other.get("/api/graphs", headers={"Host": "evil.example:8080"}).status_code == 403, bind
+        assert other.get("/api/graphs", headers={"Host": "127.0.0.1:8080"}).status_code == 200, bind
 
     exposed = create_app(falkordb_connection, "0.0.0.0").test_client()
     assert exposed.get("/api/graphs", headers={"Host": "box.lan:8080"}).status_code == 200
