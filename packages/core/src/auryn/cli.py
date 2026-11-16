@@ -587,14 +587,17 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
     import dataclasses
 
     from auryn.core.app_config import get_repo
-    from auryn.core.ingest import ingest_directory
+    from auryn.core.ingest import ingest_directory, join_deep_phase
     from auryn.core.project import default_graph_name, resolve_project_root
     from auryn.core.sync_lock import sync_lock
 
     root = resolve_project_root(path)
     # One sync per repo at a time: the git hooks fire a burst of these (a rebase starts one per
     # commit) and overlapping syncs of one project corrupt its subgraph. See core/sync_lock.py.
-    with sync_lock(root) as my_turn:
+    # Only the plain hook-shaped sync may step aside for a queued one -- a deep pass or another
+    # server is work the queued sync won't do, so that request waits for its own turn.
+    plain = deep == "off" and not any((host, port, username, password, ssl))
+    with sync_lock(root, queue_one=plain) as my_turn:
         if not my_turn:
             click.echo(f"A sync of {root} is already queued; it will pick up this change.")
             return
@@ -604,6 +607,7 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
         config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
         report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
                                   deep=deep, auto_install=False)
+        join_deep_phase()  # `--deep background` writers are still this sync: hold the lock for them
     _echo_ingest_report(report)
 
 

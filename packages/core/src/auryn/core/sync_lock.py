@@ -24,22 +24,27 @@ from auryn.core.project import default_graph_name
 
 
 @contextlib.contextmanager
-def sync_lock(local_dir: Path) -> Iterator[bool]:
+def sync_lock(local_dir: Path, *, queue_one: bool = True) -> Iterator[bool]:
     """Yields True once it is this sync's turn for `local_dir` (blocking while another runs), or
-    False straight away when a sync of it is already waiting its turn -- this one is redundant."""
+    False straight away when a sync of it is already waiting its turn -- this one is redundant.
+
+    `queue_one=False` is for a sync the queued one would NOT cover -- it asks for a deep pass, or
+    targets another server: it never steps aside, it just waits for its turn."""
     if fcntl is None:
         yield True
         return
     run_dir().mkdir(parents=True, exist_ok=True)
     stem = run_dir() / f"sync-{default_graph_name(local_dir)}"  # basename + a hash of the path
     with open(f"{stem}.queued", "w") as queued, open(f"{stem}.lock", "w") as running:
-        try:
-            fcntl.flock(queued, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            yield False
-            return
+        if queue_one:
+            try:
+                fcntl.flock(queued, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:  # held: one is queued already (any other error is a real one)
+                yield False
+                return
         fcntl.flock(running, fcntl.LOCK_EX)  # wait out the sync in progress, if any
-        fcntl.flock(queued, fcntl.LOCK_UN)  # running now: the next trigger may queue behind us
+        if queue_one:
+            fcntl.flock(queued, fcntl.LOCK_UN)  # running now: the next trigger may queue behind us
         try:
             yield True
         finally:

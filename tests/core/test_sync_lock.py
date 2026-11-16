@@ -28,7 +28,7 @@ def test_a_burst_of_syncs_runs_one_queues_one_and_drops_the_rest(tmp_path, monke
 
     with sync_lock(repo) as running:  # the sync in progress
         assert running is True
-        waiters = [threading.Thread(target=trigger) for _ in range(3)]
+        waiters = [threading.Thread(target=trigger, daemon=True) for _ in range(3)]
         for t in waiters:
             t.start()
         # whichever arrives first queues (and blocks); the other two are redundant and told so now
@@ -37,6 +37,29 @@ def test_a_burst_of_syncs_runs_one_queues_one_and_drops_the_rest(tmp_path, monke
     assert turns.get(timeout=10) is True  # ...and gets its turn once we are done
     for t in waiters:
         t.join(timeout=10)
+    assert not any(t.is_alive() for t in waiters)
+
+
+def test_a_sync_the_queued_one_would_not_cover_waits_instead_of_stepping_aside(tmp_path, monkeypatch):
+    """`queue_one=False` (a deep pass, another server): never told it is redundant -- it runs."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    turns: queue.Queue = queue.Queue()
+
+    def trigger(queue_one):
+        with sync_lock(repo, queue_one=queue_one) as my_turn:
+            turns.put(my_turn)
+
+    with sync_lock(repo):
+        waiters = [threading.Thread(target=trigger, args=(q,), daemon=True) for q in (True, False, False)]
+        for t in waiters:
+            t.start()
+        with pytest.raises(queue.Empty):  # one queued, two waiting -- nobody steps aside
+            turns.get(timeout=0.5)
+    assert [turns.get(timeout=10) for _ in waiters] == [True, True, True]  # each got its own turn
+    for t in waiters:
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in waiters)
 
 
 def test_another_repo_is_not_held_up(tmp_path, monkeypatch):
@@ -45,11 +68,16 @@ def test_another_repo_is_not_held_up(tmp_path, monkeypatch):
         assert (a, b) == (True, True)
 
 
-def test_sync_command_steps_aside_when_one_is_already_queued(tmp_path, monkeypatch):
-    """A redundant `auryn sync` says so and exits before it resolves (or starts) a FalkorDB."""
+@pytest.mark.parametrize("args, may_step_aside", [([], True), (["--deep", "inline"], False), (["--port", "6400"], False)])
+def test_sync_command_steps_aside_only_for_a_plain_sync(tmp_path, monkeypatch, args, may_step_aside):
+    """A redundant plain `auryn sync` (what a hook runs) says so and exits before it resolves --
+    or starts -- a FalkorDB. One that asks for more than the queued sync will do (a deep pass,
+    another server) tells the lock it must not be skipped."""
+    asked = []
 
     @contextlib.contextmanager
-    def already_queued(local_dir):
+    def already_queued(local_dir, *, queue_one=True):
+        asked.append(queue_one)
         yield False
 
     def no_connection(*a, **k):  # pragma: no cover - must not be called
@@ -58,7 +86,8 @@ def test_sync_command_steps_aside_when_one_is_already_queued(tmp_path, monkeypat
     monkeypatch.setattr(sync_lock_mod, "sync_lock", already_queued)
     monkeypatch.setattr("auryn.cli._resolve_connection", no_connection)
 
-    res = CliRunner().invoke(cli, ["sync", str(tmp_path)])
+    res = CliRunner().invoke(cli, ["sync", str(tmp_path), *args])
 
     assert res.exit_code == 0, res.output
     assert "already queued" in res.output
+    assert asked == [may_step_aside]

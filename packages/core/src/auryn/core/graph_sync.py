@@ -149,15 +149,18 @@ _MISSING = object()
 
 SYNC_MARKER = "commit_sha"
 """The property a sync short-circuits on: every engine opens with "is the Project node already at
-`target_sha`?" and returns at once if so. Whoever writes the node carrying it must therefore write
-it LAST -- stamped first (it used to be the first item merged), a sync that died mid-apply left a
-half-written graph that every later sync took for current, and nothing ever healed it."""
+`target_sha`?" and returns at once if so. So while a sync is changing the graph the node carrying
+it must claim NO commit: the stamp is cleared before the first mutation and written LAST. Stamped
+first (it used to be the first item merged), a sync that died mid-apply left a half-written graph
+that every later sync took for current; and merely keeping the OLD stamp until the end would let
+a sync back to that commit short-circuit over the same half-written graph. With no stamp the next
+sync -- to any commit -- recomputes in full against what the graph actually holds."""
 
 
 def unstamped(node: GraphNode) -> GraphNode:
-    """`node` without its SYNC_MARKER: what gets written up front when a brand-new Project node
-    must exist for its edges to attach to, before the sync has earned the stamp."""
-    return GraphNode(node.label, node.key, {k: v for k, v in node.properties.items() if k != SYNC_MARKER})
+    """`node` with its SYNC_MARKER cleared (a None value removes the property): written before
+    anything else changes -- it also brings a brand-new Project node into existence for its edges."""
+    return GraphNode(node.label, node.key, {**node.properties, SYNC_MARKER: None})
 
 
 def stream_apply(
@@ -236,12 +239,11 @@ def stream_apply(
             else:
                 continue  # unchanged -- already popped, so it won't be counted a removal
             if SYNC_MARKER in props:
-                # Hold the stamp back until everything else is applied (see SYNC_MARKER). An
-                # existing node just waits; a new one is written unstamped so edges can attach.
+                # Clear the stamp right now, before anything else is written, and hold the real
+                # one back until everything is applied (see SYNC_MARKER).
                 marker = item
-                if prev is not _MISSING:
-                    continue
-                item = unstamped(item)
+                writer.merge_nodes([unstamped(item)])
+                continue
             batch.append(item)
             if len(batch) >= _STREAM_BATCH_SIZE:
                 writer.merge_nodes(batch)

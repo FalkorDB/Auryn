@@ -361,8 +361,8 @@ def test_apply_delta_upserts_and_removes_in_one_call(graph):
 
 def test_apply_delta_stamps_the_commit_last(graph, monkeypatch):
     """The Project node's `commit_sha` is what the next sync short-circuits on ("already at this
-    commit"). It must go in after the rest of the delta: stamped first, an apply that dies midway
-    left a half-written graph every later sync took for current."""
+    commit"). It is cleared before the delta is written and set after it: an apply that dies
+    midway must leave NO commit -- neither the new one nor the old one -- over a half-written graph."""
     writer = GraphWriter(graph)
     writer.merge_node(GraphNode("Project", {"id": "p"}, {"name": "p", "commit_sha": "c1"}))
     delta = GraphDelta(
@@ -380,7 +380,7 @@ def test_apply_delta_stamps_the_commit_last(graph, monkeypatch):
         m.setattr(writer, "merge_edges", killed)
         with pytest.raises(RuntimeError):
             writer.apply_delta(delta)
-    assert writer.get_property("Project", {"id": "p"}, "commit_sha") == "c1"  # still the last GOOD commit
+    assert writer.get_property("Project", {"id": "p"}, "commit_sha") is None  # not c2, and not c1 either
 
     writer.apply_delta(delta)  # the healthy re-run completes the delta, and only then stamps
     assert writer.get_property("Project", {"id": "p"}, "commit_sha") == "c2"
@@ -494,7 +494,7 @@ def test_stream_apply_writes_all_nodes_before_any_edge_regardless_of_target_orde
 def test_stream_apply_interrupted_mid_apply_leaves_the_commit_unstamped(graph, already_synced):
     """A sync that dies between the nodes pass and the edges pass must not leave the Project
     node at the NEW commit -- the next sync would short-circuit on it and never write the rest.
-    A first ingest leaves no commit at all; a resync leaves the last good one."""
+    Nor at the OLD one (a resync): a sync back to that commit would short-circuit just the same."""
     writer = GraphWriter(graph)
     writer.setup_schema([NodeSchema("Project"), NodeSchema("Class")])
     labels = ["Project", "Class"]
@@ -519,7 +519,7 @@ def test_stream_apply_interrupted_mid_apply_leaves_the_commit_unstamped(graph, a
 
     with pytest.raises(RuntimeError):
         stream_apply(writer, _P, labels, dies_before_the_edges_pass)
-    assert writer.get_property("Project", {"id": _P}, "commit_sha") == ("c1" if already_synced else None)
+    assert writer.get_property("Project", {"id": _P}, "commit_sha") is None
 
     stream_apply(writer, _P, labels, _fresh(target("c2")))  # the healthy re-run heals it, then stamps
     assert writer.get_property("Project", {"id": _P}, "commit_sha") == "c2"
