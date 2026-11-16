@@ -78,5 +78,5 @@ def do_uninstall(*, purge: bool = False, adapters=None) -> Config:
     if purge:
         shutil.rmtree(home_dir(), ignore_errors=True)
     else:
-        save_config(replace(prior, agents=()))
+        save_config(replace(load_config(), agents=()))  # as it is NOW, like do_install
     return prior

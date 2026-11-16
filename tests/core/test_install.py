@@ -129,11 +129,13 @@ def test_install_stops_on_an_unreadable_config_before_touching_any_agent(tmp_pat
 
     with pytest.raises(tomllib.TOMLDecodeError):
         do_install(Backend(mode="local"), adapters=[agent], server_command=["x"])
-    result = CliRunner().invoke(cli, ["install", "-y"])
+    for unreadable in ("[backend\n", "backend = 1\n"):  # not TOML; TOML, but not a section
+        (home / "config.toml").write_text(unreadable)
+        result = CliRunner().invoke(cli, ["install", "-y"])
 
-    assert result.exit_code == 1 and "config.toml can't be read" in result.output
-    assert agent.registered_command is None
-    assert (home / "config.toml").read_text() == "[backend\n"
+        assert result.exit_code == 1 and "config.toml can't be read" in result.output
+        assert agent.registered_command is None
+        assert (home / "config.toml").read_text() == unreadable
 
 
 def test_uninstall_goes_on_past_an_agent_it_cannot_deregister(tmp_path, monkeypatch):

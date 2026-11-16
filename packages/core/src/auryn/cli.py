@@ -382,7 +382,7 @@ def install(backend, host, port, username, password, ssl, trigger, embed_opt, ye
         # a `save` trigger or auto-embed back off), and a config.toml we can't read has to stop
         # the install before any agent is registered against it.
         saved = load_config()
-    except (ValueError, KeyError, TypeError) as e:  # invalid TOML, or a field of the wrong shape
+    except Exception as e:  # noqa: BLE001 -- invalid TOML, or a section / field of the wrong shape
         raise click.ClickException(
             f"{config_path()} can't be read ({e!r}). Fix or remove it, then re-run `auryn install`.") from e
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
