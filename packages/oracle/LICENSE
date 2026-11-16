@@ -30,9 +30,9 @@ It also redistributes the following third-party component, which retains its
 own license:
 
 --------------------------------------------------------------------------------
-ANTLR4-generated PL/SQL parser
+ANTLR4-generated PL/SQL lexer + parser
   Location:  src/auryn/ingestors/plsql/grammar/
-  Source:    https://github.com/antlr/grammars-v4  (sql/plsql)
+  Source:    https://github.com/antlr/grammars-v4  (sql/plsql: PlSqlLexer.g4, PlSqlParser.g4)
   Copyright: (c) 2009-2011 Alexandre Porcelli <alexandre.porcelli@gmail.com>
              (c) 2015-2019 Ivan Kochurkin (KvanTTT), Positive Technologies
              (c) 2017-2018 Mark Adams <madams51703@gmail.com>
