@@ -48,6 +48,22 @@ def test_parse_multiple_hunks_and_files():
     assert changed["b.py"] == [(5, 5)]  # +5,0 deletion -> anchored at 5
 
 
+def test_git_diff_never_runs_a_ref_as_an_option(tmp_path):
+    """`base` / `head` arrive from the caller; one that starts with `-` must fail as a bad
+    revision, not run as a git option (`--output=<file>` would write that file)."""
+    r = tmp_path / "repo"
+    r.mkdir()
+    def git(*a): subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True)
+    git("init"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+    (r / "m.py").write_text("def f():\n    return 1\n")
+    git("add", "."); git("commit", "-m", "init")
+    victim = tmp_path / "victim.txt"
+    for kwargs in ({"base": f"--output={victim}"}, {"base": "HEAD", "head": f"--output={victim}"}):
+        with pytest.raises(subprocess.CalledProcessError):
+            git_diff(str(r), **kwargs)
+    assert not victim.exists()
+
+
 def test_git_diff_roundtrip(tmp_path):
     r = tmp_path / "repo"
     r.mkdir()

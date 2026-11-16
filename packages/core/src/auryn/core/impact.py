@@ -71,10 +71,13 @@ def git_diff(repo_dir: str, base: str | None = None, head: str | None = None, *,
     given, `base` vs the working tree if only base, staged changes with `staged=True`, else all
     uncommitted changes vs HEAD. Raises CalledProcessError if git fails."""
     cmd = ["git", "-C", repo_dir, "diff", "-U0", "--no-color"]
+    # `base`/`head` come from the caller (the impact_of_diff MCP tool, --base/--head). End option
+    # parsing before them so a value starting with `-` fails as a bad revision instead of running
+    # as a git option (`--output=<file>` would overwrite that file).
     if base and head:
-        cmd += [base, head]
+        cmd += ["--end-of-options", base, head]
     elif base:
-        cmd += [base]
+        cmd += ["--end-of-options", base]
     elif staged:
         cmd += ["--staged"]
     else:

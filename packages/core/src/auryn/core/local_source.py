@@ -209,7 +209,8 @@ class WorkingTreeSource(LocalDirectorySource):
         from auryn.core.git_source import parse_name_status
 
         repo = self._repo()
-        changes = parse_name_status(repo.git.diff("-M", "--name-status", base_commit), suffix)
+        # --end-of-options: `base_commit` is read back from the graph -- never let it run as an option.
+        changes = parse_name_status(repo.git.diff("-M", "--name-status", "--end-of-options", base_commit), suffix)
         for rel in repo.git.ls_files("--others", "--exclude-standard").splitlines():
             if rel.endswith(suffix):
                 changes["added"].append(rel)

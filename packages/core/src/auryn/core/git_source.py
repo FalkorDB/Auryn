@@ -219,7 +219,8 @@ class GitRepoCache:
         orchestrator intersects these paths with the live file listing (which is filtered),
         so an excluded or already-gone path simply drops out there."""
         repo = git.Repo(str(self._path))
-        out = repo.git.diff("-M", "--name-status", old_sha, new_sha)
+        # --end-of-options: `old_sha` is read back from the graph -- never let it run as an option.
+        out = repo.git.diff("-M", "--name-status", "--end-of-options", old_sha, new_sha)
         return parse_name_status(out, suffix)
 
     def materialize(self, sha: str, dest_dir: Path) -> None:

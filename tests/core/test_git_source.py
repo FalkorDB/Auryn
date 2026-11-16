@@ -139,3 +139,12 @@ def test_read_blob_returns_the_exact_content(cache):
     files = dict(cache.list_files(sha, ".cs", {"obj"}))
     content = cache.read_blob(files["sub/b.cs"])
     assert content == b"class B {}"
+
+
+def test_diff_changed_files_never_runs_a_sha_as_an_option(cache, tmp_path):
+    """`old_sha` is the commit read back from the graph: a value there that starts with `-` must
+    fail as a bad revision (-> the caller's full-resync fallback), not run as a git option."""
+    victim = tmp_path / "victim.txt"
+    with pytest.raises(git.GitCommandError):
+        cache.diff_changed_files(f"--output={victim}", cache.resolve_ref("main"), ".cs")
+    assert not victim.exists()
