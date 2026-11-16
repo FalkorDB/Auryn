@@ -10,6 +10,8 @@ structure instead of grepping and guessing.**
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue?style=flat-square)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-ready-5980a6?style=flat-square)](https://modelcontextprotocol.io/)
 [![FalkorDB](https://img.shields.io/badge/graph-FalkorDB-5980a6?style=flat-square)](https://www.falkordb.com/)
+[![PyPI version](https://badge.fury.io/py/falkordb-auryn.svg)](https://badge.fury.io/py/falkordb-auryn)
+[![Forum](https://img.shields.io/badge/Forum-falkordb-blue)](https://github.com/orgs/FalkorDB/discussions)
 
 Works with **Claude Code** · **Cursor** · **Windsurf** · any MCP client
 
