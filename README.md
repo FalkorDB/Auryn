@@ -1,6 +1,9 @@
 <div align="center">
 
-# Auryn
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/auryn-wordmark-dark.png">
+  <img src="docs/images/auryn-wordmark-light.png" alt="Auryn" width="420">
+</picture>
 
 ### The codegraph for your coding agents
 
@@ -9,7 +12,7 @@ Your agent traverses it over MCP and answers from real structure, with file and 
 
 <br>
 
-**[Quickstart](#quickstart)** &nbsp;·&nbsp; **[Connect your agent](#connect-your-agent)** &nbsp;·&nbsp; **[Languages](#what-it-can-read)** &nbsp;·&nbsp; **[Docs](#documentation)** &nbsp;·&nbsp; **[Website](https://www.falkordb.com/auryn/)**
+**[Quickstart](#quickstart)** &nbsp;·&nbsp; **[Connect your agent](#connect-your-agent)** &nbsp;·&nbsp; **[Languages](#what-it-can-read)** &nbsp;·&nbsp; **[Docs](#documentation)** &nbsp;·&nbsp; **[Website](https://www.falkordb.com/products/codegraph-auryn)**
 
 <br>
 
@@ -20,20 +23,22 @@ Your agent traverses it over MCP and answers from real structure, with file and 
 <sub>WORKS WITH</sub><br>
 **Claude Code** &nbsp;·&nbsp; **Cursor** &nbsp;·&nbsp; **Copilot** &nbsp;·&nbsp; **Codex** &nbsp;·&nbsp; **Gemini** &nbsp;·&nbsp; **Windsurf** &nbsp;·&nbsp; **VS Code** &nbsp;·&nbsp; **Aider** &nbsp;·&nbsp; any agent that reads AGENTS.md
 
-<br>
-
-<img src="docs/images/auryn-agent-who-calls.png" alt="An agent asks who calls OrderController.Submit and Auryn answers from the codegraph: two callers, cited." width="640">
-
 </div>
 
 ---
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/auryn-results-dark.png">
-  <img src="docs/images/auryn-results-light.png" alt="With Auryn: 24% fewer tokens, 66% shorter agent run time, 4x accuracy, 21% lower cost per task.">
-</picture>
+## Results
 
-<p align="center"><sub>Claude Code on Django, hard structural questions (transitive closure and impact), with and without Auryn.</sub></p>
+Claude Code on Django, hard structural questions (transitive closure and impact), with and without Auryn:
+
+| | Without Auryn | With Auryn | Change |
+|---|---|---|---|
+| **Accuracy** (key facts covered) | 22% | 92% | **4x** |
+| **Run time** per task | 208s | 70s | **-66%** |
+| **Cost** per task | $0.48 | $0.38 | **-21%** |
+| **Tokens** per task | 466k | 355k | **-24%** |
+
+The agent stops reading its way through the tree. It asks the graph who calls a function, what a change reaches, or how a request gets from a button to a table, and gets an answer it can cite.
 
 ## How it works
 
@@ -48,22 +53,6 @@ flowchart LR
 1. **Parse.** Auryn reads every file and builds a codegraph of functions, types, tables and endpoints, plus the edges between them (`CALLS`, `EXTENDS`, `READS`/`WRITES`, `DEPENDS_ON`).
 2. **Store.** The codegraph lives in [FalkorDB](https://www.falkordb.com/), on your machine or a server you run.
 3. **Query.** Your agent traverses it through MCP and cites file and line for every claim.
-
-<details>
-<summary><b>Full results table</b></summary>
-
-<br>
-
-| | Without Auryn | With Auryn | |
-|---|---|---|---|
-| **Accuracy** (key facts covered) | 22% | 92% | **4x** |
-| **Run time** per task | 208s | 70s | **-66%** |
-| **Cost** per task | $0.48 | $0.38 | **-21%** |
-| **Tokens** per task | 466k | 355k | **-24%** |
-
-</details>
-
-The agent stops reading its way through the tree. It asks the graph who calls a function, what a change reaches, or how a request gets from a button to a table, and gets an answer it can cite.
 
 ## Quickstart
 
@@ -84,18 +73,9 @@ Your own project is the same command with a path:
 auryn quickstart path/to/your/repo
 ```
 
-<table>
-<tr>
-<td width="33%"><img src="docs/images/auryn-viewer-communities.png" alt="The codegraph coloured by community"></td>
-<td width="33%"><img src="docs/images/auryn-viewer-path.png" alt="A cited path across hops between two symbols"></td>
-<td width="33%"><img src="docs/images/auryn-viewer-node.png" alt="Node detail for a symbol: its file and edges"></td>
-</tr>
-<tr>
-<td align="center"><sub><b>Communities</b><br>how the code clusters</sub></td>
-<td align="center"><sub><b>Cited path</b><br>every hop between two symbols</sub></td>
-<td align="center"><sub><b>Symbol, file, edges</b><br>where it lives, how it connects</sub></td>
-</tr>
-</table>
+Find a path between any two symbols and the viewer shows every hop, with the edge it followed:
+
+![The viewer tracing a path from GB_uop__identity_fc32_int32.c to GB_nnz_full in 3 hops: INCLUDES, INCLUDES, DECLARES.](docs/images/auryn-viewer-path.png)
 
 The codegraph persists at `<path>/.auryn/graph.db`, so re-running reuses it.
 
@@ -160,10 +140,17 @@ No raw Cypher, no file dumps, no guessing. One hop, id-backed. Each repo gets it
 | How does a request get from the UI to the database? | open files one by one | one path, across languages |
 | Is the answer current? | always re-read | incremental resync on every commit |
 
-<p align="center">
-<img src="docs/images/auryn-blast-radius.png" alt="Blast radius of a change to OrderController.Submit: two callers in TypeScript and C#, and what it reaches down to a PL/SQL procedure and an Oracle table." width="900">
-<br><sub>Blast radius and closure of one change, across three languages, in one query.</sub>
-</p>
+One query traces a change across languages. Changing `OrderController.Submit` (C#):
+
+```mermaid
+flowchart LR
+    A["SubmitOrderButton<br/>TypeScript component"] -- CALLS --> C(["OrderController.Submit<br/>C# method"])
+    B["NightlyReorderJob<br/>C# scheduled job"] -- CALLS --> C
+    C -- DISPATCHES_TO --> D["PKG_ORDERS.SUBMIT<br/>PL/SQL procedure"]
+    D -- WRITES --> E[("ORDER_LINES<br/>Oracle table")]
+```
+
+Blast radius: the two callers on the left. Closure: everything it reaches on the right.
 
 ## Under the hood
 
@@ -241,6 +228,6 @@ Tests run against embedded FalkorDB by default, with no server and no Docker. Se
 <div align="center">
 <br>
 
-Built by [FalkorDB](https://www.falkordb.com/) · [falkordb.com/auryn](https://www.falkordb.com/auryn/)
+Built by [FalkorDB](https://www.falkordb.com/) · [falkordb.com/products/codegraph-auryn](https://www.falkordb.com/products/codegraph-auryn)
 
 </div>
