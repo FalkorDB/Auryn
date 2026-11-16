@@ -24,13 +24,34 @@ from auryn.ingestors.python.raw_model import RawFunction, RawModule
 logger = logging.getLogger(__name__)
 
 
+def _dotted_by_file(source_dir: str, modules: list[RawModule]) -> dict[str, str]:
+    """Absolute file path (the form Jedi reports as a definition's `module_path`) -> the
+    dotted name the ast pass gave that file."""
+    root = Path(source_dir).absolute()
+    return {str(root / m.path): m.dotted for m in modules}
+
+
+def _callee_name(full_name: str, module_name: str, module_path: str, dotted_by_file: dict[str, str]) -> str:
+    """Jedi's dotted name for a callee, re-anchored at the name the ast pass gave the file
+    defining it. Jedi names a module by its path under the *project* root (`src/pkg/db.py`
+    -> 'src.pkg.db'); ids.dotted_module_path anchors it at its *import* root ('pkg.db'), and
+    that is the name resolution's index is keyed by -- left as-is, a same-module or
+    relative-import callee in a `src/` layout misses the index and degrades to an
+    `extern://` placeholder. A callee defined outside the project keeps Jedi's name."""
+    dotted = dotted_by_file.get(module_path)
+    if dotted is None:
+        return full_name
+    return dotted + full_name[len(module_name):]
+
+
 class JediOracle:
     """Implements resolution.SemanticOracle over a materialized source directory."""
 
-    def __init__(self, source_dir: str):
+    def __init__(self, source_dir: str, modules: list[RawModule] = ()):
         self._root = Path(source_dir)
         self._project = jedi.Project(path=str(self._root))
         self._scripts: dict[str, jedi.Script] = {}
+        self._dotted_by_file = _dotted_by_file(source_dir, modules)
 
     def _script(self, module_path: str) -> jedi.Script:
         script = self._scripts.get(module_path)
@@ -62,7 +83,7 @@ class JediOracle:
         try:
             for d in self._script(module_path).goto(line, col, follow_imports=True):
                 if d.full_name:
-                    return d.full_name
+                    return _callee_name(d.full_name, d.module_name, str(d.module_path), self._dotted_by_file)
         except Exception as e:
             logger.debug("jedi.goto failed at %s:%d:%d (%s)", module_path, line, col, e)
         return None
@@ -137,14 +158,14 @@ def _infer_one(script: "jedi.Script", type_positions, call_positions):
                     break
         except Exception:
             pass
-    calls: dict[tuple[int, int], str] = {}
+    calls: dict[tuple[int, int], tuple[str, str, str]] = {}
     for line, col in call_positions:
         if not line:
             continue
         try:
             for d in script.goto(line, col, follow_imports=True):
                 if d.full_name:
-                    calls[(line, col)] = d.full_name
+                    calls[(line, col)] = (d.full_name, d.module_name, str(d.module_path))
                     break
         except Exception:
             pass
@@ -195,9 +216,12 @@ def build_precomputed_oracle(source_dir: str, modules: list[RawModule], workers:
 
     types: dict[tuple[str, int, int], str] = {}
     calls: dict[tuple[str, int, int], str] = {}
+    # Callees are re-anchored here, in the parent: a worker returns each as Jedi named it plus
+    # the file defining it, so the project-wide file map never rides along with every batch.
+    dotted_by_file = _dotted_by_file(source_dir, modules)
     for module_path, file_types, file_calls in results:
         for (line, col), value in file_types.items():
             types[(module_path, line, col)] = value
-        for (line, col), value in file_calls.items():
-            calls[(module_path, line, col)] = value
+        for (line, col), callee in file_calls.items():
+            calls[(module_path, line, col)] = _callee_name(*callee, dotted_by_file)
     return PrecomputedOracle(types, calls)

@@ -14,9 +14,9 @@ from pathlib import Path
 import pytest
 
 from auryn.core.graph_model import GraphEdge, GraphNode
-from auryn.ingestors.python import resolution
+from auryn.ingestors.python import ids, resolution
 from auryn.ingestors.python.file_parser import parse_module
-from auryn.ingestors.python.jedi_engine import JediOracle
+from auryn.ingestors.python.jedi_engine import JediOracle, build_precomputed_oracle
 
 _SAMPLE = Path(__file__).resolve().parents[3] / "demo" / "python-ingestor" / "sample"
 _PROJ = "python://demo"
@@ -154,3 +154,86 @@ def test_instantiation_resolves_to_constructor(tmp_path):
 
     # Bare has no __init__ -> no constructor edge anywhere
     assert not any(str(e.to_key["id"]).endswith("bare.method.__init__()") for e in _edges_of(items, "CALLS"))
+
+
+# -- src/ layout: a callee must be named the way the ast pass named the file defining it --------
+
+
+def _materialize(root, files):
+    """Write `files` under `root` and parse them the way _jedi_sync_at does (ingest-wide package
+    context, sorted paths)."""
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    pkg_dirs = ids.package_dirs_from_paths(files)
+    return [parse_module(text, rel, pkg_dirs) for rel, text in sorted(files.items())]
+
+
+@pytest.mark.parametrize("oracle_kind", ["inline", "precomputed"])
+def test_src_layout_calls_bind_to_project_callables(tmp_path, oracle_kind):
+    """Jedi names `src/pkg/db.py` by its path under the project root (`src.pkg.db`); the ast pass
+    anchors it at its import root (`pkg.db`). A same-module, relative-import or receiver-typed
+    callee must still land on the project node -- not degrade to an `extern://python/src.pkg...`
+    placeholder -- through both oracles (the precomputed one is what _jedi_sync_at runs)."""
+    modules = _materialize(tmp_path, {
+        "src/pkg/__init__.py": "",
+        "src/pkg/db.py": (
+            "class Connection:\n"
+            "    def execute(self, sql):\n"
+            "        return sql\n"
+            "\n"
+            "\n"
+            "def get_connection():\n"
+            "    return Connection()\n"
+        ),
+        "src/pkg/api.py": (
+            "from .db import get_connection\n"
+            "\n"
+            "\n"
+            "def _sql():\n"
+            "    return 'select 1'\n"
+            "\n"
+            "\n"
+            "def run():\n"
+            "    conn = get_connection()\n"
+            "    return conn.execute(_sql())\n"
+        ),
+    })
+    if oracle_kind == "inline":
+        oracle = JediOracle(str(tmp_path), modules)
+    else:
+        oracle = build_precomputed_oracle(str(tmp_path), modules, workers=1)
+    items = list(resolution.resolve(modules, _PROJ, oracle=oracle))
+
+    calls = {
+        str(e.to_key["id"]): e.properties
+        for e in _edges_of(items, "CALLS")
+        if e.from_key["id"] == "python://demo/module/pkg.api.func.run()"
+    }
+    # the same-module and the `from .db` callee are bound by name -> "resolved"
+    assert calls["python://demo/module/pkg.api.func._sql()"]["resolution"] == "resolved"
+    assert calls["python://demo/module/pkg.db.func.get_connection()"]["resolution"] == "resolved"
+    # the receiver-typed call still reaches the method, as "inferred"
+    execute = calls["python://demo/module/pkg.db.class.connection.method.execute(self,sql)"]
+    assert (execute["resolution"], execute["receiver_type"]) == ("inferred", "Connection")
+    # nothing here is defined outside the project -> not one placeholder
+    assert not [e for e in _edges_of(items, "CALLS") if e.properties["resolution"] == "external"]
+
+
+def test_callee_in_a_namespace_dir_binds_by_file(tmp_path):
+    """`plugins/` is a PEP-420 namespace dir (no __init__.py), so the ast pass keeps the
+    context-free name for its modules (`src.pkg.plugins.hooks`) while Jedi follows the import and
+    names the callee `pkg.plugins.hooks.fire`. Matching the callee on the *file* that defines it
+    binds it to whatever dotted name that file was indexed under."""
+    modules = _materialize(tmp_path, {
+        "src/pkg/__init__.py": "",
+        "src/pkg/plugins/hooks.py": "def fire():\n    return 1\n",
+        "src/pkg/api.py": "from pkg.plugins.hooks import fire\n\n\ndef run():\n    return fire()\n",
+    })
+    hooks = next(m for m in modules if m.path == "src/pkg/plugins/hooks.py")
+    items = list(resolution.resolve(modules, _PROJ, oracle=JediOracle(str(tmp_path), modules)))
+
+    targets = {str(e.to_key["id"]) for e in _edges_of(items, "CALLS")
+               if e.from_key["id"] == "python://demo/module/pkg.api.func.run()"}
+    assert targets == {f"python://demo/module/{hooks.dotted}.func.fire()"}
