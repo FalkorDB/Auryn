@@ -373,8 +373,6 @@ def install(backend, host, port, username, password, ssl, trigger, embed_opt, ye
     with every detected agent (Claude Code, OpenAI Codex, Antigravity, GitHub Copilot, Cursor,
     Windsurf, Gemini CLI), user-scoped. Writes only to ~/.auryn and the agent's own config —
     never your repo. Re-runnable."""
-    import tomllib
-
     from auryn.core.app_config import load_config, set_auto_embed, set_resync_trigger
     from auryn.core.home import config_path
     from auryn.core.install import default_server_command, do_install
@@ -384,9 +382,9 @@ def install(backend, host, port, username, password, ssl, trigger, embed_opt, ye
         # a `save` trigger or auto-embed back off), and a config.toml we can't read has to stop
         # the install before any agent is registered against it.
         saved = load_config()
-    except tomllib.TOMLDecodeError as e:
+    except (ValueError, KeyError, TypeError) as e:  # invalid TOML, or a field of the wrong shape
         raise click.ClickException(
-            f"{config_path()} isn't valid TOML ({e}). Fix or remove it, then re-run `auryn install`.") from e
+            f"{config_path()} can't be read ({e!r}). Fix or remove it, then re-run `auryn install`.") from e
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
     if trigger is None:
         trigger = saved.resync_trigger if yes else click.prompt(

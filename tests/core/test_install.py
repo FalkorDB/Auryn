@@ -131,9 +131,30 @@ def test_install_stops_on_an_unreadable_config_before_touching_any_agent(tmp_pat
         do_install(Backend(mode="local"), adapters=[agent], server_command=["x"])
     result = CliRunner().invoke(cli, ["install", "-y"])
 
-    assert result.exit_code == 1 and "config.toml isn't valid TOML" in result.output
+    assert result.exit_code == 1 and "config.toml can't be read" in result.output
     assert agent.registered_command is None
     assert (home / "config.toml").read_text() == "[backend\n"
+
+
+def test_uninstall_goes_on_past_an_agent_it_cannot_deregister(tmp_path, monkeypatch):
+    """A recorded agent whose CLI is gone (`claude` off PATH, the agent removed) raises on
+    deregister. That must not stop the uninstall: the agents after it are still reversed and the
+    manifest is still cleared."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+
+    class _Gone(_FakeAgent):
+        name = "gone"
+
+        def deregister(self, reg):
+            raise FileNotFoundError("claude")
+
+    gone, agent = _Gone(), _FakeAgent()
+    do_install(Backend(mode="local"), adapters=[gone, agent], server_command=["x"])
+
+    do_uninstall(adapters=[gone, agent])
+
+    assert agent.deregistered is not None
+    assert load_config().agents == ()
 
 
 def test_uninstall_purge_removes_home(tmp_path, monkeypatch):

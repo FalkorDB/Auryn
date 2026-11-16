@@ -37,7 +37,7 @@ def do_install(backend: Backend, *, adapters=None, server_command: list[str] | N
     file we can't safely edit, ...) is logged and skipped so the others still get wired up."""
     adapters = default_adapters() if adapters is None else adapters
     command = server_command or default_server_command()
-    prior = load_config()  # before any agent is touched: an unreadable config.toml fails here
+    load_config()  # an unreadable config.toml fails here, before any agent is touched
     registrations = []
     for adapter in adapters:
         if not adapter.detect():
@@ -50,6 +50,7 @@ def do_install(backend: Backend, *, adapters=None, server_command: list[str] | N
     # the resync trigger, disabled hooks and the embed setting already in config.toml. The manifest
     # also keeps an agent an earlier run registered and this one didn't (not detected from this
     # shell, or its registration failed) -- `uninstall` reverses only what the manifest lists.
+    prior = load_config()  # as it is NOW: registering took a while, and an ingest may have saved
     config = replace(prior, backend=backend, agents=tuple(registrations))
     names = {r.name for r in registrations}
     save_config(replace(config, agents=tuple(a for a in prior.agents if a.name not in names) + config.agents))
@@ -69,7 +70,10 @@ def do_uninstall(*, purge: bool = False, adapters=None) -> Config:
     for reg in prior.agents:
         adapter = by_name.get(reg.name)
         if adapter is not None:
-            adapter.deregister(reg)
+            try:
+                adapter.deregister(reg)
+            except Exception as e:  # noqa: BLE001 -- e.g. its CLI is gone: the rest still get reversed
+                logger.warning("Could not deregister %s (%s)", reg.name, e)
 
     if purge:
         shutil.rmtree(home_dir(), ignore_errors=True)
