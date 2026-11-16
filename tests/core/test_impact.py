@@ -76,12 +76,14 @@ def test_impact_cli_on_a_clean_tree(tmp_path):
     assert "No changes in the given range." in res.output
 
 
-@pytest.mark.parametrize("given_by, registered_as", [("--path", None), ("--path", "shared"), ("CLAUDE_PROJECT_DIR", None)])
+@pytest.mark.parametrize("given_by, registered_as", [
+    ("--path", None), ("--path", "shared"), ("CLAUDE_PROJECT_DIR", None), ("a subfolder of it", "shared"),
+])
 def test_impact_cli_resolves_the_graph_of_the_repo_it_diffs(tmp_path, monkeypatch, given_by, registered_as):
     """The graph is the one `sync` writes for the repo being diffed -- its registered name, else
-    the default for that directory -- wherever the command runs. It used to be the current
-    folder's, so with `--path` the CI gate crashed on a missing graph or, worse, silently checked
-    a different one."""
+    the default for that directory -- wherever the command runs, a subfolder of the indexed repo
+    included. It used to be the current folder's, so with `--path` the CI gate crashed on a
+    missing graph or, worse, silently checked a different one."""
     from auryn.core.app_config import RepoRegistration, register_repo
     from auryn.core.project import default_graph_name
 
@@ -108,8 +110,9 @@ def test_impact_cli_resolves_the_graph_of_the_repo_it_diffs(tmp_path, monkeypatc
     monkeypatch.setattr("auryn.cli.connect_client", lambda config: _Client())
     monkeypatch.setattr("auryn.core.impact.impact_of_diff", lambda graph, changed, max_depth: {"impact": {}})
 
-    (tmp_path / "elsewhere").mkdir()
-    monkeypatch.chdir(tmp_path / "elsewhere")
+    for folder in (tmp_path / "elsewhere", r / "sub"):
+        folder.mkdir()
+    monkeypatch.chdir(r / "sub" if given_by == "a subfolder of it" else tmp_path / "elsewhere")
     if given_by == "CLAUDE_PROJECT_DIR":
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(r))
     res = CliRunner().invoke(cli, ["impact", "--json"] + (["--path", str(r)] if given_by == "--path" else []))

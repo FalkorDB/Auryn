@@ -255,10 +255,14 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
     import subprocess
 
     from auryn.core import impact as impact_mod
-    from auryn.core.app_config import get_repo
+    from auryn.core.app_config import get_repo, load_config
     from auryn.core.project import default_graph_name, resolve_project_root
 
-    root = resolve_project_root(path)
+    # The indexed repo this directory belongs to: the nearest registered directory at or above it
+    # (a run from a subfolder still means the repo), else the directory itself.
+    target = resolve_project_root(path)
+    registered = {r.local_dir for r in load_config().repos}
+    root = next((d for d in (target, *target.parents) if str(d) in registered), target)
     try:
         diff = impact_mod.git_diff(str(root), base, head, staged=staged)
     except subprocess.CalledProcessError as e:
