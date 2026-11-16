@@ -51,15 +51,19 @@ def _skill_source() -> Path:
 
 def _remove_skill(dest: Path) -> None:
     """Delete the files install copied into `dest` -- the bundled skill's own -- and then `dest`
-    itself if that leaves it empty. A file the user put in that folder is theirs, and stays."""
+    itself if that leaves it empty. A file the user put in that folder is theirs, and stays.
+    Best-effort, like the rmtree it replaces: a file that can't be removed is left behind rather
+    than aborting the rest of uninstall."""
+    if dest.is_symlink():  # the user pointed the skill at a folder of their own: none of it is ours
+        return
     src = _skill_source()
     for item in sorted(src.rglob("*"), reverse=True):  # children before their directory
         target = dest / item.relative_to(src)
-        if target.is_dir():
-            with contextlib.suppress(OSError):  # not empty: the user's files are in it
+        with contextlib.suppress(OSError):  # gone already, not removable, or a dir holding the user's files
+            if target.is_dir() and not target.is_symlink():
                 target.rmdir()
-        elif target.exists():
-            target.unlink()
+            else:
+                target.unlink()  # a file -- or a link the user put in its place: the link, never its target
     with contextlib.suppress(OSError):
         dest.rmdir()
 

@@ -123,6 +123,44 @@ def test_claudecode_deregister_leaves_the_users_own_files_in_the_skill_dir(tmp_p
     assert (skill / "MINE.md").read_text() == "mine"  # theirs: untouched
 
 
+def test_claudecode_deregister_does_not_reach_through_a_symlinked_skill_dir(tmp_path):
+    # After install the user replaces the skill folder with a link to a skill they maintain
+    # elsewhere. Its SKILL.md has the bundled file's name but is theirs -- uninstall must not
+    # follow the link and delete it.
+    from auryn.core.agents import ClaudeCode
+
+    cc = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills")
+    reg = cc.register(["PY", "-m", "auryn", "mcp"])
+
+    theirs = tmp_path / "my-skill"
+    theirs.mkdir()
+    (theirs / "SKILL.md").write_text("mine")
+    skill = tmp_path / "skills" / "auryn"
+    (skill / "SKILL.md").unlink()
+    skill.rmdir()
+    skill.symlink_to(theirs, target_is_directory=True)
+
+    cc.deregister(reg)
+    assert (theirs / "SKILL.md").read_text() == "mine"
+
+
+def test_claudecode_deregister_carries_on_past_a_file_it_cannot_remove(tmp_path, monkeypatch):
+    # Best-effort, as the rmtree(ignore_errors=True) it replaced: an unremovable skill file must
+    # not raise out of deregister and strand the agents and the manifest after it.
+    from pathlib import Path
+
+    from auryn.core.agents import ClaudeCode
+
+    cc = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills")
+    reg = cc.register(["PY", "-m", "auryn", "mcp"])
+
+    def denied(self, *a, **k):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(Path, "unlink", denied)
+    cc.deregister(reg)  # does not raise
+
+
 def test_claudecode_register_raises_when_add_fails(tmp_path):
     from auryn.core.agents import ClaudeCode
 
