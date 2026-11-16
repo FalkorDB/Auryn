@@ -8,9 +8,11 @@ All notable changes to Auryn are documented here. The format is based on
 
 ### Changed
 - Relicensed the project from the Server Side Public License (SSPL-1.0) to the
-  **MIT License**. The already-published 0.1.0 packages on PyPI keep their original
-  SSPL metadata (PyPI releases are immutable); MIT applies to the repository and all
-  subsequent releases.
+  **MIT License**. MIT covers Auryn's own code in the repository and all subsequent
+  releases; vendored third-party components (e.g. the ANTLR-generated PL/SQL grammar
+  in `auryn-oracle`) retain their own licenses — see that package's `LICENSE`. The
+  already-published 0.1.0 packages on PyPI keep their original SSPL metadata (PyPI
+  releases are immutable).
 
 ## [0.1.0] — Initial public release
 
@@ -38,4 +40,5 @@ instead of grepping.
 ### License
 - Released under the Server Side Public License v1 (SSPL-1.0).
 
+[Unreleased]: https://github.com/FalkorDB/Auryn/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/FalkorDB/Auryn/releases/tag/v0.1.0
