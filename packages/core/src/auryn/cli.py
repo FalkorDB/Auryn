@@ -252,6 +252,7 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
     the reverse-dependency closure: callers, API endpoints, tests, and cross-service consumers.
     Use --fail-on to gate a PR in CI (exits non-zero). See auryn/core/impact.py."""
     import json as _json
+    from pathlib import Path
 
     from auryn.core import impact as impact_mod
     from auryn.core.project import default_graph_name

@@ -6,7 +6,9 @@ from __future__ import annotations
 import subprocess
 
 import pytest
+from click.testing import CliRunner
 
+from auryn.cli import cli
 from auryn.core.impact import git_diff, impact_of_diff, parse_unified_diff, symbols_in_ranges
 
 
@@ -58,6 +60,20 @@ def test_git_diff_roundtrip(tmp_path):
     (r / "m.py").write_text("def f():\n    return 2\n")  # change line 2
     changed, _ = parse_unified_diff(git_diff(str(r)))  # working tree vs HEAD
     assert "m.py" in changed and any(lo <= 2 <= hi for lo, hi in changed["m.py"])
+
+
+def test_impact_cli_on_a_clean_tree(tmp_path):
+    """`auryn impact` resolves --path and diffs it before it needs a graph, so a tree with no
+    changes exits 0 with a plain message (the command used to die on an unimported `Path`)."""
+    r = tmp_path / "repo"
+    r.mkdir()
+    def git(*a): subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True)
+    git("init"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+    (r / "m.py").write_text("def f():\n    return 1\n")
+    git("add", "."); git("commit", "-m", "init")
+    res = CliRunner().invoke(cli, ["impact", "--path", str(r)])
+    assert res.exit_code == 0, res.output
+    assert "No changes in the given range." in res.output
 
 
 # -- impact_of_diff (integration) ------------------------------------------------------------
