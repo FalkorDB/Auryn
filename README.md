@@ -33,7 +33,7 @@ Your agent traverses it over MCP and answers from real structure, with file and 
   <img src="docs/images/auryn-results-light.png" alt="With Auryn: 24% fewer tokens, 66% shorter agent run time, 4x accuracy, 21% lower cost per task.">
 </picture>
 
-<p align="center"><sub>Claude Code on Django, hard structural questions (transitive closure and impact), with and without Auryn. Method and full results: <a href="benchmarks/agent/README.md">benchmarks/agent</a>.</sub></p>
+<p align="center"><sub>Claude Code on Django, hard structural questions (transitive closure and impact), with and without Auryn.</sub></p>
 
 ## How it works
 
