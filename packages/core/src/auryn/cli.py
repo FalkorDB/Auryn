@@ -234,8 +234,8 @@ def _render_impact(report: dict) -> None:
 @click.option("--base", default=None, help="Base git ref (e.g. origin/main). With --head, diffs base..head; alone, base vs the working tree.")
 @click.option("--head", default=None, help="Head git ref (use with --base).")
 @click.option("--staged", is_flag=True, default=False, help="Use staged changes instead of all uncommitted changes.")
-@click.option("--path", default=".", help="Repository directory to diff (default: current directory).")
-@click.option("--graph-name", default=None, help="Graph to resolve against. Default: one per repo, from CLAUDE_PROJECT_DIR/cwd.")
+@click.option("--path", default=None, help="Repository directory to diff. Default: CLAUDE_PROJECT_DIR, else the current directory.")
+@click.option("--graph-name", default=None, help="Graph to resolve against. Default: the graph of that repository.")
 @click.option("--max-depth", default=4, type=int, show_default=True, help="Max reverse-dependency hops.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw JSON report (for a PR bot).")
 @click.option("--fail-on", type=click.Choice(["none", "any", "cross-service", "endpoint"]), default="none",
@@ -253,27 +253,24 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
     Use --fail-on to gate a PR in CI (exits non-zero). See auryn/core/impact.py."""
     import json as _json
     import subprocess
-    from pathlib import Path
 
     from auryn.core import impact as impact_mod
     from auryn.core.app_config import get_repo
-    from auryn.core.project import default_graph_name
+    from auryn.core.project import default_graph_name, resolve_project_root
 
+    root = resolve_project_root(path)
     try:
-        # The repository root, not `--path` as given: a run from (or pointed at) a subfolder still
-        # means the repo, and that root is what its graph is named after.
-        root = Path(impact_mod.git_toplevel(str(Path(path).expanduser().resolve())))
         diff = impact_mod.git_diff(str(root), base, head, staged=staged)
     except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"couldn't compute git diff in {path}: {(e.stderr or '').strip() or e}") from e
+        raise click.ClickException(f"couldn't compute git diff in {root}: {(e.stderr or '').strip() or e}") from e
     changed, _deleted = impact_mod.parse_unified_diff(diff)
     if not changed:
         click.echo("No changes in the given range.")
         return
 
     config = _resolve_connection(host, port, username, password, ssl)
-    # The repo's own graph, resolved the way `sync` does -- not the CURRENT folder's, which is a
-    # different graph (or none) whenever the command isn't run from the repo root.
+    # The graph of the repo being diffed, resolved the way `sync` does -- not the CURRENT
+    # folder's, which is a different graph (or none) whenever `--path` points elsewhere.
     reg = get_repo(str(root))
     graph_name = graph_name or (reg.graph_name if reg and reg.graph_name else default_graph_name(root))
     graph = connect_client(config).select_graph(graph_name)

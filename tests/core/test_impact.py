@@ -76,22 +76,26 @@ def test_impact_cli_on_a_clean_tree(tmp_path):
     assert "No changes in the given range." in res.output
 
 
-@pytest.mark.parametrize("run_from", ["another folder", "a subfolder"])
-def test_impact_cli_resolves_the_repos_own_graph(tmp_path, monkeypatch, run_from):
-    """The graph is the REPOSITORY's -- named after its root, as `sync` names it -- wherever the
-    command runs: `--path <repo>` from another folder, or the default path from a subfolder. It
-    used to be the current folder's, so the CI gate crashed on a missing graph or, worse, silently
-    checked a different one."""
+@pytest.mark.parametrize("given_by, registered_as", [("--path", None), ("--path", "shared"), ("CLAUDE_PROJECT_DIR", None)])
+def test_impact_cli_resolves_the_graph_of_the_repo_it_diffs(tmp_path, monkeypatch, given_by, registered_as):
+    """The graph is the one `sync` writes for the repo being diffed -- its registered name, else
+    the default for that directory -- wherever the command runs. It used to be the current
+    folder's, so with `--path` the CI gate crashed on a missing graph or, worse, silently checked
+    a different one."""
+    from auryn.core.app_config import RepoRegistration, register_repo
     from auryn.core.project import default_graph_name
 
     monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     r = tmp_path / "repo"
-    (r / "sub").mkdir(parents=True)
+    r.mkdir()
     def git(*a): subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True)
     git("init"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
-    (r / "sub" / "m.py").write_text("def f():\n    return 1\n")
+    (r / "m.py").write_text("def f():\n    return 1\n")
     git("add", "."); git("commit", "-m", "init")
-    (r / "sub" / "m.py").write_text("def f():\n    return 2\n")  # an uncommitted change to analyse
+    (r / "m.py").write_text("def f():\n    return 2\n")  # an uncommitted change to analyse
+    if registered_as:
+        register_repo(RepoRegistration(local_dir=str(r.resolve()), graph_name=registered_as))
 
     selected = []
 
@@ -104,17 +108,14 @@ def test_impact_cli_resolves_the_repos_own_graph(tmp_path, monkeypatch, run_from
     monkeypatch.setattr("auryn.cli.connect_client", lambda config: _Client())
     monkeypatch.setattr("auryn.core.impact.impact_of_diff", lambda graph, changed, max_depth: {"impact": {}})
 
-    if run_from == "another folder":
-        (tmp_path / "elsewhere").mkdir()
-        monkeypatch.chdir(tmp_path / "elsewhere")
-        args = ["impact", "--path", str(r), "--json"]
-    else:
-        monkeypatch.chdir(r / "sub")
-        args = ["impact", "--json"]
-    res = CliRunner().invoke(cli, args)
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    if given_by == "CLAUDE_PROJECT_DIR":
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(r))
+    res = CliRunner().invoke(cli, ["impact", "--json"] + (["--path", str(r)] if given_by == "--path" else []))
 
     assert res.exit_code == 0, res.output
-    assert selected == [default_graph_name(r.resolve())]
+    assert selected == [registered_as or default_graph_name(r.resolve())]
 
 
 def test_impact_cli_outside_a_git_repo_is_a_clean_error(tmp_path):

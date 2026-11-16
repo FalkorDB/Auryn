@@ -66,15 +66,6 @@ def parse_unified_diff(text: str) -> tuple[dict[str, list[tuple[int, int]]], lis
     return changed, deleted
 
 
-def git_toplevel(path: str) -> str:
-    """The root of the git work tree `path` is in -- the directory a repo's graph is keyed by
-    (core/project.default_graph_name), whichever subfolder a command is run from or pointed at.
-    Raises CalledProcessError outside a git work tree."""
-    return subprocess.run(
-        ["git", "-C", path, "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
-    ).stdout.strip()
-
-
 def git_diff(repo_dir: str, base: str | None = None, head: str | None = None, *, staged: bool = False) -> str:
     """Unified diff (`-U0`, exact changed lines) for the requested range: `base..head` if both
     given, `base` vs the working tree if only base, staged changes with `staged=True`, else all
