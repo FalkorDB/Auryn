@@ -127,6 +127,25 @@ def test_wire_trigger_commit_installs_git_hook(monkeypatch, tmp_path):
     assert get_repo(str(repo)).graph_name == "g"
 
 
+def test_wire_trigger_commit_is_not_reported_when_post_commit_was_left_alone(monkeypatch, tmp_path):
+    """The repo's own post-commit hook is a Python script: it is skipped, so an ordinary commit
+    won't resync -- even though the other three hooks were wired. Say so instead of "installed"."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    from auryn.core import hooks
+    from auryn.core.app_config import set_resync_trigger
+
+    repo = _git_repo(tmp_path / "r")
+    post_commit = hooks.hooks_dir(repo) / "post-commit"
+    post_commit.write_text("#!/usr/bin/env python3\nprint('mine')\n")
+    post_commit.chmod(0o755)
+    set_resync_trigger("commit")
+
+    status = lifecycle.wire_trigger(str(repo), "g", "proj")
+
+    assert status["hooks_installed"] is False
+    assert "post-commit" in status["note"] and "auryn sync" in status["note"]
+
+
 def test_wire_trigger_save_starts_watcher_and_no_hook(monkeypatch, tmp_path):
     monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
     from auryn.core import hooks, watcher

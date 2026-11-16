@@ -114,7 +114,7 @@ def test_install_leaves_a_non_shell_hook_and_a_disabled_hook_as_they_are(tmp_pat
 
     wired = hooks.install(repo, ["true"])
 
-    assert wired == ["post-checkout", "post-merge", "post-rewrite"]
+    assert wired == ["post-checkout", "post-rewrite"]  # the hooks that will actually run it
     assert (d / "post-commit").read_text() == python_hook
     assert (d / "post-merge").stat().st_mode & 0o777 == 0o644
     assert (d / "post-merge").read_text().startswith("#!/bin/sh\n# >>> auryn resync >>>")
@@ -134,6 +134,24 @@ def test_install_refuses_a_hooks_dir_outside_the_repos_git_dir(tmp_path):
     assert status.stdout == ""  # the work tree is untouched
 
 
+def test_uninstall_leaves_a_hook_without_our_block_byte_for_byte(tmp_path):
+    """The uninstall sweep reaches every registered repo -- also one that never got our hooks (a
+    `save` / `manual` trigger, a refused hooks dir). A hook that isn't ours must not be rewritten,
+    and a user's bare `#!/bin/sh` placeholder must not be deleted as if it had been ours."""
+    repo = _init_repo(tmp_path / "r")
+    d = hooks.hooks_dir(repo)
+    (d / "post-commit").write_text("#!/bin/sh\n")
+    (d / "post-merge").write_bytes(b"\x7fELF\xff\xfe compiled hook")
+    before = {n: (d / n).read_bytes() for n in ("post-commit", "post-merge")}
+
+    hooks.uninstall(repo)
+    assert {n: (d / n).read_bytes() for n in before} == before
+
+    hooks.install(repo, ["true"])  # install skips the compiled hook too, instead of crashing on it
+    hooks.uninstall(repo)
+    assert (d / "post-merge").read_bytes() == before["post-merge"]
+
+
 def test_uninstall_removes_the_hooks_of_every_registered_repo(monkeypatch, tmp_path):
     """`auryn uninstall` reverses install: a hook left behind would run `auryn sync` on the next
     commit and recreate the home dir that was just removed."""
@@ -146,9 +164,19 @@ def test_uninstall_removes_the_hooks_of_every_registered_repo(monkeypatch, tmp_p
         hooks.install(repo, ["true"])
         assert hooks.is_installed(repo)
 
+    real_uninstall = hooks.uninstall
+
+    def fails_on_the_first(local_dir):  # e.g. a hook file it may not write
+        if str(local_dir) == str(repos[0]):
+            raise PermissionError("read-only hook")
+        real_uninstall(local_dir)
+
+    monkeypatch.setattr(hooks, "uninstall", fails_on_the_first)
+
     do_uninstall(purge=True, adapters=[])
 
-    assert not any(hooks.is_installed(repo) for repo in repos)
+    assert not hooks.is_installed(repos[1])  # one repo failing doesn't strand the next...
+    assert not (tmp_path / "home").exists()  # ...or the rest of the teardown
 
 
 def test_hook_fires_on_commit(tmp_path):

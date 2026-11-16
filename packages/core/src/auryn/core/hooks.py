@@ -18,6 +18,7 @@ What we leave alone, rather than risk breaking a hook that isn't ours:
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -78,6 +79,14 @@ def _owns_hooks_dir(local_dir, d: Path) -> bool:
     return d.resolve() == (common / "hooks").resolve()
 
 
+def _read(path: Path) -> str | None:
+    """A hook's text, or None for one that isn't text at all (a compiled hook) -- never ours to edit."""
+    try:
+        return path.read_text()
+    except UnicodeDecodeError:
+        return None
+
+
 def _is_shell(text: str) -> bool:
     """Whether a hook body can take a shell line: no shebang (git runs it with sh) or a shell one."""
     first = text.split("\n", 1)[0]
@@ -91,8 +100,9 @@ def _is_shell(text: str) -> bool:
 
 def install(local_dir, sync_cmd: list[str]) -> list[str]:
     """Add (or refresh) our resync block in every hook, preserving any existing hook body.
-    Returns the hooks it is now in -- empty when the hooks directory isn't the repo's own, and
-    short of HOOKS when an existing hook isn't a shell script (see the module docstring)."""
+    Returns the hooks that will now run it -- empty when the hooks directory isn't the repo's own,
+    and short of HOOKS when an existing hook isn't a shell script or is disabled (see the module
+    docstring)."""
     d = hooks_dir(local_dir)
     if not _owns_hooks_dir(local_dir, d):
         return []
@@ -102,9 +112,10 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
     for name in HOOKS:
         path = d / name
         if path.exists():
-            base = _strip_block(path.read_text())
-            if not _is_shell(base):
+            text = _read(path)
+            if text is None or not _is_shell(_strip_block(text)):
                 continue
+            base = _strip_block(text)
             if not base.strip():
                 base = "#!/bin/sh\n"  # it held only our block
             # Right after the shebang -- ahead of the user's body, whose `exit` / `exec` would
@@ -114,12 +125,14 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
         else:
             path.write_text("#!/bin/sh\n" + block)
             path.chmod(0o755)
-        wired.append(name)
+        if os.access(path, os.X_OK):  # git skips a non-executable hook: the block is in, but inert
+            wired.append(name)
     return wired
 
 
 def uninstall(local_dir) -> None:
-    """Remove our block from every hook; delete a hook file that was only ours."""
+    """Remove our block from every hook; delete a hook file that was only ours. A hook that
+    doesn't carry our block is left byte-for-byte as it is."""
     try:
         d = hooks_dir(local_dir)
     except Exception:
@@ -128,7 +141,10 @@ def uninstall(local_dir) -> None:
         path = d / name
         if not path.exists():
             continue
-        stripped = _strip_block(path.read_text())
+        text = _read(path)
+        if text is None or _BEGIN not in text:
+            continue
+        stripped = _strip_block(text)
         if stripped.strip() in _BARE:
             path.unlink()
         else:
