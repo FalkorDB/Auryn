@@ -1,6 +1,6 @@
 [project]
 name = "auryn-go"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Go language plugin for Auryn: a fast tree-sitter-go engine extracting packages/structs/interfaces/functions/methods/fields/params/consts, Go embedding (EMBEDS), and calls. IMPLEMENTS (structural interface satisfaction) and precise cross-file type resolution are the planned deep pass (a go/types or gopls-backed engine)."
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
@@ -16,8 +16,24 @@ dependencies = [
 go = "auryn.ingestors.go.plugin"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/auryn"]
+
+# ── version: derived from git (hatch-vcs) ────────────────────────────────────
+# Every commit -- and every build of a modified tree (local part `+g<sha>.d<timestamp>`) -- gets
+# its own version, and uv's build cache is keyed on the git commit and the source files (by default
+# it only watches pyproject.toml). Together these stop `uv tool install --force <clone>` from
+# silently reinstalling a stale cached build. Without git (an sdist/tarball) it falls back to 0.1.0.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.1.0"
+raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" }, { git = { commit = true, tags = true } },
+    { file = "src/**/*.py" }, { file = "src/**/*.js" }, { file = "src/**/*.md" }, { file = "src/**/*.cs" }, { file = "src/**/*.html" }, { file = "src/**/*.css" }, { file = "src/**/*.csproj" },
+]

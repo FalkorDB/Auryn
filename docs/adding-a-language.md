@@ -95,7 +95,7 @@ packages/go/
 ```toml
 [project]
 name = "auryn-go"
-version = "0.1.0"
+dynamic = ["version"]             # derived from git, like every package -- see the last two tables
 description = "Go language plugin for Auryn: …"
 authors = [{ name = "…", email = "…" }]
 requires-python = ">=3.12"
@@ -110,11 +110,24 @@ dependencies = [
 go = "auryn.ingestors.go.plugin"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/auryn"]
+
+# Copy these two tables from any sibling package: the version comes from git (a release builds
+# every package at the tag's version), and uv rebuilds a local install when the sources change.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.1.0"
+raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" }, { git = { commit = true, tags = true } },
+    { file = "src/**/*.py" },    # + any other file type your package ships
+]
 ```
 
 The entry point is the single most important line. When the umbrella asks

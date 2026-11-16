@@ -1,6 +1,6 @@
 [project]
 name = "auryn-php"
-version = "0.1.0"
+dynamic = ["version"]
 description = "PHP language plugin for Auryn: a fast tree-sitter-php engine extracting namespaces/classes/interfaces/traits/enums/functions/methods/properties/constants/params, the type hierarchy (EXTENDS/IMPLEMENTS/USES_TRAIT), and calls. A deep pass (full name-resolution: use-statement aliasing, autoloading, inherited-member calls) is the planned second phase."
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
@@ -16,8 +16,24 @@ dependencies = [
 php = "auryn.ingestors.php.plugin"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/auryn"]
+
+# ── version: derived from git (hatch-vcs) ────────────────────────────────────
+# Every commit -- and every build of a modified tree (local part `+g<sha>.d<timestamp>`) -- gets
+# its own version, and uv's build cache is keyed on the git commit and the source files (by default
+# it only watches pyproject.toml). Together these stop `uv tool install --force <clone>` from
+# silently reinstalling a stale cached build. Without git (an sdist/tarball) it falls back to 0.1.0.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.1.0"
+raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" }, { git = { commit = true, tags = true } },
+    { file = "src/**/*.py" }, { file = "src/**/*.js" }, { file = "src/**/*.md" }, { file = "src/**/*.cs" }, { file = "src/**/*.html" }, { file = "src/**/*.css" }, { file = "src/**/*.csproj" },
+]

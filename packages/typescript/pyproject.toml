@@ -1,6 +1,6 @@
 [project]
 name = "auryn-typescript"
-version = "0.1.0"
+dynamic = ["version"]
 description = "TypeScript/JavaScript language plugin for Auryn: one fast tree-sitter engine over the whole JS/TS family (.ts/.tsx/.js/.jsx/.mjs/.cjs), extracting classes/interfaces/enums/type-aliases/functions/methods/params, the ES-module import graph, and calls. A deep tsserver/TS-compiler pass (resolved types, cross-module calls) is the planned second phase."
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
@@ -21,8 +21,24 @@ dependencies = [
 typescript = "auryn.ingestors.typescript.plugin"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/auryn"]
+
+# ── version: derived from git (hatch-vcs) ────────────────────────────────────
+# Every commit -- and every build of a modified tree (local part `+g<sha>.d<timestamp>`) -- gets
+# its own version, and uv's build cache is keyed on the git commit and the source files (by default
+# it only watches pyproject.toml). Together these stop `uv tool install --force <clone>` from
+# silently reinstalling a stale cached build. Without git (an sdist/tarball) it falls back to 0.1.0.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.1.0"
+raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" }, { git = { commit = true, tags = true } },
+    { file = "src/**/*.py" }, { file = "src/**/*.js" }, { file = "src/**/*.md" }, { file = "src/**/*.cs" }, { file = "src/**/*.html" }, { file = "src/**/*.css" }, { file = "src/**/*.csproj" },
+]

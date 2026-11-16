@@ -1,6 +1,6 @@
 [project]
 name = "auryn-core"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Core of Auryn: registry/plugin discovery, git+local sources, the FalkorDB graph layer, the MCP server, the viewer, and the `auryn` CLI. Language support ships as separate `auryn-<lang>` plugins."
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
@@ -33,7 +33,7 @@ embedded = ["falkordblite>=0.10"]
 auryn = "auryn.cli:cli"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 # PEP 420 namespace package: there is no src/auryn/__init__.py, so several
@@ -42,3 +42,19 @@ build-backend = "hatchling.build"
 # includes the viewer's static assets (non-.py) that live under the tree.
 [tool.hatch.build.targets.wheel]
 packages = ["src/auryn"]
+
+# ── version: derived from git (hatch-vcs) ────────────────────────────────────
+# Every commit -- and every build of a modified tree (local part `+g<sha>.d<timestamp>`) -- gets
+# its own version, and uv's build cache is keyed on the git commit and the source files (by default
+# it only watches pyproject.toml). Together these stop `uv tool install --force <clone>` from
+# silently reinstalling a stale cached build. Without git (an sdist/tarball) it falls back to 0.1.0.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.1.0"
+raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" }, { git = { commit = true, tags = true } },
+    { file = "src/**/*.py" }, { file = "src/**/*.js" }, { file = "src/**/*.md" }, { file = "src/**/*.cs" }, { file = "src/**/*.html" }, { file = "src/**/*.css" }, { file = "src/**/*.csproj" },
+]

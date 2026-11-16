@@ -71,24 +71,12 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Releasing version $v"
 
-      - name: Stamp the version into every package (single source of truth = the tag)
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          python - <<'PY'
-          import os, re, pathlib
-          version = os.environ["VERSION"]
-          files = [pathlib.Path("pyproject.toml"), *sorted(pathlib.Path("packages").glob("*/pyproject.toml"))]
-          for f in files:
-              text = f.read_text()
-              new, n = re.subn(r'(?m)^version = "[^"]*"', f'version = "{version}"', text, count=1)
-              assert n == 1, f"no [project] version line found in {f}"
-              f.write_text(new)
-              print(f"{f} -> {version}")
-          print(f"stamped {len(files)} packages")
-          PY
-
       - name: Build the umbrella + every member package
+        env:
+          # Versions are derived from git (hatch-vcs, see the pyproject files). A release builds
+          # every package at the ONE version resolved above -- single source of truth = the tag --
+          # whatever `git describe` would say about this checkout.
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           rm -rf dist && mkdir -p dist
           uv build --out-dir dist .                    # falkordb-auryn (umbrella)
@@ -96,7 +84,9 @@ jobs:
             uv build --out-dir dist "$d"               # auryn-core + every language/feature dist
           done
 
-      - name: Sanity check — one wheel per workspace package (+ umbrella)
+      - name: Sanity check — one wheel per workspace package (+ umbrella), all at the release version
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           ls -1 dist
           n=$(ls -1 dist/*.whl | wc -l)
@@ -104,6 +94,10 @@ jobs:
           expected=$(( members + 1 ))   # every packages/* member + the umbrella
           echo "built $n wheels; expected $expected ($members members + umbrella)"
           test "$n" -eq "$expected" || { echo "::error::expected $expected wheels, got $n"; exit 1; }
+          # A wheel is built from its sdist, where there is no git: catch one that fell back to
+          # another version instead of publishing a mismatched pair.
+          stray=$(ls -1 dist | grep -Fv -e "-${VERSION}-" -e "-${VERSION}.tar.gz" || true)
+          test -z "$stray" || { echo "::error::not at version $VERSION: $stray"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:

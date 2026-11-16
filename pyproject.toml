@@ -16,7 +16,7 @@
 
 [project]
 name = "falkordb-auryn"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Extracts structural metadata from source code (and SQL databases) into a FalkorDB knowledge graph for AI agent consumption. Umbrella package; language support ships as auryn-<lang> plugins."
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
@@ -99,7 +99,7 @@ all = ["auryn-python", "auryn-csharp", "auryn-oracle[live]", "auryn-sql[all]", "
 auryn = "auryn.cli:cli"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 # The umbrella has no code of its own -- it's a pure dependency aggregator.
@@ -211,3 +211,19 @@ omit = ["*/ingestors/plsql/grammar/*"]
 
 [tool.coverage.report]
 show_missing = true
+
+# ── version: derived from git (hatch-vcs) ────────────────────────────────────
+# Every commit -- and every build of a modified tree (local part `+g<sha>.d<timestamp>`) -- gets
+# its own version, and uv's build cache is keyed on the git commit and the source files (by default
+# it only watches pyproject.toml). Together these stop `uv tool install --force <clone>` from
+# silently reinstalling a stale cached build. Without git (an sdist/tarball) it falls back to 0.1.0.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.1.0"
+raw-options = { root = ".", local_scheme = "node-and-timestamp" }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" }, { git = { commit = true, tags = true } },
+    { file = "packages/*/src/**/*.py" }, { file = "packages/*/src/**/*.js" }, { file = "packages/*/src/**/*.md" }, { file = "packages/*/src/**/*.cs" }, { file = "packages/*/src/**/*.html" }, { file = "packages/*/src/**/*.css" }, { file = "packages/*/src/**/*.csproj" }, { file = "packages/*/pyproject.toml" },
+]

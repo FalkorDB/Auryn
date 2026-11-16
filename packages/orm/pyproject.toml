@@ -1,6 +1,6 @@
 [project]
 name = "auryn-orm"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Language-agnostic ORM model<->database-table stitch for Auryn: a post-ingestion hook that joins a SQLAlchemy model class (in a code graph) to the physical Table/Column nodes a SQL ingestor produced (in a schema graph), by table/column name. Forms the code->database connection across two ingestors so a query can trace a function -> its ORM model -> the real table. Depends only on auryn-core."
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
@@ -16,7 +16,7 @@ dependencies = [
 orm = "auryn.ingestors.orm"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -24,3 +24,19 @@ packages = ["src/auryn"]
 
 [tool.uv.sources]
 auryn-core = { workspace = true }
+
+# ── version: derived from git (hatch-vcs) ────────────────────────────────────
+# Every commit -- and every build of a modified tree (local part `+g<sha>.d<timestamp>`) -- gets
+# its own version, and uv's build cache is keyed on the git commit and the source files (by default
+# it only watches pyproject.toml). Together these stop `uv tool install --force <clone>` from
+# silently reinstalling a stale cached build. Without git (an sdist/tarball) it falls back to 0.1.0.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.1.0"
+raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" }, { git = { commit = true, tags = true } },
+    { file = "src/**/*.py" }, { file = "src/**/*.js" }, { file = "src/**/*.md" }, { file = "src/**/*.cs" }, { file = "src/**/*.html" }, { file = "src/**/*.css" }, { file = "src/**/*.csproj" },
+]

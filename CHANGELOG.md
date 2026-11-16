@@ -24,6 +24,9 @@ instead of grepping.
 - **Incremental resync** — after the first pass, re-ingestion is a delta; unchanged files
   are a no-op. Commit-hook and save-watcher triggers keep the graph fresh.
 - **Semantic + lexical code search** over the graph.
+- **`auryn --version`** — the installed version and, for a build from a clone, the git commit
+  it was built from. Versions are derived from git, so reinstalling from a clone after a
+  `git pull` or a local edit always rebuilds.
 - Umbrella distribution `falkordb-auryn` with per-language `auryn-<lang>` plugin packages,
   so you install only the languages you need.
 

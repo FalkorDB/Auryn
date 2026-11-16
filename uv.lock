@@ -93,7 +93,6 @@ wheels = [
 
 [[package]]
 name = "auryn-bash"
-version = "0.1.0"
 source = { editable = "packages/bash" }
 dependencies = [
     { name = "auryn-core" },
@@ -110,7 +109,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-c"
-version = "0.1.0"
 source = { editable = "packages/c" }
 dependencies = [
     { name = "auryn-core" },
@@ -127,7 +125,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-core"
-version = "0.1.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "click" },
@@ -157,11 +154,10 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.2,<2.1" },
     { name = "tomli-w", specifier = ">=1.0" },
 ]
-provides-extras = ["llm", "embedded"]
+provides-extras = ["embedded", "llm"]
 
 [[package]]
 name = "auryn-cpp"
-version = "0.1.0"
 source = { editable = "packages/cpp" }
 dependencies = [
     { name = "auryn-core" },
@@ -178,7 +174,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-csharp"
-version = "0.1.0"
 source = { editable = "packages/csharp" }
 dependencies = [
     { name = "auryn-core" },
@@ -197,7 +192,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-cuda"
-version = "0.1.0"
 source = { editable = "packages/cuda" }
 dependencies = [
     { name = "auryn-core" },
@@ -216,7 +210,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-events"
-version = "0.1.0"
 source = { editable = "packages/events" }
 dependencies = [
     { name = "auryn-core" },
@@ -227,7 +220,6 @@ requires-dist = [{ name = "auryn-core", editable = "packages/core" }]
 
 [[package]]
 name = "auryn-go"
-version = "0.1.0"
 source = { editable = "packages/go" }
 dependencies = [
     { name = "auryn-core" },
@@ -244,7 +236,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-grpc"
-version = "0.1.0"
 source = { editable = "packages/grpc" }
 dependencies = [
     { name = "auryn-core" },
@@ -255,7 +246,6 @@ requires-dist = [{ name = "auryn-core", editable = "packages/core" }]
 
 [[package]]
 name = "auryn-http"
-version = "0.1.0"
 source = { editable = "packages/http" }
 dependencies = [
     { name = "auryn-core" },
@@ -266,7 +256,6 @@ requires-dist = [{ name = "auryn-core", editable = "packages/core" }]
 
 [[package]]
 name = "auryn-java"
-version = "0.1.0"
 source = { editable = "packages/java" }
 dependencies = [
     { name = "auryn-core" },
@@ -283,7 +272,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-julia"
-version = "0.1.0"
 source = { editable = "packages/julia" }
 dependencies = [
     { name = "auryn-core" },
@@ -300,7 +288,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-kotlin"
-version = "0.1.0"
 source = { editable = "packages/kotlin" }
 dependencies = [
     { name = "auryn-core" },
@@ -317,7 +304,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-oracle"
-version = "0.1.0"
 source = { editable = "packages/oracle" }
 dependencies = [
     { name = "antlr4-python3-runtime" },
@@ -345,7 +331,6 @@ provides-extras = ["live"]
 
 [[package]]
 name = "auryn-orm"
-version = "0.1.0"
 source = { editable = "packages/orm" }
 dependencies = [
     { name = "auryn-core" },
@@ -356,7 +341,6 @@ requires-dist = [{ name = "auryn-core", editable = "packages/core" }]
 
 [[package]]
 name = "auryn-php"
-version = "0.1.0"
 source = { editable = "packages/php" }
 dependencies = [
     { name = "auryn-core" },
@@ -373,7 +357,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-python"
-version = "0.1.0"
 source = { editable = "packages/python" }
 dependencies = [
     { name = "auryn-core" },
@@ -388,7 +371,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-ruby"
-version = "0.1.0"
 source = { editable = "packages/ruby" }
 dependencies = [
     { name = "auryn-core" },
@@ -405,7 +387,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-rust"
-version = "0.1.0"
 source = { editable = "packages/rust" }
 dependencies = [
     { name = "auryn-core" },
@@ -422,7 +403,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-sql"
-version = "0.1.0"
 source = { editable = "packages/sql" }
 dependencies = [
     { name = "auryn-core" },
@@ -458,11 +438,10 @@ requires-dist = [
     { name = "pymysql", marker = "extra == 'mysql'", specifier = ">=1.1" },
     { name = "sqlalchemy", specifier = ">=2.0" },
 ]
-provides-extras = ["postgres", "mysql", "oracle", "all"]
+provides-extras = ["all", "mysql", "oracle", "postgres"]
 
 [[package]]
 name = "auryn-swift"
-version = "0.1.0"
 source = { editable = "packages/swift" }
 dependencies = [
     { name = "auryn-core" },
@@ -479,7 +458,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-typescript"
-version = "0.1.0"
 source = { editable = "packages/typescript" }
 dependencies = [
     { name = "auryn-core" },
@@ -942,7 +920,6 @@ wheels = [
 
 [[package]]
 name = "falkordb-auryn"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "auryn-bash" },
@@ -1168,7 +1145,7 @@ requires-dist = [
     { name = "auryn-typescript", marker = "extra == 'all'", editable = "packages/typescript" },
     { name = "auryn-typescript", marker = "extra == 'typescript'", editable = "packages/typescript" },
 ]
-provides-extras = ["python", "csharp", "oracle", "oracle-live", "sql", "sql-all", "http", "orm", "grpc", "events", "c", "cpp", "cuda", "typescript", "java", "go", "rust", "php", "julia", "ruby", "kotlin", "swift", "bash", "embedded", "all"]
+provides-extras = ["all", "bash", "c", "cpp", "csharp", "cuda", "embedded", "events", "go", "grpc", "http", "java", "julia", "kotlin", "oracle", "oracle-live", "orm", "php", "python", "ruby", "rust", "sql", "sql-all", "swift", "typescript"]
 
 [package.metadata.requires-dev]
 dev = [
