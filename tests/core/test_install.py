@@ -9,7 +9,14 @@ import subprocess
 
 import pytest
 
-from auryn.core.app_config import AgentRegistration, Backend, load_config
+from auryn.core.app_config import (
+    AgentRegistration,
+    Backend,
+    Config,
+    RepoRegistration,
+    load_config,
+    save_config,
+)
 from auryn.core.install import do_install, do_uninstall
 
 
@@ -68,6 +75,26 @@ def test_uninstall_reverses_manifest_and_clears(tmp_path, monkeypatch):
     assert agent.deregistered is not None and agent.deregistered.name == "fake"
     assert [a.name for a in prior.agents] == ["fake"]  # returns what it removed
     assert load_config().agents == ()  # manifest cleared, backend kept
+
+
+def test_reinstall_and_uninstall_keep_the_rest_of_the_config(tmp_path, monkeypatch):
+    """`install` is re-runnable and a plain `uninstall` keeps the data: both rewrite the backend /
+    agents only. The repo registry, a disabled hook and the embed setting must survive -- losing
+    the registry orphans every ingested repo's graph name and hook target."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    repo = RepoRegistration(local_dir="/work/api", graph_name="shared", project_name="api", trigger="save")
+    save_config(Config(repos=(repo,), disabled_hooks=("http-endpoints",), auto_embed=True))
+
+    agent = _FakeAgent()
+    do_install(Backend(mode="remote", host="db", port=6400), adapters=[agent], server_command=["x"])
+    cfg = load_config()
+    assert (cfg.backend.mode, cfg.backend.host, [a.name for a in cfg.agents]) == ("remote", "db", ["fake"])
+    assert (cfg.repos, cfg.disabled_hooks, cfg.auto_embed) == ((repo,), ("http-endpoints",), True)
+
+    do_uninstall(adapters=[agent])
+    cfg = load_config()
+    assert (cfg.agents, cfg.backend.host) == ((), "db")
+    assert (cfg.repos, cfg.disabled_hooks, cfg.auto_embed) == ((repo,), ("http-endpoints",), True)
 
 
 def test_uninstall_purge_removes_home(tmp_path, monkeypatch):
