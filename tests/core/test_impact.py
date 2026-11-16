@@ -50,7 +50,8 @@ def test_parse_multiple_hunks_and_files():
 
 def test_git_diff_never_runs_a_ref_as_an_option(tmp_path):
     """`base` / `head` arrive from the caller; one that starts with `-` must fail as a bad
-    revision, not run as a git option (`--output=<file>` would write that file)."""
+    revision, not run as a git option (`--output=<file>` would write that file). A real ref
+    still diffs."""
     r = tmp_path / "repo"
     r.mkdir()
     def git(*a): subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True)
@@ -62,6 +63,10 @@ def test_git_diff_never_runs_a_ref_as_an_option(tmp_path):
         with pytest.raises(subprocess.CalledProcessError):
             git_diff(str(r), **kwargs)
     assert not victim.exists()
+
+    (r / "m.py").write_text("def f():\n    return 2\n")
+    assert "+    return 2" in git_diff(str(r), base="HEAD")
+    assert git_diff(str(r), base="HEAD", head="HEAD") == ""
 
 
 def test_git_diff_roundtrip(tmp_path):

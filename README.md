@@ -47,7 +47,7 @@ auryn quickstart path/to/your/repo
 The graph persists at `<path>/.auryn/graph.db`, so re-running reuses it. First pass parses
 everything; after that, re-ingestion is a delta — unchanged files are a no-op.
 
-> **Requirements** — Python ≥ 3.12. `falkordb-auryn` is batteries-included: every language plugin out
+> **Requirements** — Python ≥ 3.12, git ≥ 2.24. `falkordb-auryn` is batteries-included: every language plugin out
 > of the box. The in-process database is fetched automatically on first `auryn quickstart` on macOS /
 > Linux (recent glibc); on native Windows or older-glibc Linux, point at a remote FalkorDB via
 > `auryn install --backend remote`. Add live-DB drivers with `"falkordb-auryn[all]"`. For an isolated

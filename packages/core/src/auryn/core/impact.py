@@ -73,7 +73,7 @@ def git_diff(repo_dir: str, base: str | None = None, head: str | None = None, *,
     cmd = ["git", "-C", repo_dir, "diff", "-U0", "--no-color"]
     # `base`/`head` come from the caller (the impact_of_diff MCP tool, --base/--head). End option
     # parsing before them so a value starting with `-` fails as a bad revision instead of running
-    # as a git option (`--output=<file>` would overwrite that file).
+    # as a git option (`--output=<file>` would overwrite that file). `--end-of-options`: git >= 2.24.
     if base and head:
         cmd += ["--end-of-options", base, head]
     elif base:
