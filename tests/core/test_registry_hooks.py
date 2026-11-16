@@ -134,6 +134,67 @@ def test_install_refuses_a_hooks_dir_outside_the_repos_git_dir(tmp_path):
     assert status.stdout == ""  # the work tree is untouched
 
 
+def test_install_takes_an_older_versions_block_out_of_a_hook_it_now_skips(tmp_path):
+    """Upgrading: earlier versions appended the block to ANY hook -- a Python one (a SyntaxError on
+    every commit) and one under `core.hooksPath` (a tracked file). Only skipping those on the next
+    install would leave them broken for good, so the skip also takes the old block back out."""
+    repo = _init_repo(tmp_path / "r")
+    d = hooks.hooks_dir(repo)
+    old_block = "# >>> auryn resync >>>\n/old/python -m auryn sync /r >/dev/null 2>&1 &\n# <<< auryn resync <<<\n"
+    python_hook = "#!/usr/bin/env python3\nprint('mine')\n"
+    (d / "post-commit").write_text(python_hook + old_block)
+    (d / "post-commit").chmod(0o755)
+
+    assert "post-commit" not in hooks.install(repo, ["true"])
+    assert (d / "post-commit").read_text() == python_hook
+
+    husky = repo / ".husky"
+    husky.mkdir()
+    (husky / "post-commit").write_text("#!/bin/sh\nnpm test\n" + old_block)
+    (husky / "post-merge").write_text("#!/bin/sh\n" + old_block)  # only ever ours
+    _git(repo, "config", "core.hooksPath", ".husky")
+
+    assert hooks.install(repo, ["true"]) == []
+    assert (husky / "post-commit").read_text() == "#!/bin/sh\nnpm test\n"
+    assert not (husky / "post-merge").exists()
+
+
+def test_install_never_writes_through_a_symlinked_hook(tmp_path):
+    """`.git/hooks/post-commit -> ../../scripts/post-commit` (a tracked script linked into place):
+    writing the block there edits the tracked file through the link. A symlinked hook is left
+    alone, and a dangling one doesn't get its target created."""
+    repo = _init_repo(tmp_path / "r")
+    d = hooks.hooks_dir(repo)
+    tracked = repo / "scripts" / "post-commit"
+    tracked.parent.mkdir()
+    tracked.write_text("#!/bin/sh\necho mine\n")
+    tracked.chmod(0o755)
+    (d / "post-commit").symlink_to(tracked)
+    (d / "post-merge").symlink_to(repo / "scripts" / "gone")
+
+    wired = hooks.install(repo, ["true"])
+
+    assert wired == ["post-checkout", "post-rewrite"]
+    assert tracked.read_text() == "#!/bin/sh\necho mine\n"
+    assert not (repo / "scripts" / "gone").exists()
+
+
+def test_a_crlf_hook_keeps_its_line_endings(tmp_path):
+    """A hook saved with CRLF line endings came back LF once the block went in or out -- every
+    line of a hook that wasn't ours to reformat. Its own lines are written back as they were read."""
+    repo = _init_repo(tmp_path / "r")
+    path = hooks.hooks_dir(repo) / "post-commit"
+    path.write_bytes(b"#!/bin/sh\r\necho mine\r\n")
+    path.chmod(0o755)
+
+    hooks.install(repo, ["true"])
+    assert path.read_bytes().startswith(b"#!/bin/sh\r\n# >>> auryn resync >>>")
+    assert path.read_bytes().endswith(b"echo mine\r\n")
+
+    hooks.uninstall(repo)
+    assert path.read_bytes() == b"#!/bin/sh\r\necho mine\r\n"
+
+
 def test_uninstall_leaves_a_hook_without_our_block_byte_for_byte(tmp_path):
     """The uninstall sweep reaches every registered repo -- also one that never got our hooks (a
     `save` / `manual` trigger, a refused hooks dir). A hook that isn't ours must not be rewritten,
@@ -146,6 +207,7 @@ def test_uninstall_leaves_a_hook_without_our_block_byte_for_byte(tmp_path):
 
     hooks.uninstall(repo)
     assert {n: (d / n).read_bytes() for n in before} == before
+    assert not hooks.is_installed(repo)  # ...and the status check reads past the compiled hook
 
     hooks.install(repo, ["true"])  # install skips the compiled hook too, instead of crashing on it
     hooks.uninstall(repo)

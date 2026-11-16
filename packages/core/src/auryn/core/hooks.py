@@ -13,7 +13,10 @@ What we leave alone, rather than risk breaking a hook that isn't ours:
     `git add -A` away from the whole team) or shared by every repo on the machine (each commit
     anywhere would resync the last repo ingested);
   * a hook that isn't a shell script (a `#!/usr/bin/env python3` hook can't run a shell line);
-  * an existing hook's file mode (a hook the user disabled stays disabled).
+  * a hook that is a symlink (a write would go through it, into a tracked script or a hook
+    manager's own file);
+  * an existing hook's file mode (a hook the user disabled stays disabled) and line endings.
+Earlier versions wrote into all of these, so skipping one also takes an old block back out of it.
 """
 
 from __future__ import annotations
@@ -68,21 +71,24 @@ def _strip_block(text: str) -> str:
     return "".join(out)
 
 
-def _owns_hooks_dir(local_dir, d: Path) -> bool:
-    """True when `d` is the repo's own `<git dir>/hooks`, i.e. `core.hooksPath` doesn't redirect
-    it into the work tree or to a directory other repos share (see the module docstring)."""
+def owns_hooks_dir(local_dir) -> bool:
+    """True when the hooks directory is the repo's own `<git dir>/hooks`, i.e. `core.hooksPath`
+    doesn't redirect it into the work tree or to a directory other repos share (see the module
+    docstring)."""
     out = subprocess.run(
         ["git", "-C", str(local_dir), "rev-parse", "--git-common-dir"],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
     common = Path(out) if Path(out).is_absolute() else Path(local_dir) / out
-    return d.resolve() == (common / "hooks").resolve()
+    return hooks_dir(local_dir).resolve() == (common / "hooks").resolve()
 
 
 def _read(path: Path) -> str | None:
-    """A hook's text, or None for one that isn't text at all (a compiled hook) -- never ours to edit."""
+    """A hook's text, line endings untranslated (a CRLF hook is written back CRLF), or None for
+    one that isn't text at all (a compiled hook) -- never ours to edit."""
     try:
-        return path.read_text()
+        with path.open(newline="") as f:
+            return f.read()
     except UnicodeDecodeError:
         return None
 
@@ -101,11 +107,12 @@ def _is_shell(text: str) -> bool:
 def install(local_dir, sync_cmd: list[str]) -> list[str]:
     """Add (or refresh) our resync block in every hook, preserving any existing hook body.
     Returns the hooks that will now run it -- empty when the hooks directory isn't the repo's own,
-    and short of HOOKS when an existing hook isn't a shell script or is disabled (see the module
-    docstring)."""
-    d = hooks_dir(local_dir)
-    if not _owns_hooks_dir(local_dir, d):
+    and short of HOOKS when an existing hook isn't a shell script, is a symlink or is disabled
+    (see the module docstring)."""
+    if not owns_hooks_dir(local_dir):
+        uninstall(local_dir)  # a block an earlier version put there
         return []
+    d = hooks_dir(local_dir)
     d.mkdir(parents=True, exist_ok=True)
     block = _block(sync_cmd)
     wired = []
@@ -113,16 +120,20 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
         path = d / name
         if path.exists():
             text = _read(path)
-            if text is None or not _is_shell(_strip_block(text)):
+            if text is None:
                 continue
             base = _strip_block(text)
+            if path.is_symlink() or not _is_shell(base):
+                if base != text:  # a block an earlier version put there
+                    path.write_text(base, newline="")
+                continue
             if not base.strip():
                 base = "#!/bin/sh\n"  # it held only our block
             # Right after the shebang -- ahead of the user's body, whose `exit` / `exec` would
             # otherwise end the hook before our (backgrounded) line. The file keeps its mode.
             head, _, body = base.partition("\n") if base.startswith("#!") else ("", "", base)
-            path.write_text((head + "\n" if head else "") + block + body)
-        else:
+            path.write_text((head + "\n" if head else "") + block + body, newline="")
+        elif not path.is_symlink():  # a dangling link: its target isn't ours to create
             path.write_text("#!/bin/sh\n" + block)
             path.chmod(0o755)
         if os.access(path, os.X_OK):  # git skips a non-executable hook: the block is in, but inert
@@ -148,7 +159,7 @@ def uninstall(local_dir) -> None:
         if stripped.strip() in _BARE:
             path.unlink()
         else:
-            path.write_text(stripped)
+            path.write_text(stripped, newline="")
 
 
 def is_installed(local_dir) -> bool:
@@ -156,4 +167,4 @@ def is_installed(local_dir) -> bool:
         d = hooks_dir(local_dir)
     except Exception:
         return False
-    return any((d / n).exists() and _BEGIN in (d / n).read_text() for n in HOOKS)
+    return any((d / n).exists() and _BEGIN in (_read(d / n) or "") for n in HOOKS)
