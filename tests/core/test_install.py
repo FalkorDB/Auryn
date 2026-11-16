@@ -97,6 +97,45 @@ def test_reinstall_and_uninstall_keep_the_rest_of_the_config(tmp_path, monkeypat
     assert (cfg.repos, cfg.disabled_hooks, cfg.auto_embed) == ((repo,), ("http-endpoints",), True)
 
 
+def test_reinstall_keeps_an_agent_this_run_did_not_register(tmp_path, monkeypatch):
+    """The manifest is what `uninstall` reverses, so a re-run must not drop an agent an earlier run
+    registered just because it isn't detected now (its CLI off PATH in this shell): the entry
+    would stay in that agent's config for good. The returned Config still lists this run only."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    save_config(Config(agents=(AgentRegistration(name="cursor", config_path="/home/u/.cursor/mcp.json"),)))
+
+    for _ in range(2):  # a second re-run replaces `fake`'s entry, never duplicates it
+        cfg = do_install(Backend(mode="local"), adapters=[_FakeAgent()], server_command=["x"])
+        assert [a.name for a in cfg.agents] == ["fake"]
+        assert [a.name for a in load_config().agents] == ["cursor", "fake"]
+
+
+def test_install_stops_on_an_unreadable_config_before_touching_any_agent(tmp_path, monkeypatch):
+    """A config.toml that isn't valid TOML: `install` used to register every agent and only then
+    crash reading it -- agents wired up, no manifest to reverse them. It now stops first (the CLI
+    with one line naming the file) and leaves both the agents and the file alone."""
+    import tomllib
+
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+
+    home = tmp_path / "cg"
+    home.mkdir()
+    (home / "config.toml").write_text("[backend\n")
+    monkeypatch.setenv("AURYN_HOME", str(home))
+    agent = _FakeAgent()
+    monkeypatch.setattr("auryn.core.install.default_adapters", lambda: [agent])
+
+    with pytest.raises(tomllib.TOMLDecodeError):
+        do_install(Backend(mode="local"), adapters=[agent], server_command=["x"])
+    result = CliRunner().invoke(cli, ["install", "-y"])
+
+    assert result.exit_code == 1 and "config.toml isn't valid TOML" in result.output
+    assert agent.registered_command is None
+    assert (home / "config.toml").read_text() == "[backend\n"
+
+
 def test_uninstall_purge_removes_home(tmp_path, monkeypatch):
     home = tmp_path / "cg"
     monkeypatch.setenv("AURYN_HOME", str(home))
@@ -200,6 +239,27 @@ def test_yes_remote_honors_explicit_connection():
 
     b = _prompt_backend("remote", "db.example", 6400, "u", "p", True, assume_yes=True)
     assert (b.mode, b.host, b.port, b.username, b.password, b.ssl) == ("remote", "db.example", 6400, "u", "p", True)
+
+
+def test_yes_keeps_the_saved_trigger_and_embed_setting(tmp_path, monkeypatch):
+    """`install -y` re-run on a configured machine: an option that isn't passed keeps what
+    config.toml already says. It used to fall back to `commit` / no embeddings, which silently
+    turned a save-triggered repo's watcher and auto-embed off. An explicit option still wins."""
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    monkeypatch.setattr("auryn.core.install.default_adapters", lambda: [_FakeAgent()])
+    save_config(Config(resync_trigger="save", auto_embed=True))
+
+    assert CliRunner().invoke(cli, ["install", "-y"]).exit_code == 0
+    cfg = load_config()
+    assert (cfg.resync_trigger, cfg.auto_embed) == ("save", True)
+
+    assert CliRunner().invoke(cli, ["install", "-y", "--trigger", "manual", "--no-embed"]).exit_code == 0
+    cfg = load_config()
+    assert (cfg.resync_trigger, cfg.auto_embed) == ("manual", False)
 
 
 # ── File-config agents (Antigravity / Copilot / Cursor / Windsurf) ────────────

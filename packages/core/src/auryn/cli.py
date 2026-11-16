@@ -360,11 +360,12 @@ def _prompt_backend(backend, host, port, username, password, ssl, assume_yes):
 @click.option("--password", default=None, help="Remote FalkorDB password.")
 @click.option("--ssl", is_flag=True, default=False, help="Connect to the remote FalkorDB over TLS.")
 @click.option("--trigger", type=click.Choice(["manual", "commit", "save"]), default=None,
-              help="How the graph is kept fresh after an edit. Prompted for if omitted (default: commit).")
+              help="How the graph is kept fresh after an edit. Prompted for if omitted (default: the "
+                   "saved setting, else commit).")
 @click.option("--embed/--no-embed", "embed_opt", default=None,
               help="Automatically build & refresh semantic embeddings on every ingest (persisted in "
                    "~/.auryn/config.toml, so it sticks across shells/venvs/MCP restarts). Prompted for "
-                   "if omitted (default: no).")
+                   "if omitted (default: the saved setting, else no).")
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="Non-interactive: auto-select the backend (local unless --backend is given) and skip all prompts.")
 def install(backend, host, port, username, password, ssl, trigger, embed_opt, yes) -> None:
@@ -372,16 +373,28 @@ def install(backend, host, port, username, password, ssl, trigger, embed_opt, ye
     with every detected agent (Claude Code, OpenAI Codex, Antigravity, GitHub Copilot, Cursor,
     Windsurf, Gemini CLI), user-scoped. Writes only to ~/.auryn and the agent's own config —
     never your repo. Re-runnable."""
-    from auryn.core.app_config import set_auto_embed, set_resync_trigger
+    import tomllib
+
+    from auryn.core.app_config import load_config, set_auto_embed, set_resync_trigger
+    from auryn.core.home import config_path
     from auryn.core.install import default_server_command, do_install
 
+    try:
+        # Read first: an option that isn't passed keeps the saved setting (a re-run must not turn
+        # a `save` trigger or auto-embed back off), and a config.toml we can't read has to stop
+        # the install before any agent is registered against it.
+        saved = load_config()
+    except tomllib.TOMLDecodeError as e:
+        raise click.ClickException(
+            f"{config_path()} isn't valid TOML ({e}). Fix or remove it, then re-run `auryn install`.") from e
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
     if trigger is None:
-        trigger = "commit" if yes else click.prompt(
-            "Keep the graph fresh on", type=click.Choice(["commit", "save", "manual"]), default="commit")
+        trigger = saved.resync_trigger if yes else click.prompt(
+            "Keep the graph fresh on", type=click.Choice(["commit", "save", "manual"]),
+            default=saved.resync_trigger)
     if embed_opt is None:
-        embed_opt = False if yes else click.confirm(
-            "Build semantic embeddings automatically on every ingest?", default=False)
+        embed_opt = saved.auto_embed if yes else click.confirm(
+            "Build semantic embeddings automatically on every ingest?", default=saved.auto_embed)
     config = do_install(chosen)
     set_resync_trigger(trigger)
     set_auto_embed(embed_opt)

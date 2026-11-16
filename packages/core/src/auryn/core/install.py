@@ -31,12 +31,13 @@ def default_server_command() -> list[str]:
 
 def do_install(backend: Backend, *, adapters=None, server_command: list[str] | None = None) -> Config:
     """Register with every detected agent and persist the config + manifest. Returns the saved
-    Config (its ``agents`` are exactly those that were registered -- empty if none detected).
+    Config with ``agents`` narrowed to those this run registered (empty if none detected).
 
     Resilient per agent: a detected agent whose registration fails (unreachable CLI, a config
     file we can't safely edit, ...) is logged and skipped so the others still get wired up."""
     adapters = default_adapters() if adapters is None else adapters
     command = server_command or default_server_command()
+    prior = load_config()  # before any agent is touched: an unreadable config.toml fails here
     registrations = []
     for adapter in adapters:
         if not adapter.detect():
@@ -46,9 +47,12 @@ def do_install(backend: Backend, *, adapters=None, server_command: list[str] | N
         except Exception as e:  # noqa: BLE001 -- one bad agent must not fail the whole install
             logger.warning("Skipped %s: could not register (%s)", adapter.name, e)
     # Only the backend + manifest are install's to rewrite: a re-run must keep the repo registry,
-    # the resync trigger, disabled hooks and the embed setting already in config.toml.
-    config = replace(load_config(), backend=backend, agents=tuple(registrations))
-    save_config(config)
+    # the resync trigger, disabled hooks and the embed setting already in config.toml. The manifest
+    # also keeps an agent an earlier run registered and this one didn't (not detected from this
+    # shell, or its registration failed) -- `uninstall` reverses only what the manifest lists.
+    config = replace(prior, backend=backend, agents=tuple(registrations))
+    names = {r.name for r in registrations}
+    save_config(replace(config, agents=tuple(a for a in prior.agents if a.name not in names) + config.agents))
     return config
 
 

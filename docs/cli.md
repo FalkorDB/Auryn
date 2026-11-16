@@ -29,7 +29,8 @@ every detected agent (e.g. Claude Code).
 - `--backend local|remote` — bundled falkordb-lite vs. an existing server (prompted if omitted).
 - `--host/--port/--username/--password/--ssl` — the remote server (with `--backend remote`).
 - `--trigger manual|commit|save` — how the graph is kept fresh after an edit (prompted if omitted).
-- `-y/--yes` — non-interactive (local backend unless `--backend` is given).
+- `-y/--yes` — non-interactive (local backend unless `--backend` is given; an omitted `--trigger` /
+  `--embed` keeps the saved setting).
 
 ### `uninstall`
 Reverse `install`: stop the local server and deregister Auryn from every agent.
