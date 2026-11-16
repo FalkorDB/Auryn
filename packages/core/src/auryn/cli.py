@@ -3,9 +3,9 @@ server + skill with detected agents; choose local-lite vs remote FalkorDB) and `
 (the lazy local FalkorDB daemon). Core: `auryn run <name>`, `view`, `mcp`,
 `git-sync <name>`, `ingest <dir|repo>`, and `quickstart <dir>` (zero-setup embedded ingest+view).
 
-For the local backend, `view`/`mcp`/`ingest` resolve their connection via ensure_server(), which
-starts the bundled FalkorDB on demand; the graph defaults to one per repository (CLAUDE_PROJECT_DIR
-for the agent-spawned MCP server, else the path/cwd).
+For the local backend, `view`/`mcp`/`ingest`/`run`/`git-sync` resolve their connection via
+ensure_server(), which starts the bundled FalkorDB on demand; the graph defaults to one per
+repository (CLAUDE_PROJECT_DIR for the agent-spawned MCP server, else the path/cwd).
 
 Adding a new ingestor never requires touching this file: `run` dynamically attaches
 a subcommand for every ingestor discovered by discover_ingestors() that implements
@@ -43,9 +43,28 @@ def cli(verbose: bool) -> None:
         progress.set_verbose(True)
 
 
+class _LazyConnection(dict):
+    """`ctx.obj` for the `run` / `git-sync` groups: `falkordb_config` is resolved on first use, not
+    in the group callback. click runs that callback even for `auryn run <name> --help`, and
+    resolving the configured backend starts the local FalkorDB (see _resolve_connection)."""
+
+    def __init__(self, host, port, username, password, ssl, graph_name) -> None:
+        super().__init__()
+        self._args = (host, port, username, password, ssl)
+        self._graph_name = graph_name
+
+    def __missing__(self, key):
+        if key != "falkordb_config":
+            raise KeyError(key)
+        import dataclasses
+
+        self[key] = dataclasses.replace(_resolve_connection(*self._args), graph_name=self._graph_name)
+        return self[key]
+
+
 @click.group()
-@click.option("--host", default="localhost", show_default=True, help="FalkorDB host.")
-@click.option("--port", default=6379, show_default=True, type=int, help="FalkorDB port.")
+@click.option("--host", default=None, help="FalkorDB host. Default: the configured backend (local starts on demand).")
+@click.option("--port", default=None, type=int, help="FalkorDB port (only with --host).")
 @click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
 @click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
 @click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
@@ -53,27 +72,18 @@ def cli(verbose: bool) -> None:
 @click.pass_context
 def run(
     ctx: click.Context,
-    host: str,
-    port: int,
+    host: str | None,
+    port: int | None,
     username: str | None,
     password: str | None,
     ssl: bool,
     graph_name: str,
 ) -> None:
     """Run a registered ingestor against a FalkorDB instance."""
-    # Deliberately just stashes the config, without connecting -- connecting here
-    # would run even for `auryn run <name> --help`, since click invokes a group's
+    # Deliberately just stashes how to reach FalkorDB, without resolving or connecting --
+    # that would run even for `auryn run <name> --help`, since click invokes a group's
     # callback before dispatching to its subcommand.
-    ctx.obj = {
-        "falkordb_config": FalkorDBConfig(
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            ssl=ssl,
-            graph_name=graph_name,
-        )
-    }
+    ctx.obj = _LazyConnection(host, port, username, password, ssl, graph_name)
 
 
 def _attach_ingestor_commands() -> None:
@@ -654,8 +664,8 @@ def _wire_trigger(local_dir, graph_name: str, project_name: str | None, trigger:
 
 
 @click.group("git-sync")
-@click.option("--host", default="localhost", show_default=True, help="FalkorDB host.")
-@click.option("--port", default=6379, show_default=True, type=int, help="FalkorDB port.")
+@click.option("--host", default=None, help="FalkorDB host. Default: the configured backend (local starts on demand).")
+@click.option("--port", default=None, type=int, help="FalkorDB port (only with --host).")
 @click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
 @click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
 @click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
@@ -663,19 +673,15 @@ def _wire_trigger(local_dir, graph_name: str, project_name: str | None, trigger:
 @click.pass_context
 def git_sync(
     ctx: click.Context,
-    host: str,
-    port: int,
+    host: str | None,
+    port: int | None,
     username: str | None,
     password: str | None,
     ssl: bool,
     graph_name: str,
 ) -> None:
     """Ingest, or move to a different commit/branch/tag, a git-tracked project's graph."""
-    ctx.obj = {
-        "falkordb_config": FalkorDBConfig(
-            host=host, port=port, username=username, password=password, ssl=ssl, graph_name=graph_name
-        )
-    }
+    ctx.obj = _LazyConnection(host, port, username, password, ssl, graph_name)
 
 
 @git_sync.command("csharp")

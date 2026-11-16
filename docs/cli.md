@@ -89,6 +89,9 @@ Zero-setup: ingest `PATH` into an **embedded** FalkorDB and open the viewer — 
 - `--host/--port` (viewer bind), `--no-open`, and the same `--include-*/--exclude-*/--deep` filters.
 
 ### `run <ingestor>` (shared: `--host/--port/--username/--password/--ssl/--graph-name`)
+With no `--host`, `run` and `git-sync` use the configured backend (the local one starts on demand),
+like every other command.
+
 - **`run sql`** — reflect a live SQL database's schema (tables, columns, FKs, indexes,
   constraints, views, sequences). `--dsn` (SQLAlchemy URL), `--database-name`, `--schema` (repeatable).
 - **`run oracle`** — Oracle PL/SQL from a **live** DB (packages, procedures, functions, triggers,
