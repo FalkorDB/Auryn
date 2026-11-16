@@ -6,7 +6,9 @@
 export function esc(v) {
   const d = document.createElement("div");
   d.textContent = v == null ? "" : String(v);
-  return d.innerHTML;
+  // innerHTML escapes only & < >. Quotes too: esc() output also lands inside attribute values
+  // (title="...", value="..."), where an unescaped quote from a repo's own names ends the attribute.
+  return d.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 const isNumeric = (v) => typeof v === "number" || (typeof v === "string" && v !== "" && !isNaN(v) && !isNaN(parseFloat(v)));

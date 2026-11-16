@@ -56,6 +56,20 @@ def test_list_graphs_includes_seeded_graph(tmp_path, graph, falkordb_connection)
     assert graph_name in resp.get_json()
 
 
+def test_loopback_viewer_serves_loopback_host_names_only(falkordb_connection):
+    """DNS rebinding: a page that resolves its own name to 127.0.0.1 reaches the viewer with THAT
+    name in Host. Bound to loopback (the default) it answers only to loopback names; bound
+    elsewhere on purpose (`--host 0.0.0.0`) it serves whatever name it is reached under."""
+    client = create_app(falkordb_connection).test_client()
+    for host in ("localhost", "localhost:8080", "127.0.0.1:8080", "[::1]:8080", "[::1]"):
+        assert client.get("/api/graphs", headers={"Host": host}).status_code == 200, host
+    for host in ("evil.example", "evil.example:8080", "localhost.evil.example:8080"):
+        assert client.get("/api/graphs", headers={"Host": host}).status_code == 403, host
+
+    exposed = create_app(falkordb_connection, "0.0.0.0").test_client()
+    assert exposed.get("/api/graphs", headers={"Host": "box.lan:8080"}).status_code == 200
+
+
 def test_overview_reports_correct_counts(tmp_path, graph, falkordb_connection):
     client, graph_name = _seeded_client(tmp_path, graph, falkordb_connection)
 

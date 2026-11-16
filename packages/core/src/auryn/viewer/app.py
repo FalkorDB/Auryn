@@ -8,15 +8,30 @@ from __future__ import annotations
 
 import git
 from falkordb import FalkorDB
-from flask import Flask, jsonify, request
+from flask import Flask, abort, jsonify, request
 
 from auryn.core import graph_queries as queries
 from auryn.core.embeddings import hybrid_search
 from auryn.core.graph_client import GraphWriter
 
 
-def create_app(client: FalkorDB) -> Flask:
+_LOOPBACK = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def create_app(client: FalkorDB, host: str = "127.0.0.1") -> Flask:
+    """`host` is the address the server is bound to (the `--host` of `view` / `quickstart`)."""
     app = Flask(__name__, static_folder="static", static_url_path="")
+
+    if host in _LOOPBACK:
+        # Bound to loopback the viewer is this machine's only -- but a web page can still point its
+        # OWN name at 127.0.0.1 (DNS rebinding) and then read every graph, or POST git-sync, as
+        # same-origin. Such a request carries the page's name in Host, so serve loopback names only.
+        # Bound anywhere else (`--host 0.0.0.0`) it was exposed on purpose: no check.
+        @app.before_request
+        def _loopback_host_only():
+            name = request.host.rsplit(":", 1)[0] if not request.host.endswith("]") else request.host
+            if name.strip("[]") not in _LOOPBACK:
+                abort(403)
 
     @app.get("/")
     def index():
