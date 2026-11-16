@@ -596,10 +596,11 @@ def _resolve_call(call: RawCall, ctx: _ModCtx) -> _Call | _External | None:
     if ctx.oracle is not None:
         full_name = ctx.oracle.resolve_call(ctx.module_path, call.line, call.col)
         if not full_name:
-            # The oracle found nothing; still surface a bare builtin call (len(), getattr()).
-            if call.is_simple_name and call.name in _BUILTINS:
-                return _External("builtins", call.name)
-            return None
+            # The oracle found nothing: dynamic dispatch, or an import Jedi can't follow (a `src/`
+            # package imported from tests/, a library not installed next to auryn). Bind it by the
+            # ast rules instead of dropping an edge the fast pass draws -- they name a callee from
+            # its import or its own module (never a guess), and still surface a bare builtin call.
+            return _resolve_call_ast(call, ctx)
         target = ctx.idx.callable_by_qname.get(full_name)
         if target is None:
             if full_name in ctx.idx.class_by_qname:
@@ -614,7 +615,12 @@ def _resolve_call(call: RawCall, ctx: _ModCtx) -> _Call | _External | None:
         # "app.db.Connection.execute" -> "Connection") rather than a second inference.
         receiver_type = full_name.rsplit(".", 2)[-2] if via_member and tlabel == "Method" else None
         return _Call(tid, tlabel, "inferred" if via_member else "resolved", receiver_type)
+    return _resolve_call_ast(call, ctx)
 
+
+def _resolve_call_ast(call: RawCall, ctx: _ModCtx) -> _Call | _External | None:
+    """The ast rules for a call: the whole of the ast engine's resolution, and the jedi engine's
+    fallback for a call its oracle couldn't bind (see _resolve_call)."""
     # ast path: import-bound or same-module direct name calls -> project functions first.
     if call.is_simple_name:
         if call.name in ctx.import_map:

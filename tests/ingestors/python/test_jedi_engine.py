@@ -237,3 +237,29 @@ def test_callee_in_a_namespace_dir_binds_by_file(tmp_path):
     targets = {str(e.to_key["id"]) for e in _edges_of(items, "CALLS")
                if e.from_key["id"] == "python://demo/module/pkg.api.func.run()"}
     assert targets == {f"python://demo/module/{hooks.dotted}.func.fire()"}
+
+
+def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
+    """Jedi can't follow `from pkg.core import helper` out of tests/ (`src/` isn't on its path), nor
+    an import of a library that isn't installed here, and answers nothing for those calls. They
+    must still bind the way the fast pass binds them -- by the import -- not vanish from the graph."""
+    modules = _materialize(tmp_path, {
+        "src/pkg/__init__.py": "",
+        "src/pkg/core.py": "def helper():\n    return 1\n",
+        "tests/test_core.py": (
+            "from notinstalled_lib import fetch\n"
+            "from pkg.core import helper\n"
+            "\n"
+            "\n"
+            "def test_it():\n"
+            "    fetch(helper())\n"
+        ),
+    })
+    items = list(resolution.resolve(modules, _PROJ, oracle=JediOracle(str(tmp_path), modules)))
+
+    calls = {str(e.to_key["id"]): e.properties["resolution"] for e in _edges_of(items, "CALLS")
+             if e.from_key["id"] == "python://demo/module/tests.test_core.func.test_it()"}
+    assert calls == {
+        "python://demo/module/pkg.core.func.helper()": "resolved",
+        "extern://python/notinstalled_lib::fetch": "external",
+    }
