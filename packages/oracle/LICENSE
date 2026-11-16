@@ -33,7 +33,9 @@ own license:
 ANTLR4-generated PL/SQL parser
   Location:  src/auryn/ingestors/plsql/grammar/
   Source:    https://github.com/antlr/grammars-v4  (sql/plsql)
-  Copyright: (c) The ANTLR grammars-v4 project and its contributors
+  Copyright: (c) 2009-2011 Alexandre Porcelli <alexandre.porcelli@gmail.com>
+             (c) 2015-2019 Ivan Kochurkin (KvanTTT), Positive Technologies
+             (c) 2017-2018 Mark Adams <madams51703@gmail.com>
   License:   Apache License 2.0 (full text reproduced below)
 --------------------------------------------------------------------------------
 
