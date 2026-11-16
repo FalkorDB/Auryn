@@ -7,8 +7,9 @@ reports it current. `sync_lock` makes them take turns, and sends all but ONE wai
 that starts after the one in progress reads the working tree as it is then, so a single queued
 sync already covers every trigger that arrived in the meantime.
 
-The other writers of a repo's subgraph -- `auryn ingest dir`, the MCP `index_repository` tool --
-take their turn under the same lock (`queue_one=False`).
+`auryn ingest dir` and the MCP `index_repository` tool write the same subgraph, so they take
+their turn under this lock too (`queue_one=False`). `auryn ingest repo` (a ref, read through the
+clone cache) and a background deep pass that outlives its command do not.
 """
 
 from __future__ import annotations

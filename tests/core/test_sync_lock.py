@@ -147,6 +147,7 @@ def test_sync_holds_the_lock_until_a_background_deep_pass_is_done(tmp_path, monk
     monkeypatch.setattr("auryn.core.ingest.join_deep_phase", lambda: events.append("join"))
     monkeypatch.setattr("auryn.cli._echo_ingest_report", lambda report: None)
 
-    CliRunner().invoke(cli, ["sync", str(tmp_path), "--deep", "background"])
+    res = CliRunner().invoke(cli, ["sync", str(tmp_path), "--deep", "background"])
 
+    assert isinstance(res.exception, RuntimeError) if ingest_fails else res.exit_code == 0, res.output
     assert events == ["ingest", "join", "unlock"]
