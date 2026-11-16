@@ -321,10 +321,17 @@ export function buildGitCard(project, ctx) {
 
   const card = document.createElement("div");
   card.className = "git-card";
-  card.innerHTML = `
+  const head = `
     <h3>${esc(project.name)}</h3>
     <p class="repo" title="${esc(props.repo_uri || "")}">${esc(props.repo_uri || "")}</p>
-    <p class="at">at <code>${esc(current)}</code></p>
+    <p class="at">at <code>${esc(current)}</code></p>`;
+  if (project.sync_unavailable) {
+    // Not a source the viewer can sync (a plain folder, or not a C# project -- see _sync_blocker
+    // in viewer/app.py): say why, instead of a ref picker and a Sync button that can only fail.
+    card.innerHTML = head + `<p class="status">${esc(project.sync_unavailable)}</p>`;
+    return card;
+  }
+  card.innerHTML = head + `
     <div class="git-row">
       <select class="ref-select" disabled><option>Loading refs…</option></select>
     </div>
