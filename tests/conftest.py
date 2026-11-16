@@ -10,14 +10,43 @@ there's no standalone "does FalkorDB connect" test.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import socket
+import subprocess
+import time
 from uuid import uuid4
 
 import pytest
 from falkordb import FalkorDB
 
 from auryn.core.graph_client import SHARED_NODE_LABEL as _SHARED_NODE_LABEL
+
+
+@pytest.fixture(autouse=True)
+def _reap_test_embedded_servers(monkeypatch):
+    """Kill any embedded FalkorDB a test spins up via connect_client(embedded=True) without tearing
+    it down itself. Tracks pids by wrapping the embedded-connect seam, so ONLY servers THIS test
+    created are ever signalled -- run-owned, never a heuristic process sweep. (A process scan can't
+    be used: redislite gives even a LIVE embedded server ppid 1, so by-ppid you can't tell your own
+    abandoned server from another run's active one.)"""
+    from auryn.core import graph_client
+
+    created: list[tuple[int, str]] = []
+    real = graph_client._connect_embedded
+
+    def _tracking(db_path=None):
+        client = real(db_path)
+        pid = getattr(getattr(client, "connection", None), "pid", None)
+        if isinstance(pid, int) and pid > 0:
+            created.append((pid, _pid_cmd(pid)))  # capture identity at creation
+        return client
+
+    monkeypatch.setattr(graph_client, "_connect_embedded", _tracking)
+    yield
+    for pid, cmd in created:
+        _kill_server_pid(pid, cmd)
 
 
 @pytest.fixture(autouse=True)
@@ -81,18 +110,70 @@ def _local_falkordb_available(host: str = "localhost", port: int = 6379) -> bool
         return False
 
 
-def _shutdown_embedded(conn) -> None:
-    """Best-effort stop of the child redis-server falkordblite manages, so a session doesn't
-    leak a process. redislite also registers an atexit handler, so any failure here is
-    harmless (SHUTDOWN legitimately drops the connection before replying)."""
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _pid_cmd(pid: int) -> str:
+    """The full command string (argv) of `pid`, or "" if it can't be read. A process's command is
+    stable for its lifetime, so comparing the command captured at creation against the current one
+    identifies THE server we started -- not merely 'a redislite' -- closing the PID-reuse gap where a
+    recycled PID happens to belong to another redislite instance."""
+    try:
+        return subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=3
+        ).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _embedded_server_pid(conn) -> int | None:
+    """The pid of the child redis-server a redislite/falkordblite client manages, if discoverable
+    (redislite exposes it as `conn.connection.pid`). Captured at creation so teardown can kill it
+    directly instead of trusting atexit."""
+    for obj in (getattr(conn, "connection", None), conn):
+        pid = getattr(obj, "pid", None)
+        if isinstance(pid, int) and pid > 0:
+            return pid
+    return None
+
+
+def _kill_server_pid(server_pid: int | None, expected_cmd: str = "") -> None:
+    """SIGTERM then SIGKILL the embedded server recorded at `server_pid`, verifying IDENTITY before
+    each signal: its command string must still equal `expected_cmd` (captured at creation). If the
+    server already exited and the OS recycled its PID -- even for another redislite instance -- the
+    command won't match and it is never signalled. Only ever called with a pid this test created."""
+    if not server_pid or not expected_cmd:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if not (_pid_alive(server_pid) and _pid_cmd(server_pid) == expected_cmd):
+            return
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(server_pid, sig)
+        for _ in range(20):  # up to ~1s for it to exit before escalating to SIGKILL
+            if not _pid_alive(server_pid):
+                return
+            time.sleep(0.05)
+
+
+def _shutdown_embedded(conn, server_pid: int | None = None, server_cmd: str = "") -> None:
+    """Stop the child redis-server falkordblite manages. Best-effort graceful SHUTDOWN first, then
+    -- authoritatively -- kill the tracked server pid (identity-verified via `server_cmd`): redislite's
+    atexit does NOT fire for a hard-killed xdist worker, so relying on it is exactly how embedded
+    servers leaked. Killing the pid recorded at creation (not atexit, not a group kill) prevents it."""
     for obj in (getattr(conn, "connection", None), conn):
         shutdown = getattr(obj, "shutdown", None)
         if callable(shutdown):
-            try:
+            with contextlib.suppress(Exception):  # SHUTDOWN drops the connection before replying
                 shutdown()
-                return
-            except Exception:
-                pass
+            break
+    _kill_server_pid(server_pid, server_cmd)
 
 
 @pytest.fixture(scope="session")
@@ -108,10 +189,12 @@ def falkordb_connection(tmp_path_factory):
             ) from e
         db_path = tmp_path_factory.mktemp("falkordb_embedded") / "graph.db"
         conn = EmbeddedFalkorDB(str(db_path))
+        server_pid = _embedded_server_pid(conn)
+        server_cmd = _pid_cmd(server_pid) if server_pid else ""
         try:
             yield conn
         finally:
-            _shutdown_embedded(conn)
+            _shutdown_embedded(conn, server_pid, server_cmd)
         return
 
     if _local_falkordb_available():
