@@ -92,8 +92,8 @@ edge equivalent) never uses the range index setup_schema() creates on each
 label's `id` -- it plans as "All Node Scan", full stop, regardless of the WHERE
 clause, since FalkorDB's indexes are per-label and an unlabeled match can't
 consult one. That's why _read_node_fingerprints/_read_edge_fingerprints below
-query per-label (see _prefix_range) -- confirmed via GRAPH.EXPLAIN to plan as
-"Node By Index Scan" instead. This timeout is generous headroom for a single
+query per-label (see _owned_ids) -- confirmed via GRAPH.EXPLAIN to plan as a
+"Node By Label Scan" instead. This timeout is generous headroom for a single
 large label's full, unordered read (no sort -- see _RESULTSET_SIZE) on a
 substantially larger repo than what this was profiled against."""
 
@@ -148,17 +148,30 @@ def _prefix_range(prefix: str) -> tuple[str, str]:
     return prefix, prefix + chr(0xFFFF)
 
 
+def _owned_ids(id_prefix: str, id_sep: str) -> dict[str, str]:
+    """Query params selecting exactly the ids `id_prefix` owns: the id itself (`$own`) or
+    anything under it (`$sub` = the id + the separator its ingestor continues an id with).
+    The fingerprint reads use this rather than _prefix_range because whatever they return and
+    the target doesn't re-emit gets DELETED, and the range is not a project boundary: it also
+    covers a sibling project (`python://api` ... `python://api2/...`), and FalkorDB 4.x -- the
+    engine falkordblite embeds -- returns wrong rows for an indexed string range when ids differ
+    in letter case. Either way a resync of one project deleted another's nodes. `STARTS WITH`
+    is exact on every engine; it costs the index (a per-label scan + filter, ~1.4x on a 500k-node
+    label shared by 20 projects). An empty `id_sep` is the plain "starts with `id_prefix`"."""
+    return {"own": id_prefix, "sub": id_prefix + id_sep}
+
+
 def _node_fingerprint_query(label: str) -> str:
     """read_fingerprints()'s whole node read for `label`, one plain query -- pulled
     out as its own function (rather than inlined in _read_node_fingerprints) so a
     test can GRAPH.EXPLAIN this exact query shape and assert it actually plans as
-    an index scan. Fetches only `id` and the stored `_fingerprint` (see
+    a per-label scan. Fetches only `id` and the stored `_fingerprint` (see
     graph_sync.fingerprint()) rather than full properties(n) -- confirmed
     empirically ~4x faster at realistic scale (properties(n) can include a
     multi-KB `source` text field; a fingerprint is a fixed-size hash regardless).
     No ORDER BY/SKIP/LIMIT: see _RESULTSET_SIZE for why paginating this would be
     worse, not better."""
-    return f"MATCH (n:{label}) WHERE n.id >= $lo AND n.id < $hi RETURN n.id, n._fingerprint"
+    return f"MATCH (n:{label}) WHERE n.id = $own OR n.id STARTS WITH $sub RETURN n.id, n._fingerprint"
 
 
 # ── system-wide labels (never surfaced to a caller) ────────────────────────────────────
@@ -214,8 +227,8 @@ def _edge_fingerprint_query(from_label: str) -> str:
     target never emits (and drop them entirely if the hook is disabled). The call-placeholder namespaces
     (c/csharp/python/go/rust/...) are each fully re-emitted by their ingestor's resolve, so are safe to diff."""
     return (
-        f"MATCH (a:{from_label}) WHERE a.id >= $lo AND a.id < $hi "
-        "MATCH (a)-[r]->(b) WHERE b.id STARTS WITH $prefix "
+        f"MATCH (a:{from_label}) WHERE a.id = $own OR a.id STARTS WITH $sub "
+        "MATCH (a)-[r]->(b) WHERE b.id = $own OR b.id STARTS WITH $sub "
         "   OR (b.id STARTS WITH 'extern://' AND NOT b.id STARTS WITH 'extern://http/') "
         f"RETURN type(r), {semantic_label('b')}, a.id, b.id, r._fingerprint"
     )
@@ -577,9 +590,13 @@ class GraphWriter:
                 )
                 self._graph.query(query, {"rows": rows})
 
-    def read_fingerprints(self, id_prefix: str, node_labels: list[str]) -> tuple[dict[NodeKey, str], dict[EdgeKey, str]]:
+    def read_fingerprints(
+        self, id_prefix: str, node_labels: list[str], id_sep: str = ""
+    ) -> tuple[dict[NodeKey, str], dict[EdgeKey, str]]:
         """The live graph's current (key -> fingerprint) for every node/edge (both
-        endpoints, for edges) whose id starts with `id_prefix` -- the lightweight
+        endpoints, for edges) whose id starts with `id_prefix` -- or, given the `id_sep` a
+        project's ids continue with, exactly that project's: `id_prefix` itself and everything
+        under `id_prefix + id_sep` (see _owned_ids) -- the lightweight
         current-state counterpart to a freshly computed target state, for
         graph_sync.compute_delta(). Fetches only `id` and the stored `_fingerprint`
         (see graph_sync.fingerprint()), not full properties -- a node/edge whose
@@ -590,7 +607,7 @@ class GraphWriter:
         spanning two different projects' nodes.
 
         `node_labels` (a project's own NODE_SCHEMAS labels) is required, not
-        discovered, because of how this is queried -- see _prefix_range below.
+        discovered, because of how this is queried -- see _SUBGRAPH_QUERY_TIMEOUT_MS.
 
         Issues one query per (label, node-or-edge) pair concurrently -- these
         reads are all independent and nothing writes to the graph in between, so
@@ -602,31 +619,29 @@ class GraphWriter:
         node_fingerprints: dict[NodeKey, str] = {}
         edge_fingerprints: dict[EdgeKey, str] = {}
         with phase("read_fingerprints"), ThreadPoolExecutor(max_workers=workers) as pool:
-            node_futures = [pool.submit(self._read_node_fingerprints, label, id_prefix) for label in node_labels]
-            edge_futures = [pool.submit(self._read_edge_fingerprints, label, id_prefix) for label in node_labels]
+            node_futures = [pool.submit(self._read_node_fingerprints, label, id_prefix, id_sep) for label in node_labels]
+            edge_futures = [pool.submit(self._read_edge_fingerprints, label, id_prefix, id_sep) for label in node_labels]
             for future in node_futures:
                 node_fingerprints.update(future.result())
             for future in edge_futures:
                 edge_fingerprints.update(future.result())
         return node_fingerprints, edge_fingerprints
 
-    def _read_node_fingerprints(self, label: str, id_prefix: str) -> dict[NodeKey, str]:
-        lo, hi = _prefix_range(id_prefix)
+    def _read_node_fingerprints(self, label: str, id_prefix: str, id_sep: str = "") -> dict[NodeKey, str]:
         rows = self._graph.ro_query(
-            _node_fingerprint_query(label), {"lo": lo, "hi": hi}, timeout=_SUBGRAPH_QUERY_TIMEOUT_MS
+            _node_fingerprint_query(label), _owned_ids(id_prefix, id_sep), timeout=_SUBGRAPH_QUERY_TIMEOUT_MS
         ).result_set
         return {node_key(GraphNode(label, {"id": node_id}, {})): fp for node_id, fp in rows}
 
-    def _read_edge_fingerprints(self, from_label: str, id_prefix: str) -> dict[EdgeKey, str]:
+    def _read_edge_fingerprints(self, from_label: str, id_prefix: str, id_sep: str = "") -> dict[EdgeKey, str]:
         """Every outgoing edge's key -> fingerprint from a node labeled `from_label`
         whose id has this project's prefix -- iterating over every one of the
         project's own labels as `from_label` in read_fingerprints() above therefore
         covers every edge the project owns exactly once, since every node this
         project ever creates has exactly one of those labels."""
-        lo, hi = _prefix_range(id_prefix)
         rows = self._graph.ro_query(
             _edge_fingerprint_query(from_label),
-            {"lo": lo, "hi": hi, "prefix": id_prefix},
+            _owned_ids(id_prefix, id_sep),
             timeout=_SUBGRAPH_QUERY_TIMEOUT_MS,
         ).result_set
         return {

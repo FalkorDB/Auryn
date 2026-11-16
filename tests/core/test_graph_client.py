@@ -85,6 +85,30 @@ def test_read_fingerprints_scopes_by_id_prefix(graph):
     assert edge_fps[expected_edge_key] == fingerprint({})
 
 
+def test_read_fingerprints_with_a_separator_never_reads_a_sibling_project(graph):
+    """`python://api` is a string prefix of `python://api2/...`. Given the separator a project's
+    ids continue with, the read owns the project id and what sits under `<id>/` -- nothing else."""
+    writer = GraphWriter(graph)
+    writer.merge_node(GraphNode("Project", {"id": "python://api"}, {"name": "api"}))
+    writer.merge_node(GraphNode("Class", {"id": "python://api/a"}, {"name": "A"}))
+    writer.merge_edge(GraphEdge("HAS_CLASS", "Project", {"id": "python://api"}, "Class", {"id": "python://api/a"}))
+    # the sibling: same shape, a longer name, plus an edge into it that isn't `api`'s to diff
+    writer.merge_node(GraphNode("Project", {"id": "python://api2"}, {"name": "api2"}))
+    writer.merge_node(GraphNode("Class", {"id": "python://api2/a"}, {"name": "A"}))
+    writer.merge_edge(GraphEdge("HAS_CLASS", "Project", {"id": "python://api2"}, "Class", {"id": "python://api2/a"}))
+    writer.merge_edge(GraphEdge("EXTENDS", "Class", {"id": "python://api/a"}, "Class", {"id": "python://api2/a"}))
+
+    node_fps, edge_fps = writer.read_fingerprints("python://api", ["Project", "Class"], id_sep="/")
+
+    assert set(node_fps) == {
+        node_key(GraphNode("Project", {"id": "python://api"}, {})),
+        node_key(GraphNode("Class", {"id": "python://api/a"}, {})),
+    }
+    assert set(edge_fps) == {
+        edge_key(GraphEdge("HAS_CLASS", "Project", {"id": "python://api"}, "Class", {"id": "python://api/a"}))
+    }
+
+
 def test_setup_schema_raises_resultset_size(graph):
     """FalkorDB's RESULTSET_SIZE config defaults to 10000 and silently truncates
     any query result past that many rows -- confirmed empirically (a 15000-row
@@ -118,7 +142,7 @@ def test_read_fingerprints_reads_past_falkordbs_default_resultset_size_cap(graph
     assert set(node_fps) == expected_keys
 
 
-def test_subgraph_fingerprint_queries_plan_as_an_index_scan_not_a_full_scan(graph):
+def test_subgraph_fingerprint_queries_plan_as_a_label_scan_not_a_full_scan(graph):
     """An earlier, unlabeled version of these queries (`MATCH (n) WHERE
     n.id STARTS WITH ...`) planned as "All Node Scan" regardless of the WHERE
     clause -- FalkorDB's indexes are per-label, so an unlabeled match can't
@@ -126,18 +150,21 @@ def test_subgraph_fingerprint_queries_plan_as_an_index_scan_not_a_full_scan(grap
     GRAPH.EXPLAIN) to be why a real git_sync diff against dotnet/aspnetcore timed
     out: at real scale (multiple relationship types, hundreds of thousands of
     edges) an unindexed full scan's cost climbed past FalkorDB's default 1000ms
-    query timeout. This asserts the fix (querying per-label, so the range index
-    setup_schema() creates on each label's `id` actually gets used) rather than
-    just trusting the Cypher text looks right."""
+    query timeout. This asserts the fix (querying per-label, so only that label's
+    nodes are ever visited) rather than just trusting the Cypher text looks right.
+
+    It is a label scan with an exact id filter, not a range-index scan: the range
+    `[prefix, prefix + chr(0xFFFF))` is not a project boundary and FalkorDB 4.x
+    answers it wrongly for mixed-case ids (see graph_client._owned_ids)."""
     writer = GraphWriter(graph)
     writer.setup_schema([NodeSchema(label="Class")])
 
-    node_plan = str(graph.explain(_node_fingerprint_query("Class"), {"lo": "a", "hi": "b"}))
-    assert "Node By Index Scan" in node_plan
+    node_plan = str(graph.explain(_node_fingerprint_query("Class"), {"own": "a", "sub": "a/"}))
+    assert "Node By Label Scan" in node_plan
     assert "All Node Scan" not in node_plan
 
-    edge_plan = str(graph.explain(_edge_fingerprint_query("Class"), {"lo": "a", "hi": "b", "prefix": "a"}))
-    assert "Node By Index Scan" in edge_plan
+    edge_plan = str(graph.explain(_edge_fingerprint_query("Class"), {"own": "a", "sub": "a/"}))
+    assert "Node By Label Scan" in edge_plan
     assert "All Node Scan" not in edge_plan
 
 
@@ -359,13 +386,13 @@ def test_apply_delta_upserts_and_removes_in_one_call(graph):
 
 # -- stream_apply: memory-bounded streaming counterpart to compute_delta + apply_delta --
 #
-# Ids are realistic project-prefixed ids (`plsql://Proj...`), not toy ones: read_fingerprints
-# scopes each label by a prefix range whose upper bound is `prefix + chr(0xFFFF)` (see
-# _prefix_range), and that sentinel range only behaves against ids of the shape every ingestor
-# actually emits.
+# Ids are realistic project-prefixed ids (`plsql://Proj...`), not toy ones: stream_apply reads
+# exactly what the project owns -- its id and everything under `<id><id_sep>` (see
+# graph_client._owned_ids) -- and PL/SQL ids continue the project id with ".", hence _SEP.
 
 _STREAM_LABELS = ["Class", "Method"]
 _P = "plsql://Proj"  # id prefix passed to stream_apply / read_fingerprints
+_SEP = "."  # ...and the separator its ids continue with (stream_apply's id_sep)
 
 
 def _stream_schemas():
@@ -387,7 +414,7 @@ def test_stream_apply_first_ingest_writes_everything_with_accurate_counts(graph)
         GraphEdge("HAS_METHOD", "Class", {"id": f"{_P}.a"}, "Method", {"id": f"{_P}.a.m"}),
     ]
 
-    stats, reals, placeholders = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items))
+    stats, reals, placeholders = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items), id_sep=_SEP)
 
     assert (stats.nodes_added, stats.edges_added) == (2, 1)
     assert (stats.nodes_updated, stats.nodes_removed, stats.edges_updated, stats.edges_removed) == (0, 0, 0, 0)
@@ -405,9 +432,9 @@ def test_stream_apply_resync_identical_target_is_a_noop(graph):
         GraphNode("Method", {"id": f"{_P}.a.m"}, {"name": "m"}),
         GraphEdge("HAS_METHOD", "Class", {"id": f"{_P}.a"}, "Method", {"id": f"{_P}.a.m"}),
     ]
-    stream_apply(writer, _P, _STREAM_LABELS, _fresh(items))
+    stream_apply(writer, _P, _STREAM_LABELS, _fresh(items), id_sep=_SEP)
 
-    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items))
+    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items), id_sep=_SEP)
 
     assert stats == type(stats)()  # every count zero: nothing added, updated, or removed
 
@@ -420,7 +447,7 @@ def test_stream_apply_incremental_adds_updates_and_removes(graph):
         GraphNode("Class", {"id": f"{_P}.stale"}, {}),
         GraphEdge("EXTENDS", "Class", {"id": f"{_P}.a"}, "Class", {"id": f"{_P}.stale"}),
     ]
-    stream_apply(writer, _P, _STREAM_LABELS, _fresh(v1))
+    stream_apply(writer, _P, _STREAM_LABELS, _fresh(v1), id_sep=_SEP)
 
     v2 = [
         GraphNode("Class", {"id": f"{_P}.a"}, {"name": "New"}),  # property change -> update
@@ -428,7 +455,7 @@ def test_stream_apply_incremental_adds_updates_and_removes(graph):
         GraphEdge("IMPLEMENTS", "Class", {"id": f"{_P}.a"}, "Class", {"id": f"{_P}.b"}),  # new edge
         # {_P}.stale (and the EXTENDS edge to it) are gone -> removals
     ]
-    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(v2))
+    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(v2), id_sep=_SEP)
 
     assert (stats.nodes_added, stats.nodes_updated, stats.nodes_removed) == (1, 1, 1)
     assert (stats.edges_added, stats.edges_updated, stats.edges_removed) == (1, 0, 1)
@@ -452,7 +479,7 @@ def test_stream_apply_writes_all_nodes_before_any_edge_regardless_of_target_orde
         GraphNode("Method", {"id": f"{_P}.a.m"}, {}),
     ]
 
-    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items))
+    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items), id_sep=_SEP)
 
     assert stats.edges_added == 1
     assert graph.query(
@@ -477,8 +504,8 @@ def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(
         GraphEdge("EXTENDS", "Class", {"id": f"{_P}.b"}, "Class", {"id": f"{_P}.a"}, {"via": "x"}),
     ]
 
-    stream_apply(streamed, _P, _STREAM_LABELS, _fresh(items))
-    n_fps, e_fps = reference.read_fingerprints(_P, _STREAM_LABELS)
+    stream_apply(streamed, _P, _STREAM_LABELS, _fresh(items), id_sep=_SEP)
+    n_fps, e_fps = reference.read_fingerprints(_P, _STREAM_LABELS, _SEP)
     reference.apply_delta(compute_delta(n_fps, e_fps, list(items)))
 
     def dump(g):
@@ -489,3 +516,31 @@ def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(
         return nodes, edges
 
     assert dump(graph) == dump(reference_graph)
+
+
+def test_stream_apply_leaves_a_sibling_project_alone(graph):
+    """Two projects share a graph and one name is a prefix of the other (`api` / `api2`).
+    Resyncing `api` after it drops a class must remove that class only -- every node and edge
+    of `api2` was read back as `api`'s own leftovers, and deleted."""
+    writer = GraphWriter(graph)
+    writer.setup_schema([NodeSchema("Project"), NodeSchema("Class")])
+
+    def project(name, classes):
+        pid = f"python://{name}"
+        items = [GraphNode("Project", {"id": pid}, {"name": name})]
+        for cls in classes:
+            items.append(GraphNode("Class", {"id": f"{pid}/{cls}"}, {"name": cls}))
+            items.append(GraphEdge("HAS_CLASS", "Project", {"id": pid}, "Class", {"id": f"{pid}/{cls}"}))
+        return items
+
+    labels = ["Project", "Class"]
+    stream_apply(writer, "python://api", labels, _fresh(project("api", ["a", "gone"])))
+    stream_apply(writer, "python://api2", labels, _fresh(project("api2", ["a", "b"])))
+
+    stats, _, _ = stream_apply(writer, "python://api", labels, _fresh(project("api", ["a"])))
+
+    assert (stats.nodes_removed, stats.edges_removed) == (1, 1)  # `gone` and its HAS_CLASS, nothing else
+    assert graph.query("MATCH (n) WHERE n.id STARTS WITH 'python://api2' RETURN n.id ORDER BY n.id").result_set == [
+        ["python://api2"], ["python://api2/a"], ["python://api2/b"],
+    ]
+    assert graph.query("MATCH (:Project {id: 'python://api2'})-[r:HAS_CLASS]->() RETURN count(r)").result_set == [[2]]
