@@ -5,6 +5,8 @@ the right node by meaning, a second run is a no-op, and clearing a node re-queue
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("redislite.falkordb_client", reason="falkordblite (embedded extra) not installed")
@@ -85,6 +87,41 @@ def test_index_ready_is_false_when_the_build_outlasts_the_wait(writer, monkeypat
     monkeypatch.setattr(writer, "await_indexes", lambda label: False)
 
     assert embed_graph(writer, FakeEmbedder()).index_ready is False
+
+
+class _IndexStatuses:
+    """Stands in for the graph: each `db.indexes()` poll answers with the next list of statuses
+    (the last one repeats), and counts the polls."""
+
+    def __init__(self, *polls):
+        self._polls = list(polls)
+        self.polled = 0
+
+    def ro_query(self, cypher, params=None):
+        self.polled += 1
+        statuses = self._polls.pop(0) if len(self._polls) > 1 else self._polls[0]
+        return SimpleNamespace(result_set=[[s] for s in statuses])
+
+
+_BUILDING = "[Indexing] 1/3: UNDER CONSTRUCTION"
+
+
+def test_await_indexes_polls_until_every_index_is_operational(monkeypatch):
+    monkeypatch.setattr("auryn.core.graph_client.time.sleep", lambda s: None)
+    # two indexes on the label finishing one after the other: only the last poll has both built
+    graph = _IndexStatuses([_BUILDING, _BUILDING], ["OPERATIONAL", _BUILDING], ["OPERATIONAL", "OPERATIONAL"])
+
+    assert GraphWriter(graph).await_indexes("Embeddable") is True
+    assert graph.polled == 3
+
+
+def test_await_indexes_gives_up_at_the_deadline_and_without_an_index():
+    still_building = _IndexStatuses([_BUILDING])
+    assert GraphWriter(still_building).await_indexes("Embeddable", timeout=0) is False
+    assert still_building.polled == 1  # one look, then the deadline -- no endless wait
+
+    no_index = _IndexStatuses([])  # creation failed: nothing is building, nothing will be ready
+    assert GraphWriter(no_index).await_indexes("Embeddable") is False
 
 
 def test_embed_graph_is_idempotent(writer):

@@ -390,14 +390,17 @@ class GraphWriter:
 
     def await_indexes(self, label: str, timeout: float = _INDEX_BUILD_TIMEOUT_S) -> bool:
         """Block until every index on :label is built: True once they all are, False if `timeout`
-        seconds ran out first. FalkorDB returns from CREATE INDEX at once and populates the index
-        in the background; until `db.indexes()` reports it OPERATIONAL, a vector or full-text
-        query against it comes back EMPTY -- not partial (see _INDEX_BUILD_TIMEOUT_S)."""
+        seconds ran out first -- or if the label has no index at all (nothing is building, so
+        nothing will become ready). FalkorDB returns from CREATE INDEX at once and populates the
+        index in the background; until `db.indexes()` reports it OPERATIONAL, a vector or
+        full-text query against it comes back EMPTY -- not partial (see _INDEX_BUILD_TIMEOUT_S)."""
         deadline = time.monotonic() + timeout
         while True:
             rows = self._graph.ro_query(
                 "CALL db.indexes() YIELD label, status WHERE label = $label RETURN status", {"label": label}
             ).result_set
+            if not rows:
+                return False
             if all(status == "OPERATIONAL" for (status,) in rows):
                 return True
             if time.monotonic() >= deadline:
