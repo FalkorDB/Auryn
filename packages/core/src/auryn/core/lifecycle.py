@@ -199,8 +199,11 @@ def wire_trigger(
 
     if trigger == "commit":
         if hooks.is_git_repo(local_dir):
-            hooks.install(local_dir, [sys.executable, "-m", "auryn", "sync", local_dir])
-            status["hooks_installed"] = True
+            wired = hooks.install(local_dir, [sys.executable, "-m", "auryn", "sync", local_dir])
+            status["hooks_installed"] = bool(wired)
+            if not wired:
+                status["note"] = ("core.hooksPath points outside this repo's git dir (tracked or shared "
+                                  "hooks); hook skipped -- use `--trigger save` or `auryn sync`")
         else:
             status["hooks_installed"] = False
             status["note"] = "commit trigger needs a git repo; hook skipped -- use `auryn sync`"

@@ -77,6 +77,80 @@ def test_hooks_install_chain_and_uninstall(tmp_path):
     assert not (d / "post-merge").exists()                 # a hook that was only ours is removed
 
 
+def test_hook_block_runs_even_when_the_users_hook_exits_first(tmp_path):
+    """A user hook that ends in `exit 0` (or `exec`) used to end before our appended block ever
+    ran. The block goes right after the shebang now, ahead of the user's body."""
+    repo = _init_repo(tmp_path / "r")
+    d = hooks.hooks_dir(repo)
+    mine = tmp_path / "mine"
+    (d / "post-commit").write_text(f"#!/bin/sh\ntouch {mine}\nexit 0\n")
+    (d / "post-commit").chmod(0o755)
+    sentinel = tmp_path / "fired"
+    hooks.install(repo, ["touch", str(sentinel)])
+
+    (repo / "b.txt").write_text("y")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "second")
+
+    for _ in range(60):
+        if sentinel.exists():
+            break
+        time.sleep(0.05)
+    assert sentinel.exists(), "the resync block did not run ahead of the user's `exit 0`"
+    assert mine.exists()  # ...and the user's own hook still ran
+
+
+def test_install_leaves_a_non_shell_hook_and_a_disabled_hook_as_they_are(tmp_path):
+    """A shell line appended to a Python hook is a SyntaxError that also stops the USER's hook;
+    and `chmod 755` on a hook the user had switched off switches it back on. Neither is ours to
+    change: the non-shell hook is skipped, an existing hook keeps its mode."""
+    repo = _init_repo(tmp_path / "r")
+    d = hooks.hooks_dir(repo)
+    python_hook = "#!/usr/bin/env python3\nprint('mine')\n"
+    (d / "post-commit").write_text(python_hook)
+    (d / "post-commit").chmod(0o755)
+    (d / "post-merge").write_text("#!/bin/sh\necho mine\n")
+    (d / "post-merge").chmod(0o644)  # disabled by its owner
+
+    wired = hooks.install(repo, ["true"])
+
+    assert wired == ["post-checkout", "post-merge", "post-rewrite"]
+    assert (d / "post-commit").read_text() == python_hook
+    assert (d / "post-merge").stat().st_mode & 0o777 == 0o644
+    assert (d / "post-merge").read_text().startswith("#!/bin/sh\n# >>> auryn resync >>>")
+
+
+def test_install_refuses_a_hooks_dir_outside_the_repos_git_dir(tmp_path):
+    """`core.hooksPath` -> a TRACKED dir (husky's `.husky/`, `.githooks/`): our block, carrying this
+    machine's interpreter path, would land in the work tree. (A machine-wide hooksPath is the same
+    refusal: every repo's commit would resync the last repo ingested.)"""
+    repo = _init_repo(tmp_path / "r")
+    _git(repo, "config", "core.hooksPath", ".husky")
+
+    assert hooks.install(repo, ["true"]) == []
+    assert not (repo / ".husky").exists()
+    assert not hooks.is_installed(repo)
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True)
+    assert status.stdout == ""  # the work tree is untouched
+
+
+def test_uninstall_removes_the_hooks_of_every_registered_repo(monkeypatch, tmp_path):
+    """`auryn uninstall` reverses install: a hook left behind would run `auryn sync` on the next
+    commit and recreate the home dir that was just removed."""
+    from auryn.core.install import do_uninstall
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    repos = [_init_repo(tmp_path / name) for name in ("a", "b")]
+    for repo in repos:
+        app_config.register_repo(app_config.RepoRegistration(local_dir=str(repo)))
+        hooks.install(repo, ["true"])
+        assert hooks.is_installed(repo)
+
+    do_uninstall(purge=True, adapters=[])
+
+    assert not any(hooks.is_installed(repo) for repo in repos)
+
+
 def test_hook_fires_on_commit(tmp_path):
     repo = _init_repo(tmp_path / "r")
     sentinel = tmp_path / "fired"
