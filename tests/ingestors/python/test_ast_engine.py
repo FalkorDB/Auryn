@@ -314,6 +314,9 @@ def test_local_names_are_the_names_a_body_binds_itself():
         "    match param:\n"
         "        case [j, *k]:\n"
         "            pass\n"
+        "        case {'key': 1, **l}:\n"
+        "            pass\n"
+        "    m = [n for n in items]\n"
         "    def nested(inner_param):\n"
         "        inner_local = 1\n"
         "    class Local:\n"
@@ -321,4 +324,4 @@ def test_local_names_are_the_names_a_body_binds_itself():
         "    import json\n"
         "    print(unbound)\n"
     )
-    assert set(m.functions[0].local_names) == set("abcdeghijk") | {"nested", "Local"}
+    assert set(m.functions[0].local_names) == set("abcdeghijklmn") | {"nested", "Local"}

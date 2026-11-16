@@ -354,10 +354,12 @@ def _calls(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[RawCall]:
 
 def _local_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
     """The names a function/method body binds itself, parameters aside: an assignment / `for` /
-    `with` / walrus target, `except ... as e`, `case ... as x`, a nested def or class. In the body
-    such a name is that local, whatever the module imports or defines under the same name (see
-    the jedi engine's fallback in resolution._resolve_call). Scope-respecting like _calls_in_body.
-    An `import` in the body is not one: the name is still an import."""
+    `with` / walrus target, `except ... as e`, a `case` capture, a nested def or class. In the
+    body such a name is that local, whatever the module imports or defines under the same name
+    (see the jedi engine's fallback in resolution._resolve_call). Nested def/class/lambda bodies
+    are their own scopes, as in _calls_in_body; a comprehension's targets are counted although
+    they end with it -- a call through one, inside it, is just as dynamic. An `import` in the
+    body is not one: the name is still an import."""
     names: set[str] = set()
 
     def visit(n: ast.AST) -> None:
@@ -366,6 +368,8 @@ def _local_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
             names.add(n.id)
         elif (nested_scope or isinstance(n, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar))) and n.name:
             names.add(n.name)
+        elif isinstance(n, ast.MatchMapping) and n.rest:
+            names.add(n.rest)
         if not (nested_scope or isinstance(n, ast.Lambda)):
             for child in ast.iter_child_nodes(n):
                 visit(child)
