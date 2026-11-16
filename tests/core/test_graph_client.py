@@ -85,12 +85,14 @@ def test_read_fingerprints_scopes_by_id_prefix(graph):
     assert edge_fps[expected_edge_key] == fingerprint({})
 
 
-def test_read_fingerprints_with_a_separator_never_reads_a_sibling_project(graph):
-    """`python://api` is a string prefix of `python://api2/...`. Given the separator a project's
-    ids continue with, the read owns the project id and what sits under `<id>/` -- nothing else."""
+def test_read_fingerprints_never_reads_a_sibling_project(graph):
+    """`python://api` is a string prefix of `python://api2/...`. The read owns the project id and
+    the ids that continue it at a `/` or `.` boundary -- a top-level `<proj>.func.f()` as much as
+    a `<proj>/file/...` -- and nothing of a sibling whose name merely starts with it."""
     writer = GraphWriter(graph)
     writer.merge_node(GraphNode("Project", {"id": "python://api"}, {"name": "api"}))
     writer.merge_node(GraphNode("Class", {"id": "python://api/a"}, {"name": "A"}))
+    writer.merge_node(GraphNode("Class", {"id": "python://api.class.top"}, {"name": "Top"}))
     writer.merge_edge(GraphEdge("HAS_CLASS", "Project", {"id": "python://api"}, "Class", {"id": "python://api/a"}))
     # the sibling: same shape, a longer name, plus an edge into it that isn't `api`'s to diff
     writer.merge_node(GraphNode("Project", {"id": "python://api2"}, {"name": "api2"}))
@@ -98,11 +100,12 @@ def test_read_fingerprints_with_a_separator_never_reads_a_sibling_project(graph)
     writer.merge_edge(GraphEdge("HAS_CLASS", "Project", {"id": "python://api2"}, "Class", {"id": "python://api2/a"}))
     writer.merge_edge(GraphEdge("EXTENDS", "Class", {"id": "python://api/a"}, "Class", {"id": "python://api2/a"}))
 
-    node_fps, edge_fps = writer.read_fingerprints("python://api", ["Project", "Class"], id_sep="/")
+    node_fps, edge_fps = writer.read_fingerprints("python://api", ["Project", "Class"])
 
     assert set(node_fps) == {
         node_key(GraphNode("Project", {"id": "python://api"}, {})),
         node_key(GraphNode("Class", {"id": "python://api/a"}, {})),
+        node_key(GraphNode("Class", {"id": "python://api.class.top"}, {})),
     }
     assert set(edge_fps) == {
         edge_key(GraphEdge("HAS_CLASS", "Project", {"id": "python://api"}, "Class", {"id": "python://api/a"}))
@@ -159,11 +162,11 @@ def test_subgraph_fingerprint_queries_plan_as_a_label_scan_not_a_full_scan(graph
     writer = GraphWriter(graph)
     writer.setup_schema([NodeSchema(label="Class")])
 
-    node_plan = str(graph.explain(_node_fingerprint_query("Class"), {"own": "a", "sub": "a/"}))
+    node_plan = str(graph.explain(_node_fingerprint_query("Class"), {"own": "a", "sub": "a/", "dot": "a."}))
     assert "Node By Label Scan" in node_plan
     assert "All Node Scan" not in node_plan
 
-    edge_plan = str(graph.explain(_edge_fingerprint_query("Class"), {"own": "a", "sub": "a/"}))
+    edge_plan = str(graph.explain(_edge_fingerprint_query("Class"), {"own": "a", "sub": "a/", "dot": "a."}))
     assert "Node By Label Scan" in edge_plan
     assert "All Node Scan" not in edge_plan
 
@@ -386,13 +389,12 @@ def test_apply_delta_upserts_and_removes_in_one_call(graph):
 
 # -- stream_apply: memory-bounded streaming counterpart to compute_delta + apply_delta --
 #
-# Ids are realistic project-prefixed ids (`plsql://Proj...`), not toy ones: stream_apply reads
-# exactly what the project owns -- its id and everything under `<id><id_sep>` (see
-# graph_client._owned_ids) -- and PL/SQL ids continue the project id with ".", hence _SEP.
+# Ids are realistic project-prefixed ids (`plsql://Proj...`), not toy ones: read_fingerprints
+# reads exactly what the project owns -- its id and the ids that continue it at a `/` or `.`
+# boundary (see graph_client._owned_ids) -- so a toy id that isn't shaped that way is never read.
 
 _STREAM_LABELS = ["Class", "Method"]
 _P = "plsql://Proj"  # id prefix passed to stream_apply / read_fingerprints
-_SEP = "."  # ...and the separator its ids continue with (stream_apply's id_sep)
 
 
 def _stream_schemas():
@@ -414,7 +416,7 @@ def test_stream_apply_first_ingest_writes_everything_with_accurate_counts(graph)
         GraphEdge("HAS_METHOD", "Class", {"id": f"{_P}.a"}, "Method", {"id": f"{_P}.a.m"}),
     ]
 
-    stats, reals, placeholders = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items), id_sep=_SEP)
+    stats, reals, placeholders = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items))
 
     assert (stats.nodes_added, stats.edges_added) == (2, 1)
     assert (stats.nodes_updated, stats.nodes_removed, stats.edges_updated, stats.edges_removed) == (0, 0, 0, 0)
@@ -432,9 +434,9 @@ def test_stream_apply_resync_identical_target_is_a_noop(graph):
         GraphNode("Method", {"id": f"{_P}.a.m"}, {"name": "m"}),
         GraphEdge("HAS_METHOD", "Class", {"id": f"{_P}.a"}, "Method", {"id": f"{_P}.a.m"}),
     ]
-    stream_apply(writer, _P, _STREAM_LABELS, _fresh(items), id_sep=_SEP)
+    stream_apply(writer, _P, _STREAM_LABELS, _fresh(items))
 
-    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items), id_sep=_SEP)
+    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items))
 
     assert stats == type(stats)()  # every count zero: nothing added, updated, or removed
 
@@ -447,7 +449,7 @@ def test_stream_apply_incremental_adds_updates_and_removes(graph):
         GraphNode("Class", {"id": f"{_P}.stale"}, {}),
         GraphEdge("EXTENDS", "Class", {"id": f"{_P}.a"}, "Class", {"id": f"{_P}.stale"}),
     ]
-    stream_apply(writer, _P, _STREAM_LABELS, _fresh(v1), id_sep=_SEP)
+    stream_apply(writer, _P, _STREAM_LABELS, _fresh(v1))
 
     v2 = [
         GraphNode("Class", {"id": f"{_P}.a"}, {"name": "New"}),  # property change -> update
@@ -455,7 +457,7 @@ def test_stream_apply_incremental_adds_updates_and_removes(graph):
         GraphEdge("IMPLEMENTS", "Class", {"id": f"{_P}.a"}, "Class", {"id": f"{_P}.b"}),  # new edge
         # {_P}.stale (and the EXTENDS edge to it) are gone -> removals
     ]
-    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(v2), id_sep=_SEP)
+    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(v2))
 
     assert (stats.nodes_added, stats.nodes_updated, stats.nodes_removed) == (1, 1, 1)
     assert (stats.edges_added, stats.edges_updated, stats.edges_removed) == (1, 0, 1)
@@ -479,7 +481,7 @@ def test_stream_apply_writes_all_nodes_before_any_edge_regardless_of_target_orde
         GraphNode("Method", {"id": f"{_P}.a.m"}, {}),
     ]
 
-    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items), id_sep=_SEP)
+    stats, _, _ = stream_apply(writer, _P, _STREAM_LABELS, _fresh(items))
 
     assert stats.edges_added == 1
     assert graph.query(
@@ -504,8 +506,8 @@ def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(
         GraphEdge("EXTENDS", "Class", {"id": f"{_P}.b"}, "Class", {"id": f"{_P}.a"}, {"via": "x"}),
     ]
 
-    stream_apply(streamed, _P, _STREAM_LABELS, _fresh(items), id_sep=_SEP)
-    n_fps, e_fps = reference.read_fingerprints(_P, _STREAM_LABELS, _SEP)
+    stream_apply(streamed, _P, _STREAM_LABELS, _fresh(items))
+    n_fps, e_fps = reference.read_fingerprints(_P, _STREAM_LABELS)
     reference.apply_delta(compute_delta(n_fps, e_fps, list(items)))
 
     def dump(g):
@@ -520,27 +522,31 @@ def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(
 
 def test_stream_apply_leaves_a_sibling_project_alone(graph):
     """Two projects share a graph and one name is a prefix of the other (`api` / `api2`).
-    Resyncing `api` after it drops a class must remove that class only -- every node and edge
+    Resyncing `api` after it drops two classes must remove those only -- every node and edge
     of `api2` was read back as `api`'s own leftovers, and deleted."""
     writer = GraphWriter(graph)
     writer.setup_schema([NodeSchema("Project"), NodeSchema("Class")])
 
     def project(name, classes):
-        pid = f"python://{name}"
+        # ids continue the project id both ways real ingestors do: `<proj>/file/...`-style ("/")
+        # and a top-level `<proj>.class.x` (".") -- e.g. a C++ class outside any namespace.
+        pid = f"cpp://{name}"
         items = [GraphNode("Project", {"id": pid}, {"name": name})]
         for cls in classes:
-            items.append(GraphNode("Class", {"id": f"{pid}/{cls}"}, {"name": cls}))
-            items.append(GraphEdge("HAS_CLASS", "Project", {"id": pid}, "Class", {"id": f"{pid}/{cls}"}))
+            cid = f"{pid}.class.{cls}" if cls.startswith("top") else f"{pid}/namespace/geo.class.{cls}"
+            items.append(GraphNode("Class", {"id": cid}, {"name": cls}))
+            items.append(GraphEdge("HAS_CLASS", "Project", {"id": pid}, "Class", {"id": cid}))
         return items
 
     labels = ["Project", "Class"]
-    stream_apply(writer, "python://api", labels, _fresh(project("api", ["a", "gone"])))
-    stream_apply(writer, "python://api2", labels, _fresh(project("api2", ["a", "b"])))
+    stream_apply(writer, "cpp://api", labels, _fresh(project("api", ["a", "gone", "top", "top_gone"])))
+    stream_apply(writer, "cpp://api2", labels, _fresh(project("api2", ["a", "top"])))
 
-    stats, _, _ = stream_apply(writer, "python://api", labels, _fresh(project("api", ["a"])))
+    stats, _, _ = stream_apply(writer, "cpp://api", labels, _fresh(project("api", ["a", "top"])))
 
-    assert (stats.nodes_removed, stats.edges_removed) == (1, 1)  # `gone` and its HAS_CLASS, nothing else
-    assert graph.query("MATCH (n) WHERE n.id STARTS WITH 'python://api2' RETURN n.id ORDER BY n.id").result_set == [
-        ["python://api2"], ["python://api2/a"], ["python://api2/b"],
+    # the two dropped classes (one of each id shape) and their HAS_CLASS edges -- nothing else
+    assert (stats.nodes_added, stats.nodes_removed, stats.edges_removed) == (0, 2, 2)
+    assert graph.query("MATCH (n) WHERE n.id STARTS WITH 'cpp://api2' RETURN n.id ORDER BY n.id").result_set == [
+        ["cpp://api2"], ["cpp://api2.class.top"], ["cpp://api2/namespace/geo.class.a"],
     ]
-    assert graph.query("MATCH (:Project {id: 'python://api2'})-[r:HAS_CLASS]->() RETURN count(r)").result_set == [[2]]
+    assert graph.query("MATCH (:Project {id: 'cpp://api2'})-[r:HAS_CLASS]->() RETURN count(r)").result_set == [[2]]

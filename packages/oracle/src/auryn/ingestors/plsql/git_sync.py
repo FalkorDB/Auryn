@@ -174,8 +174,7 @@ def sync_at(
         return itertools.chain(prelude, resolution.emit_streaming(plan, load_fn, proj_id))
 
     labels = [schema.label for schema in FILE_NODE_SCHEMAS]
-    # PL/SQL ids continue the project id with "." (`<proj>.package.<name>`), not "/".
-    stats, _reals, _placeholders = stream_apply(writer, proj_id, labels, make_target, id_sep=".")
+    stats, _reals, _placeholders = stream_apply(writer, proj_id, labels, make_target)
     return SyncStats(
         nodes_added=stats.nodes_added,
         nodes_updated=stats.nodes_updated,

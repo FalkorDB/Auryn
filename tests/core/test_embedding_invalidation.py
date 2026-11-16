@@ -45,13 +45,13 @@ def test_stream_apply_clears_only_changed_node_embedding(writer):
         return gen
 
     writer.setup_schema([NodeSchema("Function")])  # create the graph + id index, as a real sync does
-    stream_apply(writer, "p", ["Function"], make("version-one"))
+    stream_apply(writer, "p/", ["Function"], make("version-one"))
     embed_graph(writer, FakeEmbedder())
     assert _embedding(writer, "p/f1") is not None
     assert _embedding(writer, "p/f2") is not None
 
     # Resync: only f1's source changes.
-    stats, _, _ = stream_apply(writer, "p", ["Function"], make("version-two-different"))
+    stats, _, _ = stream_apply(writer, "p/", ["Function"], make("version-two-different"))
     assert stats.nodes_updated == 1
     assert _embedding(writer, "p/f1") is None  # stale embedding cleared -> re-queued
     assert _embedding(writer, "p/f2") is not None  # unchanged -> embedding kept

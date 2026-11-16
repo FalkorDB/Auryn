@@ -154,7 +154,6 @@ def stream_apply(
     make_target: Callable[[], Iterator[GraphNode | GraphEdge]],
     *,
     diff_extern_edges: bool = True,
-    id_sep: str = "/",
 ) -> tuple[DeltaStats, list[str], list[str]]:
     """Memory-bounded equivalent of `compute_delta(...)` followed by
     `writer.apply_delta(...)`, for the recompute-and-diff sync every file-based ingestor
@@ -191,14 +190,9 @@ def stream_apply(
     its engine (jedi/Roslyn) can't resolve cross-repo and so omits the placeholders the fast pass
     authored, and would otherwise diff them away before reconcile_linkages heals them (the cross-repo
     `consumer_first` heal). The placeholders are owned by the fast pass + the linkage reconciler, not
-    the deep upgrade. Only extern:// targets are affected; in-prefix edges diff normally either way.
-
-    `id_sep` (default "/"): the separator the ingestor's ids continue `id_prefix` with. The
-    project owns `id_prefix` itself and everything under `id_prefix + id_sep` -- NOT every id that
-    merely starts with `id_prefix`, or a resync of `python://api` would read `python://api2/...`
-    as its own and delete it as a removal (see graph_client._owned_ids). PL/SQL passes "."."""
+    the deep upgrade. Only extern:// targets are affected; in-prefix edges diff normally either way."""
     with phase("read_fingerprints"):
-        node_fps, edge_fps = writer.read_fingerprints(id_prefix, node_labels, id_sep)
+        node_fps, edge_fps = writer.read_fingerprints(id_prefix, node_labels)
     stats = DeltaStats()
     reals: list[str] = []
     placeholders: list[str] = []
