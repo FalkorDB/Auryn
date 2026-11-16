@@ -29,7 +29,7 @@ def _sync_blocker(project: dict) -> str | None:
     except git.NoSuchPathError:  # a remote URI (or a path that is gone): git itself will tell
         pass
     if not str(project["id"]).startswith("csharp://"):
-        return "Sync from the viewer handles C# projects only. Refresh this one with 'auryn sync'."
+        return "Sync from the viewer handles C# projects only. Re-ingest this one to refresh the graph."
     return None
 
 

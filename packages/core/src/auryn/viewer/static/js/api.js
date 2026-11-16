@@ -7,7 +7,9 @@ async function req(url, options) {
   try { data = await res.json(); } catch { /* non-JSON body */ }
   if (!res.ok) {
     const msg = (data && data.error) || `${res.status} ${res.statusText}`;
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;  // lets a caller tell a refusal (4xx) from a failure (5xx)
+    throw err;
   }
   return data;
 }

@@ -114,12 +114,13 @@ def test_git_refs_and_git_sync_refuse_a_project_the_viewer_cannot_sync(
     _seed_unsyncable_projects(origin_repo, graph, tmp_path)
     before = graph.query("MATCH (n) RETURN count(n)").result_set
 
+    listed = {p["id"]: p for p in client.get(f"/api/graphs/{graph_name}/git-projects").get_json()}
     refs = client.get(f"/api/graphs/{graph_name}/git-refs", query_string={"project_id": project_id})
     synced = client.post(f"/api/graphs/{graph_name}/git-sync", json={"project_id": project_id})
 
     for resp in (refs, synced):
         assert resp.status_code == 400
-        assert "git clone" not in resp.get_json()["error"]
+        assert resp.get_json()["error"] == listed[project_id]["sync_unavailable"]  # one reason, everywhere
     assert graph.query("MATCH (n) RETURN count(n)").result_set == before  # nothing was synced
 
 

@@ -325,12 +325,10 @@ export function buildGitCard(project, ctx) {
     <h3>${esc(project.name)}</h3>
     <p class="repo" title="${esc(props.repo_uri || "")}">${esc(props.repo_uri || "")}</p>
     <p class="at">at <code>${esc(current)}</code></p>`;
-  if (project.sync_unavailable) {
-    // Not a source the viewer can sync (a plain folder, or not a C# project -- see _sync_blocker
-    // in viewer/app.py): say why, instead of a ref picker and a Sync button that can only fail.
-    card.innerHTML = head + `<p class="status">${esc(project.sync_unavailable)}</p>`;
-    return card;
-  }
+  // Not a source the viewer can sync (a plain folder, or not a C# project -- see _sync_blocker in
+  // viewer/app.py): say why, instead of a ref picker and a Sync button that can only fail.
+  const unavailable = (why) => { card.innerHTML = head + `<p class="status">${esc(why)}</p>`; return card; };
+  if (project.sync_unavailable) return unavailable(project.sync_unavailable);
   card.innerHTML = head + `
     <div class="git-row">
       <select class="ref-select" disabled><option>Loading refs…</option></select>
@@ -361,6 +359,9 @@ export function buildGitCard(project, ctx) {
     select.disabled = false;
     button.disabled = false;
   }).catch((err) => {
+    // The inspector builds this card from a raw graph node, which carries no `sync_unavailable`:
+    // there the same refusal arrives here, as git-refs' 400.
+    if (err.status === 400) { unavailable(err.message); return; }
     select.innerHTML = `<option value="__custom__" selected>Other (commit sha)…</option>`;
     custom.style.display = "";
     select.disabled = false;
