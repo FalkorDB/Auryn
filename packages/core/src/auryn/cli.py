@@ -589,14 +589,21 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
     from auryn.core.app_config import get_repo
     from auryn.core.ingest import ingest_directory
     from auryn.core.project import default_graph_name, resolve_project_root
+    from auryn.core.sync_lock import sync_lock
 
     root = resolve_project_root(path)
-    reg = get_repo(str(root))
-    graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
-    project = reg.project_name if reg else None
-    config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
-    report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
-                              deep=deep, auto_install=False)
+    # One sync per repo at a time: the git hooks fire a burst of these (a rebase starts one per
+    # commit) and overlapping syncs of one project corrupt its subgraph. See core/sync_lock.py.
+    with sync_lock(root) as my_turn:
+        if not my_turn:
+            click.echo(f"A sync of {root} is already queued; it will pick up this change.")
+            return
+        reg = get_repo(str(root))
+        graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
+        project = reg.project_name if reg else None
+        config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
+        report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
+                                  deep=deep, auto_install=False)
     _echo_ingest_report(report)
 
 
