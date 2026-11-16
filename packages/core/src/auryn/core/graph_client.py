@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -108,6 +109,15 @@ redis.Redis client, which pools connections and is safe for concurrent use acros
 threads (confirmed empirically). Capped rather than one-worker-per-label since
 FalkorDB is a single server process -- more threads than this stopped helping in
 testing and just adds contention."""
+
+_INDEX_BUILD_TIMEOUT_S = 300.0
+"""How long await_indexes() waits for FalkorDB to finish building an index it just created.
+The build runs in the background after CREATE INDEX returns, at roughly 14k embedded nodes a
+second on a laptop (measured: ~6 ms for 300 nodes, ~0.4 s for 6,000), and a search against the
+index meanwhile returns NOTHING. That gap is why a search right after an embed pass came back
+empty -- on a loaded CI runner even for three nodes. Five minutes covers a few million nodes."""
+
+_INDEX_POLL_INTERVAL_S = 0.02
 
 _WRITE_BATCH_SIZE = 2000
 """One UNWIND-based write per this many entities rather than one query per entity --
@@ -377,6 +387,23 @@ class GraphWriter:
             logger.debug("Created full-text index on :%s(%s)", label, ", ".join(props))
         except ResponseError:
             logger.debug("Full-text index on :%s already exists", label)
+
+    def await_indexes(self, label: str, timeout: float = _INDEX_BUILD_TIMEOUT_S) -> bool:
+        """Block until every index on :label is built: True once they all are, False if `timeout`
+        seconds ran out first. FalkorDB returns from CREATE INDEX at once and populates the index
+        in the background; until `db.indexes()` reports it OPERATIONAL, a vector or full-text
+        query against it comes back EMPTY -- not partial (see _INDEX_BUILD_TIMEOUT_S)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            rows = self._graph.ro_query(
+                "CALL db.indexes() YIELD label, status WHERE label = $label RETURN status", {"label": label}
+            ).result_set
+            if all(status == "OPERATIONAL" for (status,) in rows):
+                return True
+            if time.monotonic() >= deadline:
+                logger.warning("Indexes on :%s still building after %.0fs", label, timeout)
+                return False
+            time.sleep(_INDEX_POLL_INTERVAL_S)
 
     def query(self, cypher: str, params: dict | None = None):
         """Escape hatch for passes that need arbitrary Cypher (reads, or targeted

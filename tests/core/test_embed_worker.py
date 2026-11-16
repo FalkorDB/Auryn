@@ -60,6 +60,33 @@ def test_embed_graph_indexes_and_search_finds_by_meaning(writer):
     assert hits[0]["id"] == "c1" and hits[0]["kind"] == "Class"
 
 
+def test_embed_graph_returns_only_once_the_indexes_are_searchable(writer):
+    """FalkorDB builds an index in the background after CREATE INDEX returns, and a query against
+    one still under construction comes back EMPTY. With more than a handful of nodes that window
+    is real (a few ms at 300), so a search right after the embed pass found nothing -- and on a
+    loaded CI runner the same race made the three-node search tests fail at random."""
+    writer.query(
+        "UNWIND range(1, 300) AS i CREATE (:Function {id: 'f' + toString(i), name: 'connect' + toString(i), "
+        "qualified_name: 'db.connect' + toString(i), doc: 'Open a db connection.', source: 'def connect(): ...'})"
+    )
+    emb = FakeEmbedder()
+
+    stats = embed_graph(writer, emb)
+
+    assert stats.embedded == 300 and stats.index_ready
+    assert len(writer.knn_search(emb.embed_query("connect"), 2)) == 2
+    assert len(writer.fulltext_search("database connection", 5)) == 5
+
+
+def test_index_ready_is_false_when_the_build_outlasts_the_wait(writer, monkeypatch):
+    """`index_ready` is the wait's own verdict: an index still under construction at the deadline
+    is reported as not ready rather than as searchable."""
+    _seed(writer)
+    monkeypatch.setattr(writer, "await_indexes", lambda label: False)
+
+    assert embed_graph(writer, FakeEmbedder()).index_ready is False
+
+
 def test_embed_graph_is_idempotent(writer):
     _seed(writer)
     emb = FakeEmbedder()
