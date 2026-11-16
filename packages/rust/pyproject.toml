@@ -2,6 +2,7 @@
 name = "auryn-rust"
 version = "0.1.0"
 description = "Rust language plugin for Auryn: a fast tree-sitter-rust engine extracting modules/structs/enums/traits/functions/methods/fields/variants/params/consts, the trait hierarchy (IMPLEMENTS/EXTENDS), and calls. A deep pass (rust-analyzer / rustc HIR symbol resolution) is the planned second phase."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "SSPL-1.0" }

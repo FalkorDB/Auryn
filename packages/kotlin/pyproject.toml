@@ -2,6 +2,7 @@
 name = "auryn-kotlin"
 version = "0.1.0"
 description = "Kotlin language plugin for Auryn: a fast tree-sitter-kotlin engine extracting packages/classes/objects/interfaces/enums/methods/functions/fields/params, the type hierarchy (EXTENDS/IMPLEMENTS), and calls. A deep pass (Kotlin compiler / kotlin-language-server symbol resolution) is the planned second phase."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "SSPL-1.0" }

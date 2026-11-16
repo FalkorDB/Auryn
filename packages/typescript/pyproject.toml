@@ -2,6 +2,7 @@
 name = "auryn-typescript"
 version = "0.1.0"
 description = "TypeScript/JavaScript language plugin for Auryn: one fast tree-sitter engine over the whole JS/TS family (.ts/.tsx/.js/.jsx/.mjs/.cjs), extracting classes/interfaces/enums/type-aliases/functions/methods/params, the ES-module import graph, and calls. A deep tsserver/TS-compiler pass (resolved types, cross-module calls) is the planned second phase."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "SSPL-1.0" }

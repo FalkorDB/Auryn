@@ -2,6 +2,7 @@
 name = "auryn-java"
 version = "0.1.0"
 description = "Java language plugin for Auryn: a fast tree-sitter-java engine extracting packages/classes/interfaces/enums/records/methods/fields/params, the type hierarchy (EXTENDS/IMPLEMENTS), and calls. A deep pass (Eclipse JDT / javac symbol resolution) is the planned second phase."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "SSPL-1.0" }
