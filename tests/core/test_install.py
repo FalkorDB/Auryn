@@ -105,6 +105,24 @@ def test_claudecode_register_then_deregister(tmp_path):
     assert not (tmp_path / "skills" / "auryn").exists()  # skill removed
 
 
+def test_claudecode_deregister_leaves_the_users_own_files_in_the_skill_dir(tmp_path):
+    # Uninstall removes what install copied -- not the whole folder: a file the user added next
+    # to the bundled skill (a note, their own variant) is theirs and must survive.
+    from auryn.core.agents import ClaudeCode
+
+    skill = tmp_path / "skills" / "auryn"
+    skill.mkdir(parents=True)
+    (skill / "MINE.md").write_text("mine")
+
+    cc = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills")
+    reg = cc.register(["PY", "-m", "auryn", "mcp"])
+    assert (skill / "SKILL.md").exists()
+
+    cc.deregister(reg)
+    assert not (skill / "SKILL.md").exists()  # ours: gone
+    assert (skill / "MINE.md").read_text() == "mine"  # theirs: untouched
+
+
 def test_claudecode_register_raises_when_add_fails(tmp_path):
     from auryn.core.agents import ClaudeCode
 
@@ -233,6 +251,21 @@ def test_mcp_config_agent_refuses_to_clobber_invalid_json(tmp_path):
     with pytest.raises(RuntimeError, match="not valid JSON"):
         agent.register(["cairn", "mcp"])
     assert "// a comment" in cfg.read_text()  # left untouched
+
+
+@pytest.mark.parametrize("content", ['[{"theirs": 1}]', '{"mcpServers": [{"name": "theirs"}], "note": 1}'])
+def test_mcp_config_agent_refuses_to_clobber_a_config_of_another_shape(tmp_path, content):
+    # Valid JSON, but not the `{"mcpServers": {...}}` object we know how to merge one entry into:
+    # it used to be replaced wholesale by a config holding only our server.
+    from auryn.core.agents import McpConfigAgent
+
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(content)
+    agent = McpConfigAgent("cursor", tmp_path, cfg)
+
+    with pytest.raises(RuntimeError, match="refusing to overwrite"):
+        agent.register(["cairn", "mcp"])
+    assert cfg.read_text() == content  # left untouched
 
 
 def test_default_adapters_cover_the_agents():
@@ -390,6 +423,33 @@ def test_agents_md_deregister_keeps_file_when_it_predated_us(tmp_path):
     reg = agent.register(["cairn", "mcp"])
     agent.deregister(reg)
     assert md.exists() and md.read_text() == "# Preexisting\n"
+
+
+def test_agents_md_deregister_keeps_an_empty_file_that_predated_us(tmp_path):
+    # "Predated us" holds for an EMPTY file too: with only our section left it looked like a file
+    # install had created, and was deleted. Also after a re-install in between.
+    from auryn.core.agents import AgentsMdAgent
+
+    md = tmp_path / "AGENTS.md"
+    md.write_text("")
+    agent = AgentsMdAgent("agents-md", md)
+    agent.register(["cairn", "mcp"])
+    reg = agent.register(["cairn", "mcp"])  # re-run of install
+    agent.deregister(reg)
+    assert md.exists() and md.read_text() == ""
+
+
+def test_agents_md_deregister_removes_a_file_install_created(tmp_path):
+    # ...while a file that exists only because install wrote it is removed again -- also after a
+    # re-install in between (the block is still the file's first byte).
+    from auryn.core.agents import AgentsMdAgent
+
+    md = tmp_path / "AGENTS.md"
+    agent = AgentsMdAgent("agents-md", md)
+    agent.register(["cairn", "mcp"])
+    reg = agent.register(["cairn", "mcp"])  # re-run of install
+    agent.deregister(reg)
+    assert not md.exists()
 
 
 def test_do_install_skips_a_failing_adapter(tmp_path, monkeypatch):

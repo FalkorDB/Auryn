@@ -22,6 +22,7 @@ without the real agent installed or its real config touched.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -46,6 +47,21 @@ def _default_run(cmd: list[str]) -> subprocess.CompletedProcess:
 def _skill_source() -> Path:
     """The bundled skill shipped inside the package (works for editable and wheel installs)."""
     return Path(__file__).resolve().parent.parent / "assets" / "skills" / _SKILL_NAME
+
+
+def _remove_skill(dest: Path) -> None:
+    """Delete the files install copied into `dest` -- the bundled skill's own -- and then `dest`
+    itself if that leaves it empty. A file the user put in that folder is theirs, and stays."""
+    src = _skill_source()
+    for item in sorted(src.rglob("*"), reverse=True):  # children before their directory
+        target = dest / item.relative_to(src)
+        if target.is_dir():
+            with contextlib.suppress(OSError):  # not empty: the user's files are in it
+                target.rmdir()
+        elif target.exists():
+            target.unlink()
+    with contextlib.suppress(OSError):
+        dest.rmdir()
 
 
 # ── Claude Code (CLI-based) ───────────────────────────────────────────────────
@@ -86,7 +102,7 @@ class ClaudeCode:
         and idempotent -- a no-op if the user already removed either."""
         self._run(["claude", "mcp", "remove", "-s", reg.scope, reg.server_name])
         if reg.skill_path:
-            shutil.rmtree(reg.skill_path, ignore_errors=True)
+            _remove_skill(Path(reg.skill_path))
 
 
 # ── OpenAI Codex (CLI-based) ──────────────────────────────────────────────────
@@ -122,8 +138,9 @@ class CodexCli:
 # ── File-config agents (Antigravity / Copilot / Cursor / Windsurf / Gemini CLI) ─
 def _read_config(path: Path) -> dict:
     """Parse an agent's MCP config, or {} if it doesn't exist yet. Raises if the file exists but
-    isn't valid JSON -- so we refuse to clobber a config we can't safely round-trip (e.g. a JSONC
-    file with comments) rather than silently wiping the user's other servers."""
+    isn't valid JSON, or isn't a JSON object -- so we refuse to clobber a config we can't safely
+    round-trip (e.g. a JSONC file with comments) rather than silently wiping the user's other
+    servers."""
     if not path.exists():
         return {}
     text = path.read_text()
@@ -133,7 +150,9 @@ def _read_config(path: Path) -> dict:
         data = json.loads(text)
     except ValueError as e:
         raise RuntimeError(f"{path} is not valid JSON (comments not supported); refusing to overwrite it") from e
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path} is not a JSON object; refusing to overwrite it")
+    return data
 
 
 def _write_config(path: Path, data: dict) -> None:
@@ -166,9 +185,9 @@ class McpConfigAgent:
 
     def register(self, server_command: list[str]) -> AgentRegistration:
         data = _read_config(self.config_path)
-        servers = data.get(self.servers_key)
-        if not isinstance(servers, dict):
-            servers = data[self.servers_key] = {}
+        servers = data.setdefault(self.servers_key, {})
+        if not isinstance(servers, dict):  # some other shape: not ours to replace with an empty map
+            raise RuntimeError(f"{self.config_path}: `{self.servers_key}` is not an object; refusing to overwrite it")
         entry = {"command": server_command[0], "args": list(server_command[1:])}
         if self.entry_extra:
             entry = {**self.entry_extra, **entry}
@@ -272,15 +291,17 @@ structural view over ad-hoc file spelunking when reasoning about the code."""
     return f"{_AGENTS_MD_BEGIN}\n{body}\n{_AGENTS_MD_END}"
 
 
-def _merge_md_section(text: str, block: str) -> str:
+def _merge_md_section(text: str | None, block: str) -> str:
     """Insert or replace our delimited block, preserving all surrounding text. Idempotent: a second
-    call replaces the previous block in place rather than appending a duplicate."""
+    call replaces the previous block in place rather than appending a duplicate. `text` is None
+    for a file that doesn't exist yet: only then does the result START with our block, which is
+    how deregister later tells a file we created from an (even empty) one that predated us."""
+    if text is None:
+        return block + "\n"
     if _AGENTS_MD_BEGIN in text and _AGENTS_MD_END in text:
         start = text.index(_AGENTS_MD_BEGIN)
         end = text.index(_AGENTS_MD_END) + len(_AGENTS_MD_END)
         return text[:start] + block + text[end:]
-    if not text.strip():
-        return block + "\n"
     return text.rstrip("\n") + "\n\n" + block + "\n"
 
 
@@ -318,7 +339,7 @@ class AgentsMdAgent:
         return self.detector() if self.detector is not None else True
 
     def register(self, server_command: list[str]) -> AgentRegistration:
-        text = self.path.read_text() if self.path.exists() else ""
+        text = self.path.read_text() if self.path.exists() else None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(_merge_md_section(text, _agents_md_block(server_command)))
         return AgentRegistration(
@@ -329,11 +350,14 @@ class AgentsMdAgent:
         path = Path(reg.config_path) if reg.config_path else self.path
         if not path.exists():
             return
-        stripped = _strip_md_section(path.read_text())
+        text = path.read_text()
+        stripped = _strip_md_section(text)
         if stripped.strip():
             path.write_text(stripped.rstrip("\n") + "\n")
+        elif text.startswith(_AGENTS_MD_BEGIN):
+            path.unlink()  # file held only our section, from its first byte (we created it) -> remove it
         else:
-            path.unlink()  # file held only our section (we created it) -> remove it
+            path.write_text("")  # an empty file that predated us (see _merge_md_section): still the user's
 
 
 def agents_md_adapter() -> AgentsMdAgent:
