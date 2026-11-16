@@ -425,19 +425,20 @@ def _emit_attribute(attr: RawAttribute, cls_id: str, ctx: _ModCtx) -> Iterator[G
 
 
 def _resolve_scope_calls(
-    calls: list[RawCall], caller_label: str, caller_id: str, ctx: _ModCtx
+    calls: list[RawCall], caller_label: str, caller_id: str, ctx: _ModCtx, params: frozenset[str] = frozenset()
 ) -> tuple[list[GraphEdge], list[GraphNode], list[str]]:
     """Resolve the calls made from one scope -- a function/method body OR a module's top-level
     code -- into CALLS edges originating at `caller_id`, the external placeholder nodes those
     calls introduce (ADR 0004, deduped via `idx.emitted_externs`), and the unresolved simple-name
     call texts (jedi engine only, for the node's `unresolved_calls` property). Shared by
     `_emit_function` and `_emit_module` so a top-level call and a function-body call resolve
-    identically; only the caller node (`caller_label`/`caller_id`) differs."""
+    identically; only the caller node (`caller_label`/`caller_id`) differs. `params`: the scope's
+    own parameter names -- see the jedi engine's fallback in _resolve_call."""
     call_edges: list[GraphEdge] = []
     external_nodes: list[GraphNode] = []
     unresolved_calls: list[str] = []
     for call in calls:
-        res = _resolve_call(call, ctx)
+        res = _resolve_call(call, ctx, params)
         if res is None:
             if ctx.oracle is not None and call.is_simple_name:
                 unresolved_calls.append(_call_text(call))
@@ -473,7 +474,8 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
     # Resolve calls first so `unresolved_calls` can ride on the node we're about to emit.
     # A resolved call edges to the project callable; an _External call edges to a placeholder
     # (ADR 0004) -- surfacing stdlib/builtin/third-party and not-yet-ingested sibling symbols.
-    call_edges, external_nodes, unresolved_calls = _resolve_scope_calls(fn.calls, label, fn_id, ctx)
+    call_edges, external_nodes, unresolved_calls = _resolve_scope_calls(
+        fn.calls, label, fn_id, ctx, frozenset(p.name for p in fn.params))
 
     props: dict[str, object] = {
         "name": fn.name,
@@ -590,16 +592,21 @@ def _constructor_call(class_qname: str, ctx: _ModCtx) -> _Call | None:
     return _Call(ctor[0], ctor[1], "constructor", class_qname.rsplit(".", 1)[-1])
 
 
-def _resolve_call(call: RawCall, ctx: _ModCtx) -> _Call | _External | None:
+def _resolve_call(call: RawCall, ctx: _ModCtx, params: frozenset[str] = frozenset()) -> _Call | _External | None:
     """Resolve a call. Returns a _Call (bound to a project callable), an _External (nameable but
-    not defined in this ingest -> a placeholder node, ADR 0004), or None (dynamic / unnameable)."""
+    not defined in this ingest -> a placeholder node, ADR 0004), or None (dynamic / unnameable).
+    `params` are the calling scope's own parameter names."""
     if ctx.oracle is not None:
         full_name = ctx.oracle.resolve_call(ctx.module_path, call.line, call.col)
         if not full_name:
             # The oracle found nothing: dynamic dispatch, or an import Jedi can't follow (a `src/`
             # package imported from tests/, a library not installed next to auryn). Bind it by the
             # ast rules instead of dropping an edge the fast pass draws -- they name a callee from
-            # its import or its own module (never a guess), and still surface a bare builtin call.
+            # its import or its own module, and still surface a bare builtin call. Those rules are
+            # module-wide, though: a parameter of the calling scope that shadows the name IS the
+            # dynamic case (`def run(client): client.get()`), so that one stays unresolved.
+            if (call.name if call.is_simple_name else call.receiver) in params:
+                return None
             return _resolve_call_ast(call, ctx)
         target = ctx.idx.callable_by_qname.get(full_name)
         if target is None:

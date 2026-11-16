@@ -16,7 +16,7 @@ import pytest
 from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.ingestors.python import ids, resolution
 from auryn.ingestors.python.file_parser import parse_module
-from auryn.ingestors.python.jedi_engine import JediOracle, build_precomputed_oracle
+from auryn.ingestors.python.jedi_engine import JediOracle, _callee_name, build_precomputed_oracle
 
 _SAMPLE = Path(__file__).resolve().parents[3] / "demo" / "python-ingestor" / "sample"
 _PROJ = "python://demo"
@@ -221,6 +221,15 @@ def test_src_layout_calls_bind_to_project_callables(tmp_path, oracle_kind):
     assert not [e for e in _edges_of(items, "CALLS") if e.properties["resolution"] == "external"]
 
 
+def test_callee_name_is_left_alone_when_jedi_names_it_as_the_importer_spelled_it():
+    """Jedi stopped at an import inside a project file (a re-export of something it can't follow):
+    the name is the import path, not `<module>.<name>` -- there is no module prefix to re-anchor."""
+    by_file = {"/repo/src/pkg/__init__.py": "pkg"}
+    assert _callee_name("src.pkg.boot", "src.pkg", "/repo/src/pkg/__init__.py", by_file) == "pkg.boot"
+    assert _callee_name("lib.fetch", "src.pkg", "/repo/src/pkg/__init__.py", by_file) == "lib.fetch"
+    assert _callee_name("src.pkgs.fetch", "src.pkg", "/repo/src/pkg/__init__.py", by_file) == "src.pkgs.fetch"
+
+
 def test_callee_in_a_namespace_dir_binds_by_file(tmp_path):
     """`plugins/` is a PEP-420 namespace dir (no __init__.py), so the ast pass keeps the
     context-free name for its modules (`src.pkg.plugins.hooks`) while Jedi follows the import and
@@ -253,6 +262,10 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
             "\n"
             "def test_it():\n"
             "    fetch(helper())\n"
+            "\n"
+            "\n"
+            "def test_shadowed(fetch, helper):\n"
+            "    fetch(helper())\n"
         ),
     })
     items = list(resolution.resolve(modules, _PROJ, oracle=JediOracle(str(tmp_path), modules)))
@@ -263,3 +276,5 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
         "python://demo/module/pkg.core.func.helper()": "resolved",
         "extern://python/notinstalled_lib::fetch": "external",
     }
+    # ...but not where the scope's own parameter shadows the import: that call IS dynamic
+    assert not [e for e in _edges_of(items, "CALLS") if "test_shadowed" in str(e.from_key["id"])]

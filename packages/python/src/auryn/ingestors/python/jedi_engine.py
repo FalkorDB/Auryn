@@ -37,9 +37,11 @@ def _callee_name(full_name: str, module_name: str, module_path: str, dotted_by_f
     -> 'src.pkg.db'); ids.dotted_module_path anchors it at its *import* root ('pkg.db'), and
     that is the name resolution's index is keyed by -- left as-is, a same-module or
     relative-import callee in a `src/` layout misses the index and degrades to an
-    `extern://` placeholder. A callee defined outside the project keeps Jedi's name."""
+    `extern://` placeholder. A callee defined outside the project keeps Jedi's name, and so
+    does one Jedi names as an importer spelled it rather than under its module (it stopped at
+    an import inside a project file) -- there is no module prefix to swap."""
     dotted = dotted_by_file.get(module_path)
-    if dotted is None:
+    if dotted is None or not (full_name + ".").startswith(module_name + "."):
         return full_name
     return dotted + full_name[len(module_name):]
 
