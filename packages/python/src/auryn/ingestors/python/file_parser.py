@@ -246,6 +246,7 @@ def _function(node: ast.FunctionDef | ast.AsyncFunctionDef, src: _Source, *, in_
         line_start=node.lineno,
         line_end=node.end_lineno or node.lineno,
         calls=_calls(node),
+        local_names=_local_names(node),
         source=src.segment(node),
         doc=src.leading_comment(_decl_top_line(node)),
     )
@@ -349,6 +350,29 @@ def _calls(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[RawCall]:
     the decorators/defaults on the `def` (they run in the enclosing scope) and any nested def's
     body (its own scope)."""
     return _calls_in_body(node.body)
+
+
+def _local_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    """The names a function/method body binds itself, parameters aside: an assignment / `for` /
+    `with` / walrus target, `except ... as e`, `case ... as x`, a nested def or class. In the body
+    such a name is that local, whatever the module imports or defines under the same name (see
+    the jedi engine's fallback in resolution._resolve_call). Scope-respecting like _calls_in_body.
+    An `import` in the body is not one: the name is still an import."""
+    names: set[str] = set()
+
+    def visit(n: ast.AST) -> None:
+        nested_scope = isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            names.add(n.id)
+        elif (nested_scope or isinstance(n, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar))) and n.name:
+            names.add(n.name)
+        if not (nested_scope or isinstance(n, ast.Lambda)):
+            for child in ast.iter_child_nodes(n):
+                visit(child)
+
+    for stmt in node.body:
+        visit(stmt)
+    return sorted(names)
 
 
 def _module_calls(tree: ast.Module) -> list[RawCall]:

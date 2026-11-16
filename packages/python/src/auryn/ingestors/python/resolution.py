@@ -425,20 +425,20 @@ def _emit_attribute(attr: RawAttribute, cls_id: str, ctx: _ModCtx) -> Iterator[G
 
 
 def _resolve_scope_calls(
-    calls: list[RawCall], caller_label: str, caller_id: str, ctx: _ModCtx, params: frozenset[str] = frozenset()
+    calls: list[RawCall], caller_label: str, caller_id: str, ctx: _ModCtx, local_names: frozenset[str] = frozenset()
 ) -> tuple[list[GraphEdge], list[GraphNode], list[str]]:
     """Resolve the calls made from one scope -- a function/method body OR a module's top-level
     code -- into CALLS edges originating at `caller_id`, the external placeholder nodes those
     calls introduce (ADR 0004, deduped via `idx.emitted_externs`), and the unresolved simple-name
     call texts (jedi engine only, for the node's `unresolved_calls` property). Shared by
     `_emit_function` and `_emit_module` so a top-level call and a function-body call resolve
-    identically; only the caller node (`caller_label`/`caller_id`) differs. `params`: the scope's
-    own parameter names -- see the jedi engine's fallback in _resolve_call."""
+    identically; only the caller node (`caller_label`/`caller_id`) differs. `local_names`: the
+    scope's own parameters and locals -- see the jedi engine's fallback in _resolve_call."""
     call_edges: list[GraphEdge] = []
     external_nodes: list[GraphNode] = []
     unresolved_calls: list[str] = []
     for call in calls:
-        res = _resolve_call(call, ctx, params)
+        res = _resolve_call(call, ctx, local_names)
         if res is None:
             if ctx.oracle is not None and call.is_simple_name:
                 unresolved_calls.append(_call_text(call))
@@ -475,7 +475,7 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
     # A resolved call edges to the project callable; an _External call edges to a placeholder
     # (ADR 0004) -- surfacing stdlib/builtin/third-party and not-yet-ingested sibling symbols.
     call_edges, external_nodes, unresolved_calls = _resolve_scope_calls(
-        fn.calls, label, fn_id, ctx, frozenset(p.name for p in fn.params))
+        fn.calls, label, fn_id, ctx, frozenset([p.name for p in fn.params] + fn.local_names))
 
     props: dict[str, object] = {
         "name": fn.name,
@@ -592,10 +592,10 @@ def _constructor_call(class_qname: str, ctx: _ModCtx) -> _Call | None:
     return _Call(ctor[0], ctor[1], "constructor", class_qname.rsplit(".", 1)[-1])
 
 
-def _resolve_call(call: RawCall, ctx: _ModCtx, params: frozenset[str] = frozenset()) -> _Call | _External | None:
+def _resolve_call(call: RawCall, ctx: _ModCtx, local_names: frozenset[str] = frozenset()) -> _Call | _External | None:
     """Resolve a call. Returns a _Call (bound to a project callable), an _External (nameable but
     not defined in this ingest -> a placeholder node, ADR 0004), or None (dynamic / unnameable).
-    `params` are the calling scope's own parameter names."""
+    `local_names` are the calling scope's own parameters and locals."""
     if ctx.oracle is not None:
         full_name = ctx.oracle.resolve_call(ctx.module_path, call.line, call.col)
         if not full_name:
@@ -603,9 +603,10 @@ def _resolve_call(call: RawCall, ctx: _ModCtx, params: frozenset[str] = frozense
             # package imported from tests/, a library not installed next to auryn). Bind it by the
             # ast rules instead of dropping an edge the fast pass draws -- they name a callee from
             # its import or its own module, and still surface a bare builtin call. Those rules are
-            # module-wide, though: a parameter of the calling scope that shadows the name IS the
-            # dynamic case (`def run(client): client.get()`), so that one stays unresolved.
-            if (call.name if call.is_simple_name else call.receiver) in params:
+            # module-wide, though: a parameter or local of the calling scope that shadows the name
+            # IS the dynamic case (`def run(client): client.get()`, `db = make(); db.get()`), so
+            # that one stays unresolved.
+            if (call.name if call.is_simple_name else call.receiver) in local_names:
                 return None
             return _resolve_call_ast(call, ctx)
         target = ctx.idx.callable_by_qname.get(full_name)

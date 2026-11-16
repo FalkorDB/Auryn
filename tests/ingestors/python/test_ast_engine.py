@@ -292,3 +292,33 @@ def test_nested_def_body_calls_do_not_fold_into_the_enclosing_function():
     )
     items = list(resolution.resolve([m], "python://demo"))
     assert _calls_from(items, "python://demo/module/m.func.outer()") == set()
+
+
+def test_local_names_are_the_names_a_body_binds_itself():
+    # What the jedi engine's fallback must not bind through (see resolution._resolve_call): every
+    # way a body binds a name -- but not its parameters (kept apart), a nested scope's own names,
+    # a name it only reads, or an `import` in the body (that name is still an import).
+    m = _module(
+        "def f(param, items):\n"
+        "    a = b, (c, *d) = param\n"
+        "    for e in items:\n"
+        "        pass\n"
+        "    with open(a) as g:\n"
+        "        pass\n"
+        "    try:\n"
+        "        pass\n"
+        "    except ValueError as h:\n"
+        "        pass\n"
+        "    if (i := len(items)):\n"
+        "        pass\n"
+        "    match param:\n"
+        "        case [j, *k]:\n"
+        "            pass\n"
+        "    def nested(inner_param):\n"
+        "        inner_local = 1\n"
+        "    class Local:\n"
+        "        attr = 1\n"
+        "    import json\n"
+        "    print(unbound)\n"
+    )
+    assert set(m.functions[0].local_names) == set("abcdeghijk") | {"nested", "Local"}

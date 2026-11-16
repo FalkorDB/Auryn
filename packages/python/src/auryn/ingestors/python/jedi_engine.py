@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import jedi
@@ -49,7 +50,7 @@ def _callee_name(full_name: str, module_name: str, module_path: str, dotted_by_f
 class JediOracle:
     """Implements resolution.SemanticOracle over a materialized source directory."""
 
-    def __init__(self, source_dir: str, modules: list[RawModule] = ()):
+    def __init__(self, source_dir: str, modules: Sequence[RawModule] = ()):
         self._root = Path(source_dir)
         self._project = jedi.Project(path=str(self._root))
         self._scripts: dict[str, jedi.Script] = {}

@@ -257,6 +257,7 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
         "src/pkg/core.py": "def helper():\n    return 1\n",
         "tests/test_core.py": (
             "from notinstalled_lib import fetch\n"
+            "from pkg import core\n"
             "from pkg.core import helper\n"
             "\n"
             "\n"
@@ -266,6 +267,18 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
             "\n"
             "def test_shadowed(fetch, helper):\n"
             "    fetch(helper())\n"
+            "\n"
+            "\n"
+            "def test_shadowed_by_a_local(make):\n"
+            "    core = make()\n"
+            "    core.helper()\n"
+            "\n"
+            "\n"
+            "def test_shadowed_by_an_except_name():\n"
+            "    try:\n"
+            "        pass\n"
+            "    except ValueError as core:\n"
+            "        core.helper()\n"
         ),
     })
     items = list(resolution.resolve(modules, _PROJ, oracle=JediOracle(str(tmp_path), modules)))
@@ -276,5 +289,6 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
         "python://demo/module/pkg.core.func.helper()": "resolved",
         "extern://python/notinstalled_lib::fetch": "external",
     }
-    # ...but not where the scope's own parameter shadows the import: that call IS dynamic
+    # ...but not where the scope's own parameter or local (an assignment, `except ... as`)
+    # shadows the import: that call IS dynamic
     assert not [e for e in _edges_of(items, "CALLS") if "test_shadowed" in str(e.from_key["id"])]
