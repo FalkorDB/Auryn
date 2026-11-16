@@ -5,6 +5,8 @@ tests/conftest.py."""
 
 from __future__ import annotations
 
+import pytest
+
 from auryn.core.graph_client import GraphWriter, _edge_fingerprint_query, _node_fingerprint_query
 from auryn.core.graph_model import GraphEdge, GraphNode, NodeSchema
 from auryn.core.graph_sync import (
@@ -357,6 +359,34 @@ def test_apply_delta_upserts_and_removes_in_one_call(graph):
     assert graph.query("MATCH ()-[r:EXTENDS]->() RETURN r").result_set == []
 
 
+def test_apply_delta_stamps_the_commit_last(graph, monkeypatch):
+    """The Project node's `commit_sha` is what the next sync short-circuits on ("already at this
+    commit"). It must go in after the rest of the delta: stamped first, an apply that dies midway
+    left a half-written graph every later sync took for current."""
+    writer = GraphWriter(graph)
+    writer.merge_node(GraphNode("Project", {"id": "p"}, {"name": "p", "commit_sha": "c1"}))
+    delta = GraphDelta(
+        nodes_to_upsert=[
+            GraphNode("Project", {"id": "p"}, {"name": "p", "commit_sha": "c2"}),
+            GraphNode("Class", {"id": "p/a"}, {}),
+        ],
+        edges_to_upsert=[GraphEdge("HAS_CLASS", "Project", {"id": "p"}, "Class", {"id": "p/a"})],
+    )
+
+    def killed(edges):
+        raise RuntimeError("killed mid-apply")
+
+    with monkeypatch.context() as m:
+        m.setattr(writer, "merge_edges", killed)
+        with pytest.raises(RuntimeError):
+            writer.apply_delta(delta)
+    assert writer.get_property("Project", {"id": "p"}, "commit_sha") == "c1"  # still the last GOOD commit
+
+    writer.apply_delta(delta)  # the healthy re-run completes the delta, and only then stamps
+    assert writer.get_property("Project", {"id": "p"}, "commit_sha") == "c2"
+    assert graph.query("MATCH (:Project {id: 'p'})-[r:HAS_CLASS]->(:Class {id: 'p/a'}) RETURN count(r)").result_set == [[1]]
+
+
 # -- stream_apply: memory-bounded streaming counterpart to compute_delta + apply_delta --
 #
 # Ids are realistic project-prefixed ids (`plsql://Proj...`), not toy ones: read_fingerprints
@@ -458,6 +488,44 @@ def test_stream_apply_writes_all_nodes_before_any_edge_regardless_of_target_orde
     assert graph.query(
         f"MATCH (:Class {{id: '{_P}.a'}})-[:HAS_METHOD]->(:Method {{id: '{_P}.a.m'}}) RETURN 1"
     ).result_set == [[1]]
+
+
+@pytest.mark.parametrize("already_synced", [False, True])
+def test_stream_apply_interrupted_mid_apply_leaves_the_commit_unstamped(graph, already_synced):
+    """A sync that dies between the nodes pass and the edges pass must not leave the Project
+    node at the NEW commit -- the next sync would short-circuit on it and never write the rest.
+    A first ingest leaves no commit at all; a resync leaves the last good one."""
+    writer = GraphWriter(graph)
+    writer.setup_schema([NodeSchema("Project"), NodeSchema("Class")])
+    labels = ["Project", "Class"]
+
+    def target(sha):
+        return [
+            GraphNode("Project", {"id": _P}, {"name": "p", "commit_sha": sha}),
+            GraphNode("Class", {"id": f"{_P}.a"}, {"name": sha}),
+            GraphEdge("HAS_CLASS", "Project", {"id": _P}, "Class", {"id": f"{_P}.a"}, {"at": sha}),
+        ]
+
+    if already_synced:
+        stream_apply(writer, _P, labels, _fresh(target("c1")))
+
+    passes = []
+
+    def dies_before_the_edges_pass():  # make_target: fine for the nodes pass, killed on the next
+        passes.append(1)
+        if len(passes) == 2:
+            raise RuntimeError("killed mid-apply")
+        return iter(target("c2"))
+
+    with pytest.raises(RuntimeError):
+        stream_apply(writer, _P, labels, dies_before_the_edges_pass)
+    assert writer.get_property("Project", {"id": _P}, "commit_sha") == ("c1" if already_synced else None)
+
+    stream_apply(writer, _P, labels, _fresh(target("c2")))  # the healthy re-run heals it, then stamps
+    assert writer.get_property("Project", {"id": _P}, "commit_sha") == "c2"
+    assert graph.query(
+        f"MATCH (:Project {{id: '{_P}'}})-[r:HAS_CLASS]->(:Class {{id: '{_P}.a'}}) RETURN r.at"
+    ).result_set == [["c2"]]
 
 
 def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(graph):

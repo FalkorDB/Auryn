@@ -147,6 +147,19 @@ class DeltaStats:
 _MISSING = object()
 
 
+SYNC_MARKER = "commit_sha"
+"""The property a sync short-circuits on: every engine opens with "is the Project node already at
+`target_sha`?" and returns at once if so. Whoever writes the node carrying it must therefore write
+it LAST -- stamped first (it used to be the first item merged), a sync that died mid-apply left a
+half-written graph that every later sync took for current, and nothing ever healed it."""
+
+
+def unstamped(node: GraphNode) -> GraphNode:
+    """`node` without its SYNC_MARKER: what gets written up front when a brand-new Project node
+    must exist for its edges to attach to, before the sync has earned the stamp."""
+    return GraphNode(node.label, node.key, {k: v for k, v in node.properties.items() if k != SYNC_MARKER})
+
+
 def stream_apply(
     writer,
     id_prefix: str,
@@ -200,6 +213,7 @@ def stream_apply(
     with phase("write"):
         # Pass 1 -- nodes. Pop each target node's key out of node_fps: hit -> compare
         # fingerprints (unchanged/updated), miss -> new. Leftover node_fps = removals.
+        marker: GraphNode | None = None  # the node carrying SYNC_MARKER -- written last, see below
         batch: list[GraphNode] = []
         updated_pairs: list[tuple[str, str]] = []  # (label, id) of content-changed nodes
         for item in make_target():
@@ -221,6 +235,13 @@ def stream_apply(
                 updated_pairs.append((item.label, str(item.key["id"])))
             else:
                 continue  # unchanged -- already popped, so it won't be counted a removal
+            if SYNC_MARKER in props:
+                # Hold the stamp back until everything else is applied (see SYNC_MARKER). An
+                # existing node just waits; a new one is written unstamped so edges can attach.
+                marker = item
+                if prev is not _MISSING:
+                    continue
+                item = unstamped(item)
             batch.append(item)
             if len(batch) >= _STREAM_BATCH_SIZE:
                 writer.merge_nodes(batch)
@@ -275,6 +296,8 @@ def stream_apply(
         if node_fps:
             writer.delete_nodes([(label, dict(k)) for (label, k) in node_fps])
             stats.nodes_removed += len(node_fps)
+        if marker is not None:
+            writer.merge_nodes([marker])  # every node, edge and removal is in: stamp the commit
 
     return stats, reals, placeholders
 
