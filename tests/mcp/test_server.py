@@ -442,6 +442,35 @@ def test_ingest_directory_ingests_and_reports_per_language(falkordb_connection, 
     assert graph.query("MATCH (p:Procedure {name:'GO'}) RETURN p").result_set != []
 
 
+def test_index_repository_takes_its_turn_with_the_repos_syncs(falkordb_connection, graph, tmp_path, monkeypatch):
+    """An agent's `index_repository` writes the project subgraph a commit hook's `auryn sync`
+    writes too, so it ingests under the same per-repo lock (core/sync_lock.py) -- and, being an
+    explicit request, never as the redundant one that steps aside."""
+    import contextlib
+
+    from auryn.core import ingest
+    from auryn.core.project import resolve_project_root
+
+    root = tmp_path / "LocalMixed"
+    _make_mixed_dir(root)
+    events = []
+
+    @contextlib.contextmanager
+    def recorded(local_dir, *, queue_one=True):
+        events.append(("lock", local_dir, queue_one))
+        yield True
+        events.append("unlock")
+
+    real_ingest = ingest.ingest_directory
+    monkeypatch.setattr("auryn.mcp.server.sync_lock", recorded)
+    monkeypatch.setattr(ingest, "ingest_directory", lambda *a, **k: events.append("ingest") or real_ingest(*a, **k))
+
+    result = _call_tool(create_server(falkordb_connection, graph.name), "index_repository", {"path": str(root)})
+
+    assert result.is_error is False
+    assert events == [("lock", resolve_project_root(str(root)), False), "ingest", "unlock"]
+
+
 def test_index_repository_bad_path_surfaces_as_a_tool_error(falkordb_connection, graph, tmp_path):
     server = create_server(falkordb_connection, graph.name)
 

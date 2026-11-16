@@ -6,6 +6,9 @@ same project's subgraph and leave it wrong (2 of 31 functions) while the last on
 reports it current. `sync_lock` makes them take turns, and sends all but ONE waiter home: a sync
 that starts after the one in progress reads the working tree as it is then, so a single queued
 sync already covers every trigger that arrived in the meantime.
+
+The other writers of a repo's subgraph -- `auryn ingest dir`, the MCP `index_repository` tool --
+take their turn under the same lock (`queue_one=False`).
 """
 
 from __future__ import annotations
@@ -28,8 +31,9 @@ def sync_lock(local_dir: Path, *, queue_one: bool = True) -> Iterator[bool]:
     """Yields True once it is this sync's turn for `local_dir` (blocking while another runs), or
     False straight away when a sync of it is already waiting its turn -- this one is redundant.
 
-    `queue_one=False` is for a sync the queued one would NOT cover -- it asks for a deep pass, or
-    targets another server: it never steps aside, it just waits for its turn."""
+    `queue_one=False` is for a sync the queued one would NOT cover -- it asks for a deep pass,
+    targets another server, or is an explicit ingest: it never steps aside, it just waits for its
+    turn."""
     if fcntl is None:
         yield True
         return

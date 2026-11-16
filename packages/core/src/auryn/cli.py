@@ -920,17 +920,21 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
     from auryn.core import ingest
     from auryn.core.app_config import load_config
     from auryn.core.project import default_graph_name, resolve_project_root
+    from auryn.core.sync_lock import sync_lock
 
     _validate_hook_names(only_hooks + skip_hooks)
     graph = ctx.obj["graph_name"] or default_graph_name(resolve_project_root(path))
     writer = _ingest_writer(ctx, graph)
     try:
-        report = ingest.ingest_directory(
-            writer, path, project_name=project_name, solution_name=solution_name, deep=deep,
-            include_dirs=include_dirs, exclude_dirs=exclude_dirs,
-            include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
-            enrichment_only=only_hooks, enrichment_skip=skip_hooks,
-        )
+        # Its turn among this repo's hook / watcher syncs, which write the same project subgraph
+        # (core/sync_lock.py) -- e.g. a deep re-ingest while a commit hook fires.
+        with sync_lock(resolve_project_root(path), queue_one=False):
+            report = ingest.ingest_directory(
+                writer, path, project_name=project_name, solution_name=solution_name, deep=deep,
+                include_dirs=include_dirs, exclude_dirs=exclude_dirs,
+                include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
+                enrichment_only=only_hooks, enrichment_skip=skip_hooks,
+            )
     except ValueError as e:  # missing path / not a directory -- a clean CLI error, not a traceback
         raise click.ClickException(str(e)) from e
     _echo_ingest_report(report)

@@ -91,3 +91,62 @@ def test_sync_command_steps_aside_only_for_a_plain_sync(tmp_path, monkeypatch, a
     assert res.exit_code == 0, res.output
     assert "already queued" in res.output
     assert asked == [may_step_aside]
+
+
+def test_ingest_dir_takes_its_turn_with_the_repos_syncs(tmp_path, monkeypatch):
+    """`auryn ingest dir` writes the project subgraph a hook's `auryn sync` writes too (a deep
+    re-ingest while a commit hook fires), so it ingests under the same lock -- and, being an
+    explicit request, never as the redundant one that steps aside."""
+    from auryn.core.project import resolve_project_root
+
+    events = []
+
+    @contextlib.contextmanager
+    def recorded(local_dir, *, queue_one=True):
+        events.append(("lock", local_dir, queue_one))
+        yield True
+        events.append("unlock")
+
+    monkeypatch.setattr(sync_lock_mod, "sync_lock", recorded)
+    monkeypatch.setattr("auryn.cli._ingest_writer", lambda ctx, graph: None)
+    monkeypatch.setattr("auryn.core.ingest.ingest_directory", lambda *a, **k: events.append("ingest"))
+    monkeypatch.setattr("auryn.cli._echo_ingest_report", lambda report: None)
+    monkeypatch.setattr("auryn.cli._wire_trigger", lambda *a, **k: None)
+
+    res = CliRunner().invoke(cli, ["ingest", "dir", str(tmp_path)])
+
+    assert res.exit_code == 0, res.output
+    assert events == [("lock", resolve_project_root(str(tmp_path)), False), "ingest", "unlock"]
+
+
+@pytest.mark.parametrize("ingest_fails", [False, True])
+def test_sync_holds_the_lock_until_a_background_deep_pass_is_done(tmp_path, monkeypatch, ingest_fails):
+    """`auryn sync --deep background` gets the fast graph back while a thread still deepens it.
+    That thread writes this repo's subgraph too, so the lock is released only once it is joined
+    -- also when the ingest itself raised."""
+    from auryn.core.graph_client import FalkorDBConfig
+
+    events = []
+
+    @contextlib.contextmanager
+    def recorded(local_dir, *, queue_one=True):
+        try:
+            yield True
+        finally:
+            events.append("unlock")
+
+    def ingest_directory(*a, **k):
+        events.append("ingest")
+        if ingest_fails:
+            raise RuntimeError("ingest failed")
+
+    monkeypatch.setattr(sync_lock_mod, "sync_lock", recorded)
+    monkeypatch.setattr("auryn.cli._resolve_connection", lambda *a, **k: FalkorDBConfig())
+    monkeypatch.setattr("auryn.cli.connect", lambda config: None)
+    monkeypatch.setattr("auryn.core.ingest.ingest_directory", ingest_directory)
+    monkeypatch.setattr("auryn.core.ingest.join_deep_phase", lambda: events.append("join"))
+    monkeypatch.setattr("auryn.cli._echo_ingest_report", lambda report: None)
+
+    CliRunner().invoke(cli, ["sync", str(tmp_path), "--deep", "background"])
+
+    assert events == ["ingest", "join", "unlock"]
