@@ -5,7 +5,8 @@ server + skill with detected agents; choose local-lite vs remote FalkorDB) and `
 
 For the local backend, `view`/`mcp`/`ingest`/`run`/`git-sync` resolve their connection via
 ensure_server(), which starts the bundled FalkorDB on demand; the graph defaults to one per
-repository (CLAUDE_PROJECT_DIR for the agent-spawned MCP server, else the path/cwd).
+repository (CLAUDE_PROJECT_DIR for the agent-spawned MCP server, else the path/cwd) -- except for
+`run`/`git-sync`, which aren't tied to a repo and keep their `--graph-name` default of `auryn`.
 
 Adding a new ingestor never requires touching this file: `run` dynamically attaches
 a subcommand for every ingestor discovered by discover_ingestors() that implements
@@ -43,23 +44,24 @@ def cli(verbose: bool) -> None:
         progress.set_verbose(True)
 
 
-class _LazyConnection(dict):
-    """`ctx.obj` for the `run` / `git-sync` groups: `falkordb_config` is resolved on first use, not
-    in the group callback. click runs that callback even for `auryn run <name> --help`, and
-    resolving the configured backend starts the local FalkorDB (see _resolve_connection)."""
+class _LazyConnection:
+    """`ctx.obj` for the `run` / `git-sync` groups: `obj["falkordb_config"]` is resolved on first
+    use, not in the group callback. click runs that callback even for `auryn run <name> --help`,
+    and resolving the configured backend starts the local FalkorDB (see _resolve_connection)."""
 
     def __init__(self, host, port, username, password, ssl, graph_name) -> None:
-        super().__init__()
         self._args = (host, port, username, password, ssl)
         self._graph_name = graph_name
+        self._config: FalkorDBConfig | None = None
 
-    def __missing__(self, key):
+    def __getitem__(self, key: str) -> FalkorDBConfig:
         if key != "falkordb_config":
             raise KeyError(key)
-        import dataclasses
+        if self._config is None:
+            import dataclasses
 
-        self[key] = dataclasses.replace(_resolve_connection(*self._args), graph_name=self._graph_name)
-        return self[key]
+            self._config = dataclasses.replace(_resolve_connection(*self._args), graph_name=self._graph_name)
+        return self._config
 
 
 @click.group()
