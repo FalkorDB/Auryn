@@ -4,6 +4,14 @@ All notable changes to Auryn are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Relicensed the project from the Server Side Public License (SSPL-1.0) to the
+  **MIT License**. The already-published 0.1.0 packages on PyPI keep their original
+  SSPL metadata (PyPI releases are immutable); MIT applies to the repository and all
+  subsequent releases.
+
 ## [0.1.0] — Initial public release
 
 First public release of Auryn: point it at a repository and it builds a queryable
@@ -28,6 +36,6 @@ instead of grepping.
   so you install only the languages you need.
 
 ### License
-- Released under the MIT License.
+- Released under the Server Side Public License v1 (SSPL-1.0).
 
 [0.1.0]: https://github.com/FalkorDB/Auryn/releases/tag/v0.1.0
