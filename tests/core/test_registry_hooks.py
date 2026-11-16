@@ -3,6 +3,7 @@ commit-resync hooks."""
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -193,6 +194,20 @@ def test_a_crlf_hook_keeps_its_line_endings(tmp_path):
 
     hooks.uninstall(repo)
     assert path.read_bytes() == b"#!/bin/sh\r\necho mine\r\n"
+
+
+def test_install_refuses_a_hooks_dir_that_is_a_symlink(tmp_path):
+    """`.git/hooks -> ../githooks`: the older way to share tracked hooks, before `core.hooksPath`.
+    It is refused like a redirected hooks path -- the block would land in the tracked directory."""
+    repo = _init_repo(tmp_path / "r")
+    shared = repo / "githooks"
+    shared.mkdir()
+    hooks_link = hooks.hooks_dir(repo)
+    shutil.rmtree(hooks_link)
+    hooks_link.symlink_to(shared)
+
+    assert hooks.install(repo, ["true"]) == []
+    assert list(shared.iterdir()) == []
 
 
 def test_uninstall_leaves_a_hook_without_our_block_byte_for_byte(tmp_path):

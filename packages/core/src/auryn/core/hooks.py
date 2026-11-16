@@ -8,10 +8,10 @@ and removed cleanly on forget/uninstall. The hooks directory is resolved via git
 linked worktrees are honored.
 
 What we leave alone, rather than risk breaking a hook that isn't ours:
-  * a hooks directory outside the repo's own git dir (`core.hooksPath`): it is either tracked
-    (`.husky/`, `.githooks/` -- our block, with this machine's interpreter path, would be one
-    `git add -A` away from the whole team) or shared by every repo on the machine (each commit
-    anywhere would resync the last repo ingested);
+  * a hooks directory outside the repo's own git dir (`core.hooksPath`, or a `.git/hooks` that
+    is a symlink): it is either tracked (`.husky/`, `.githooks/` -- our block, with this
+    machine's interpreter path, would be one `git add -A` away from the whole team) or shared by
+    every repo on the machine (each commit anywhere would resync the last repo ingested);
   * a hook that isn't a shell script (a `#!/usr/bin/env python3` hook can't run a shell line);
   * a hook that is a symlink (a write would go through it, into a tracked script or a hook
     manager's own file);
@@ -21,6 +21,7 @@ Earlier versions wrote into all of these, so skipping one also takes an old bloc
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shlex
 import subprocess
@@ -72,15 +73,15 @@ def _strip_block(text: str) -> str:
 
 
 def owns_hooks_dir(local_dir) -> bool:
-    """True when the hooks directory is the repo's own `<git dir>/hooks`, i.e. `core.hooksPath`
-    doesn't redirect it into the work tree or to a directory other repos share (see the module
-    docstring)."""
+    """True when the hooks directory is the repo's own `<git dir>/hooks`, i.e. neither
+    `core.hooksPath` nor a symlink in its place redirects it into the work tree or to a directory
+    other repos share (see the module docstring)."""
     out = subprocess.run(
         ["git", "-C", str(local_dir), "rev-parse", "--git-common-dir"],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
     common = Path(out) if Path(out).is_absolute() else Path(local_dir) / out
-    return hooks_dir(local_dir).resolve() == (common / "hooks").resolve()
+    return hooks_dir(local_dir).resolve() == common.resolve() / "hooks"  # not through a `hooks` symlink
 
 
 def _read(path: Path) -> str | None:
@@ -110,7 +111,8 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
     and short of HOOKS when an existing hook isn't a shell script, is a symlink or is disabled
     (see the module docstring)."""
     if not owns_hooks_dir(local_dir):
-        uninstall(local_dir)  # a block an earlier version put there
+        with contextlib.suppress(OSError):  # best effort: the directory may not be ours to write
+            uninstall(local_dir)  # a block an earlier version put there
         return []
     d = hooks_dir(local_dir)
     d.mkdir(parents=True, exist_ok=True)
