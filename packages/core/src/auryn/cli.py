@@ -605,9 +605,11 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
         graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
         project = reg.project_name if reg else None
         config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
-        report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
-                                  deep=deep, auto_install=False)
-        join_deep_phase()  # `--deep background` writers are still this sync: hold the lock for them
+        try:
+            report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
+                                      deep=deep, auto_install=False)
+        finally:
+            join_deep_phase()  # `--deep background` writers are still this sync: hold the lock for them
     _echo_ingest_report(report)
 
 
