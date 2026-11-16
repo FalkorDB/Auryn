@@ -28,6 +28,6 @@ instead of grepping.
   so you install only the languages you need.
 
 ### License
-- Released under the Server Side Public License v1 (SSPLv1), matching FalkorDB.
+- Released under the MIT License.
 
 [0.1.0]: https://github.com/FalkorDB/Auryn/releases/tag/v0.1.0
