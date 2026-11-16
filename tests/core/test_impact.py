@@ -76,6 +76,54 @@ def test_impact_cli_on_a_clean_tree(tmp_path):
     assert "No changes in the given range." in res.output
 
 
+@pytest.mark.parametrize("run_from", ["another folder", "a subfolder"])
+def test_impact_cli_resolves_the_repos_own_graph(tmp_path, monkeypatch, run_from):
+    """The graph is the REPOSITORY's -- named after its root, as `sync` names it -- wherever the
+    command runs: `--path <repo>` from another folder, or the default path from a subfolder. It
+    used to be the current folder's, so the CI gate crashed on a missing graph or, worse, silently
+    checked a different one."""
+    from auryn.core.project import default_graph_name
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    r = tmp_path / "repo"
+    (r / "sub").mkdir(parents=True)
+    def git(*a): subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True)
+    git("init"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+    (r / "sub" / "m.py").write_text("def f():\n    return 1\n")
+    git("add", "."); git("commit", "-m", "init")
+    (r / "sub" / "m.py").write_text("def f():\n    return 2\n")  # an uncommitted change to analyse
+
+    selected = []
+
+    class _Client:
+        def select_graph(self, name):
+            selected.append(name)
+            return object()
+
+    monkeypatch.setattr("auryn.cli._resolve_connection", lambda *conn: None)
+    monkeypatch.setattr("auryn.cli.connect_client", lambda config: _Client())
+    monkeypatch.setattr("auryn.core.impact.impact_of_diff", lambda graph, changed, max_depth: {"impact": {}})
+
+    if run_from == "another folder":
+        (tmp_path / "elsewhere").mkdir()
+        monkeypatch.chdir(tmp_path / "elsewhere")
+        args = ["impact", "--path", str(r), "--json"]
+    else:
+        monkeypatch.chdir(r / "sub")
+        args = ["impact", "--json"]
+    res = CliRunner().invoke(cli, args)
+
+    assert res.exit_code == 0, res.output
+    assert selected == [default_graph_name(r.resolve())]
+
+
+def test_impact_cli_outside_a_git_repo_is_a_clean_error(tmp_path):
+    """Not a traceback: a one-line message and a non-zero exit, like the MCP tool's error."""
+    res = CliRunner().invoke(cli, ["impact", "--path", str(tmp_path)])
+    assert res.exit_code == 1
+    assert "couldn't compute git diff" in res.output and "Traceback" not in res.output
+
+
 # -- impact_of_diff (integration) ------------------------------------------------------------
 
 pytest.importorskip("redislite.falkordb_client", reason="falkordblite (embedded extra) not installed")

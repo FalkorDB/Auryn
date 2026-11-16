@@ -252,20 +252,31 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
     the reverse-dependency closure: callers, API endpoints, tests, and cross-service consumers.
     Use --fail-on to gate a PR in CI (exits non-zero). See auryn/core/impact.py."""
     import json as _json
+    import subprocess
     from pathlib import Path
 
     from auryn.core import impact as impact_mod
+    from auryn.core.app_config import get_repo
     from auryn.core.project import default_graph_name
 
-    root = Path(path).expanduser().resolve()
-    diff = impact_mod.git_diff(str(root), base, head, staged=staged)
+    try:
+        # The repository root, not `--path` as given: a run from (or pointed at) a subfolder still
+        # means the repo, and that root is what its graph is named after.
+        root = Path(impact_mod.git_toplevel(str(Path(path).expanduser().resolve())))
+        diff = impact_mod.git_diff(str(root), base, head, staged=staged)
+    except subprocess.CalledProcessError as e:
+        raise click.ClickException(f"couldn't compute git diff in {path}: {(e.stderr or '').strip() or e}") from e
     changed, _deleted = impact_mod.parse_unified_diff(diff)
     if not changed:
         click.echo("No changes in the given range.")
         return
 
     config = _resolve_connection(host, port, username, password, ssl)
-    graph = connect_client(config).select_graph(graph_name or default_graph_name())
+    # The repo's own graph, resolved the way `sync` does -- not the CURRENT folder's, which is a
+    # different graph (or none) whenever the command isn't run from the repo root.
+    reg = get_repo(str(root))
+    graph_name = graph_name or (reg.graph_name if reg and reg.graph_name else default_graph_name(root))
+    graph = connect_client(config).select_graph(graph_name)
     report = impact_mod.impact_of_diff(graph, changed, max_depth=max_depth)
 
     if as_json:
