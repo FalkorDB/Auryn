@@ -5,6 +5,8 @@ tests/conftest.py."""
 
 from __future__ import annotations
 
+import pytest
+
 from auryn.core.graph_client import GraphWriter, _edge_fingerprint_query, _node_fingerprint_query
 from auryn.core.graph_model import GraphEdge, GraphNode, NodeSchema
 from auryn.core.graph_sync import (
@@ -143,6 +145,34 @@ def test_read_fingerprints_reads_past_falkordbs_default_resultset_size_cap(graph
     expected_keys = {node_key(GraphNode("Class", {"id": f"csharp://proj/{i}"}, {})) for i in range(1, 10002)}
     assert len(node_fps) == 10001
     assert set(node_fps) == expected_keys
+
+
+def test_read_fingerprints_never_reads_a_project_whose_name_continues_at_a_dot(graph):
+    """`Acme.Core` and `Acme.Core.Tests` are two projects, yet every id of the second continues
+    the first at a `.` -- shaped just like `Acme.Core`'s own top-level `<proj>.class.x`. The
+    second's Project node is what tells them apart: what it owns is left out, and `Acme.Core`'s
+    own dotted ids are still read."""
+    writer = GraphWriter(graph)
+    core, tests = "csharp://Sol/Acme.Core", "csharp://Sol/Acme.Core.Tests"
+    for pid in (core, tests):
+        writer.merge_node(GraphNode("Project", {"id": pid}, {"name": pid.rsplit("/", 1)[1]}))
+        writer.merge_node(GraphNode("Class", {"id": f"{pid}/ns/A"}, {"name": "A"}))
+        writer.merge_node(GraphNode("Class", {"id": f"{pid}.class.Top"}, {"name": "Top"}))
+        writer.merge_edge(GraphEdge("HAS_CLASS", "Project", {"id": pid}, "Class", {"id": f"{pid}/ns/A"}))
+    # an edge into the other project isn't `Acme.Core`'s to diff either
+    writer.merge_edge(GraphEdge("EXTENDS", "Class", {"id": f"{core}/ns/A"}, "Class", {"id": f"{tests}/ns/A"}))
+
+    for pid in (core, tests):
+        node_fps, edge_fps = writer.read_fingerprints(pid, ["Project", "Class"])
+
+        assert set(node_fps) == {
+            node_key(GraphNode("Project", {"id": pid}, {})),
+            node_key(GraphNode("Class", {"id": f"{pid}/ns/A"}, {})),
+            node_key(GraphNode("Class", {"id": f"{pid}.class.Top"}, {})),
+        }
+        assert set(edge_fps) == {
+            edge_key(GraphEdge("HAS_CLASS", "Project", {"id": pid}, "Class", {"id": f"{pid}/ns/A"}))
+        }
 
 
 def test_subgraph_fingerprint_queries_plan_as_a_label_scan_not_a_full_scan(graph):
@@ -520,10 +550,12 @@ def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(
     assert dump(graph) == dump(reference_graph)
 
 
-def test_stream_apply_leaves_a_sibling_project_alone(graph):
-    """Two projects share a graph and one name is a prefix of the other (`api` / `api2`).
+@pytest.mark.parametrize("sibling", ["api2", "api.tests"])
+def test_stream_apply_leaves_a_sibling_project_alone(graph, sibling):
+    """Two projects share a graph and one name is a prefix of the other (`api` / `api2`) or
+    continues it at a dot (`api` / `api.tests`, as in `Acme.Core` / `Acme.Core.Tests`).
     Resyncing `api` after it drops two classes must remove those only -- every node and edge
-    of `api2` was read back as `api`'s own leftovers, and deleted."""
+    of the sibling was read back as `api`'s own leftovers, and deleted."""
     writer = GraphWriter(graph)
     writer.setup_schema([NodeSchema("Project"), NodeSchema("Class")])
 
@@ -540,13 +572,14 @@ def test_stream_apply_leaves_a_sibling_project_alone(graph):
 
     labels = ["Project", "Class"]
     stream_apply(writer, "cpp://api", labels, _fresh(project("api", ["a", "gone", "top", "top_gone"])))
-    stream_apply(writer, "cpp://api2", labels, _fresh(project("api2", ["a", "top"])))
+    stream_apply(writer, f"cpp://{sibling}", labels, _fresh(project(sibling, ["a", "top"])))
 
     stats, _, _ = stream_apply(writer, "cpp://api", labels, _fresh(project("api", ["a", "top"])))
 
     # the two dropped classes (one of each id shape) and their HAS_CLASS edges -- nothing else
     assert (stats.nodes_added, stats.nodes_removed, stats.edges_removed) == (0, 2, 2)
-    assert graph.query("MATCH (n) WHERE n.id STARTS WITH 'cpp://api2' RETURN n.id ORDER BY n.id").result_set == [
-        ["cpp://api2"], ["cpp://api2.class.top"], ["cpp://api2/namespace/geo.class.a"],
+    theirs = f"cpp://{sibling}"
+    assert graph.query("MATCH (n) WHERE n.id STARTS WITH $p RETURN n.id ORDER BY n.id", {"p": theirs}).result_set == [
+        [theirs], [f"{theirs}.class.top"], [f"{theirs}/namespace/geo.class.a"],
     ]
-    assert graph.query("MATCH (:Project {id: 'cpp://api2'})-[r:HAS_CLASS]->() RETURN count(r)").result_set == [[2]]
+    assert graph.query("MATCH (:Project {id: $p})-[r:HAS_CLASS]->() RETURN count(r)", {"p": theirs}).result_set == [[2]]

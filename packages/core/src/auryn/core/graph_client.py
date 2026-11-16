@@ -139,29 +139,28 @@ def _fulltext_tokens(query: str) -> list[str]:
     return [t for t in toks if len(t) >= 2 and t not in _FT_STOPWORDS]
 
 
-def _prefix_range(prefix: str) -> tuple[str, str]:
-    """(lo, hi) such that `lo <= s < hi` is exactly equivalent to `s STARTS WITH
-    prefix` -- the standard trick for expressing a prefix match as the inequality
-    a range index can actually use. chr(0xFFFF) is near the top of the codepoint
-    range no real id (built entirely from identifiers, ".", "/", ":", "()", ",")
-    would ever contain, so it's safe as a sentinel upper bound."""
-    return prefix, prefix + chr(0xFFFF)
-
-
 def _owned_ids(id_prefix: str) -> dict[str, str]:
     """Query params selecting exactly the ids `id_prefix` owns: the id itself (`$own`) or one
     that continues it at a boundary -- `/` (`$sub`: `<proj>/file/...`, `<proj>/module/...`) or `.`
     (`$dot`: a top-level `<proj>.class.x` / `<proj>.func.f()`, every PL/SQL id). The fingerprint
-    reads use this rather than _prefix_range because whatever they return and the target doesn't
-    re-emit gets DELETED, and the range is not a project boundary: it also covers a sibling
-    project (`python://api` ... `python://api2/...`), and FalkorDB 4.x -- the engine falkordblite
-    embeds -- returns wrong rows for an indexed string range when ids differ in letter case.
-    Either way a resync of one project deleted another's nodes. `STARTS WITH` is exact on every
-    engine; it costs the index (a per-label scan + filter, ~1.4x on a 500k-node label shared by
-    20 projects). A prefix that already ends at a boundary (`p/`) is a plain prefix."""
+    reads use this rather than the indexed range `[prefix, prefix + chr(0xFFFF))` because whatever
+    they return and the target doesn't re-emit gets DELETED, and the range is not a project
+    boundary: it also covers a sibling project (`python://api` ... `python://api2/...`), and
+    FalkorDB 4.x -- the engine falkordblite embeds -- returns wrong rows for an indexed string
+    range when ids differ in letter case. Either way a resync of one project deleted another's
+    nodes. `STARTS WITH` is exact on every engine; it costs the index (a per-label scan + filter,
+    ~1.4x on a 500k-node label shared by 20 projects). A prefix that already ends at a boundary
+    (`p/`) is a plain prefix. The `.` rule also matches a project whose NAME continues this one's
+    at a dot (`Acme.Core` / `Acme.Core.Tests`); the reads drop what that one owns -- see
+    GraphWriter._dotted_siblings."""
     if id_prefix.endswith(("/", ".")):
         return {"own": id_prefix, "sub": id_prefix, "dot": id_prefix}
     return {"own": id_prefix, "sub": id_prefix + "/", "dot": id_prefix + "."}
+
+
+def _owned_by(node_id: str, project_ids: tuple[str, ...]) -> bool:
+    """Whether `node_id` is one of `project_ids` or continues it at a `/` or `.` boundary."""
+    return any(node_id == p or node_id.startswith((p + "/", p + ".")) for p in project_ids)
 
 
 def _node_fingerprint_query(label: str) -> str:
@@ -623,21 +622,38 @@ class GraphWriter:
         node_fingerprints: dict[NodeKey, str] = {}
         edge_fingerprints: dict[EdgeKey, str] = {}
         with phase("read_fingerprints"), ThreadPoolExecutor(max_workers=workers) as pool:
-            node_futures = [pool.submit(self._read_node_fingerprints, label, id_prefix) for label in node_labels]
-            edge_futures = [pool.submit(self._read_edge_fingerprints, label, id_prefix) for label in node_labels]
+            theirs = self._dotted_siblings(id_prefix)
+            node_futures = [pool.submit(self._read_node_fingerprints, label, id_prefix, theirs) for label in node_labels]
+            edge_futures = [pool.submit(self._read_edge_fingerprints, label, id_prefix, theirs) for label in node_labels]
             for future in node_futures:
                 node_fingerprints.update(future.result())
             for future in edge_futures:
                 edge_fingerprints.update(future.result())
         return node_fingerprints, edge_fingerprints
 
-    def _read_node_fingerprints(self, label: str, id_prefix: str) -> dict[NodeKey, str]:
+    def _dotted_siblings(self, id_prefix: str) -> tuple[str, ...]:
+        """Ids of the OTHER projects whose name continues `id_prefix` at a dot -- `Acme.Core.Tests`
+        next to `Acme.Core`. Every id of such a project matches _owned_ids' `.` rule, shaped just
+        like this project's own top-level `<proj>.class.x`; only its Project node tells the two
+        apart. What it owns is left out of the reads (so never diffed away as this project's
+        leftovers) -- where an id could be either's, it stays."""
+        if id_prefix.endswith(("/", ".")):
+            return ()
+        rows = self._graph.ro_query(
+            "MATCH (p:Project) WHERE p.id STARTS WITH $dot RETURN p.id", {"dot": id_prefix + "."}
+        ).result_set
+        return tuple(row[0] for row in rows)
+
+    def _read_node_fingerprints(self, label: str, id_prefix: str, theirs: tuple[str, ...] = ()) -> dict[NodeKey, str]:
         rows = self._graph.ro_query(
             _node_fingerprint_query(label), _owned_ids(id_prefix), timeout=_SUBGRAPH_QUERY_TIMEOUT_MS
         ).result_set
-        return {node_key(GraphNode(label, {"id": node_id}, {})): fp for node_id, fp in rows}
+        return {
+            node_key(GraphNode(label, {"id": node_id}, {})): fp
+            for node_id, fp in rows if not _owned_by(node_id, theirs)
+        }
 
-    def _read_edge_fingerprints(self, from_label: str, id_prefix: str) -> dict[EdgeKey, str]:
+    def _read_edge_fingerprints(self, from_label: str, id_prefix: str, theirs: tuple[str, ...] = ()) -> dict[EdgeKey, str]:
         """Every outgoing edge's key -> fingerprint from a node labeled `from_label`
         whose id has this project's prefix -- iterating over every one of the
         project's own labels as `from_label` in read_fingerprints() above therefore
@@ -651,6 +667,7 @@ class GraphWriter:
         return {
             edge_key(GraphEdge(rel_type, from_label, {"id": from_id}, to_label, {"id": to_id}, {})): fp
             for rel_type, to_label, from_id, to_id, fp in rows
+            if not (_owned_by(from_id, theirs) or _owned_by(to_id, theirs))
         }
 
     def apply_delta(self, delta: GraphDelta) -> None:
