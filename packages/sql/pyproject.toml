@@ -41,10 +41,10 @@ packages = ["src/auryn"]
 # it only watches pyproject.toml). Together these stop `uv tool install --force <clone>` from
 # silently reinstalling a stale cached build. An sdist keeps the version it was built with, and a
 # `git archive` / GitHub ZIP reads it from .git_archival.txt; a tree with neither falls back to
-# 0.0.0 -- never a number that could pass for a release.
+# 0.0.0.dev0 -- a development version, so it can't pass for a release.
 [tool.hatch.version]
 source = "vcs"
-fallback-version = "0.0.0"
+fallback-version = "0.0.0.dev0"
 raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
 
 [tool.uv]

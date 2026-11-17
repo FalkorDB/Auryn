@@ -4,7 +4,7 @@ Versions are derived from git at build time (hatch-vcs, see the pyproject files)
 gives a plain version (`0.3.0`); any other commit gives `<next>.dev<N>+g<sha>`, and a build of a
 modified tree appends `.d<UTC timestamp>`. So the version alone says which commit -- and whether a
 modified tree -- an install came from. A release names no commit. Neither does a build from a
-source tree with no git history and no archive metadata, which falls back to `0.0.0`.
+source tree with no git history and no archive metadata, which falls back to `0.0.0.dev0`.
 """
 
 from __future__ import annotations

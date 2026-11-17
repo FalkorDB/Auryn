@@ -120,7 +120,7 @@ packages = ["src/auryn"]
 # every package at the tag's version), and uv rebuilds a local install when the sources change.
 [tool.hatch.version]
 source = "vcs"
-fallback-version = "0.0.0"
+fallback-version = "0.0.0.dev0"
 raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
 
 [tool.uv]
