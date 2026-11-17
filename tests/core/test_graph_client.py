@@ -551,12 +551,13 @@ def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(
 
 
 @pytest.mark.parametrize("name, sibling", [
-    ("api", "api2"), ("api", "api.tests"), ("api.", "api.2"), ("django", "Flask"), ("Flask", "django"),
+    ("api", "api2"), ("api", "api.tests"), ("api", "api/core"), ("api.", "api.2"), ("django", "Flask"), ("Flask", "django"),
 ])
 def test_stream_apply_leaves_a_sibling_project_alone(graph, name, sibling):
     """Two projects share a graph and one name is a prefix of the other (`api` / `api2`),
-    continues it at a dot (`api` / `api.tests`, as in `Acme.Core` / `Acme.Core.Tests`), does so
-    after a name that itself ends in a dot (`api.` / `api.2`), or differs from it in letter case
+    continues it at a dot (`api` / `api.tests`, as in `Acme.Core` / `Acme.Core.Tests`) or at a
+    slash (`api` / `api/core`, as in a C# project `Sol` next to solution `Sol`'s project `Core`),
+    does so after a name that itself ends in a dot (`api.` / `api.2`), or differs in letter case
     (`django` / `Flask`: FalkorDB 4.x answers an indexed id range wrongly for those). Resyncing
     the first after it drops two classes must remove those only -- every node and edge of the
     sibling was read back as the first one's own leftovers, and deleted."""

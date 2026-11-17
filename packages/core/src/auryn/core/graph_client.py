@@ -151,9 +151,9 @@ def _owned_ids(id_prefix: str) -> dict[str, str]:
     nodes. `STARTS WITH` is exact on every engine; it costs the index (a per-label scan + filter,
     ~1.4x on a 500k-node label shared by 20 projects). A name that itself ends in `/` or `.` is
     no special case: `cpp://api.` owns `cpp://api./...` and `cpp://api..class.x`, never
-    `cpp://api.2`. The `.` rule also matches a project whose NAME continues this one's at a dot
-    (`Acme.Core` / `Acme.Core.Tests`); the reads drop what that one owns -- see
-    GraphWriter._dotted_siblings."""
+    `cpp://api.2`. Both rules also match another project whose NAME continues this one's at a
+    boundary (`Acme.Core` / `Acme.Core.Tests`, `csharp://Sol` / `csharp://Sol/Core`); the reads
+    drop what that one owns -- see GraphWriter._nested_projects."""
     return {"own": id_prefix, "sub": id_prefix + "/", "dot": id_prefix + "."}
 
 
@@ -621,7 +621,7 @@ class GraphWriter:
         node_fingerprints: dict[NodeKey, str] = {}
         edge_fingerprints: dict[EdgeKey, str] = {}
         with phase("read_fingerprints"), ThreadPoolExecutor(max_workers=workers) as pool:
-            theirs = self._dotted_siblings(id_prefix)
+            theirs = self._nested_projects(id_prefix)
             node_futures = [pool.submit(self._read_node_fingerprints, label, id_prefix, theirs) for label in node_labels]
             edge_futures = [pool.submit(self._read_edge_fingerprints, label, id_prefix, theirs) for label in node_labels]
             for future in node_futures:
@@ -630,14 +630,17 @@ class GraphWriter:
                 edge_fingerprints.update(future.result())
         return node_fingerprints, edge_fingerprints
 
-    def _dotted_siblings(self, id_prefix: str) -> tuple[str, ...]:
-        """Ids of the OTHER projects whose name continues `id_prefix` at a dot -- `Acme.Core.Tests`
-        next to `Acme.Core`. Every id of such a project matches _owned_ids' `.` rule, shaped just
-        like this project's own top-level `<proj>.class.x`; only its Project node tells the two
-        apart. What it owns is left out of the reads (so never diffed away as this project's
-        leftovers) -- where an id could be either's, it stays."""
+    def _nested_projects(self, id_prefix: str) -> tuple[str, ...]:
+        """Ids of the OTHER projects whose name continues `id_prefix` at a boundary --
+        `Acme.Core.Tests` next to `Acme.Core`, or `csharp://Sol/Core` (a project in solution `Sol`)
+        next to a project that is itself named `Sol`. Every id of such a project matches
+        _owned_ids, shaped just like this project's own `<proj>.class.x` / `<proj>/file/...`; only
+        its Project node tells the two apart. What it owns is left out of the reads (so never
+        diffed away as this project's leftovers) -- where an id could be either's, it stays."""
+        owned = _owned_ids(id_prefix)
         rows = self._graph.ro_query(
-            "MATCH (p:Project) WHERE p.id STARTS WITH $dot RETURN p.id", {"dot": id_prefix + "."}
+            "MATCH (p:Project) WHERE p.id STARTS WITH $sub OR p.id STARTS WITH $dot RETURN p.id",
+            {"sub": owned["sub"], "dot": owned["dot"]},
         ).result_set
         return tuple(row[0] for row in rows)
 
