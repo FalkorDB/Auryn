@@ -77,11 +77,12 @@ def test_plugin_to_plugin_dependencies_are_pinned_to_the_same_release():
     # that plugin's same release. The dependency on auryn-core stays unpinned on purpose: the
     # runtime plugin auto-install (core/plugins.py) installs a plugin into a running core and must
     # not move the core under it.
+    plugins, version = _plugins(), _version()
     for name, project in _members().items():
         for requirement in project.get("dependencies", []):
             dep = _name(requirement)
-            if dep in _plugins():
-                assert requirement.split("#")[0].strip() == f"{dep}=={_version()}", (name, requirement)
+            if dep in plugins:
+                assert requirement.split("#")[0].strip() == f"{dep}=={version}", (name, requirement)
 
 
 def test_no_plugin_requires_the_umbrella():

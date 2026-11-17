@@ -168,7 +168,7 @@ Blast radius: the two callers on the left. Closure: everything it reaches on the
 
 ## What it can read
 
-Sixteen languages plus live SQL and Oracle schemas, all **auto-detected** by `auryn ingest` in a single pass. Live databases are read with `auryn run <name>`.
+Sixteen languages plus live SQL and Oracle schemas, all **auto-detected** by `auryn ingest` in a single pass. Live databases are read with `auryn run <name>`. With a custom install (see [Choose your plugins](#choose-your-plugins)), only the installed plugins run: a language whose plugin is missing is installed the first time its files are found (unless `AURYN_AUTO_INSTALL=0`), but the cross-language plugins (`http`, `orm`, `grpc`, `events`) are not.
 
 <details>
 <summary><b>All sources and engines</b></summary>

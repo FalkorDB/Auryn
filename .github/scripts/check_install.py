@@ -39,7 +39,8 @@ while todo:
     todo += [dist_name(r) for r in projects[dist].get("dependencies", [])]
 
 installed = {normalize(d.metadata["Name"]): d.version for d in importlib.metadata.distributions()}
-found = {d: v for d, v in installed.items() if d in projects}
+# Every auryn distribution, not only workspace ones, so a stray auryn-* package also fails the check.
+found = {d: v for d, v in installed.items() if d in projects or d.startswith("auryn-")}
 assert set(found) == expected, f"expected {sorted(expected)}, installed {sorted(found)}"
 stale = {d: v for d, v in found.items() if v != version}
 assert not stale, f"not the locally built version {version}: {stale}"
