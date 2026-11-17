@@ -93,7 +93,7 @@ def test_claudecode_register_then_deregister(tmp_path):
         ran.append(cmd)
         return _ok(cmd)
 
-    cc = ClaudeCode(run=run, skills_dir=tmp_path / "skills")
+    cc = ClaudeCode(run=run, skills_dir=tmp_path / "skills", config_path=tmp_path / "claude.json")
     reg = cc.register(["PY", "-m", "auryn", "mcp"])
 
     assert ["claude", "mcp", "add", "-s", "user", "auryn", "--", "PY", "-m", "auryn", "mcp"] in ran
@@ -136,6 +136,22 @@ def test_claudecode_register_always_load_is_best_effort(tmp_path):
     assert junk.read_text() == "{not json"  # left untouched
 
 
+def test_claudecode_always_load_write_failure_is_non_fatal(tmp_path, monkeypatch):
+    # Patching the config is strictly best-effort: if the write raises (read-only / raced fs), the
+    # agent must still register (server stays, tools just deferred) rather than aborting install.
+    from auryn.core import agents
+
+    cfg = tmp_path / "claude.json"
+    cfg.write_text(json.dumps({"mcpServers": {"auryn": {"command": "PY"}}}))
+
+    def boom(*a, **k):
+        raise OSError("read-only fs")
+
+    monkeypatch.setattr(agents, "_write_config", boom)
+    reg = agents.ClaudeCode(run=_ok, skills_dir=tmp_path / "skills", config_path=cfg).register(["PY", "-m", "auryn", "mcp"])
+    assert reg.skill_path  # register completed despite the write failure
+
+
 def test_claudecode_register_raises_when_add_fails(tmp_path):
     from auryn.core.agents import ClaudeCode
 
@@ -143,7 +159,7 @@ def test_claudecode_register_raises_when_add_fails(tmp_path):
         rc = 1 if "add" in cmd else 0  # `remove` (idempotent clear) ok, `add` fails
         return subprocess.CompletedProcess(cmd, rc, "", "boom")
 
-    cc = ClaudeCode(run=run, skills_dir=tmp_path / "skills")
+    cc = ClaudeCode(run=run, skills_dir=tmp_path / "skills", config_path=tmp_path / "claude.json")
     with pytest.raises(RuntimeError, match="claude mcp add"):
         cc.register(["x"])
 

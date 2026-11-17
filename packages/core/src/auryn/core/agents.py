@@ -79,23 +79,28 @@ class ClaudeCode:
 
     def _enable_always_load(self) -> None:
         """Mark our server so Claude Code loads its tools into the agent's INITIAL tool list,
-        instead of deferring them behind tool-search. `claude mcp add` has no flag for this, so we
+        instead of deferring them behind tool search. `claude mcp add` has no flag for this, so we
         patch the config it just wrote (user scope -> ~/.claude.json, a `mcpServers` map). Without
         it, in a tool-heavy setup the code-graph tools are invisible until the agent happens to
-        search for them -- so it often just greps instead (measured). Best-effort: if the config is
-        missing or not valid JSON, leave it (the server still works, only deferred)."""
+        search for them -- so it often just greps instead (measured). Best-effort and never fatal:
+        a missing / unparseable / unwritable config is left as-is (the server still works, only
+        deferred). `alwaysLoad` is understood by Claude Code >= 2.1.121; older versions ignore the
+        unknown field, so writing it is harmless either way."""
         path = self._claude_config()
         try:
-            data = json.loads(path.read_text()) if path.exists() else None
-        except ValueError:
-            return  # don't clobber a config we can't round-trip
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        except (ValueError, OSError):
+            return  # missing / unparseable / unreadable -> leave it; don't clobber what we can't round-trip
         if not isinstance(data, dict):
             return
         servers = data.get(_MCP_SERVERS_KEY)
         entry = servers.get(_SERVER_NAME) if isinstance(servers, dict) else None
         if isinstance(entry, dict) and entry.get("alwaysLoad") is not True:
             entry["alwaysLoad"] = True
-            _write_config(path, data)
+            try:
+                _write_config(path, data)
+            except OSError:
+                pass  # best-effort: a failed patch must never abort registration
 
     def register(self, server_command: list[str]) -> AgentRegistration:
         """Register the MCP server (user scope) and install the skill. Idempotent: any prior
@@ -156,7 +161,7 @@ def _read_config(path: Path) -> dict:
     file with comments) rather than silently wiping the user's other servers."""
     if not path.exists():
         return {}
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if not text.strip():
         return {}
     try:
@@ -167,8 +172,13 @@ def _read_config(path: Path) -> dict:
 
 
 def _write_config(path: Path, data: dict) -> None:
+    """Write JSON as UTF-8 and atomically (temp file in the same dir + os.replace), so a failed or
+    raced write can never leave a half-written config -- these are the user's real agent configs,
+    which also hold settings we don't own."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    tmp = path.with_name(path.name + ".auryn-tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
 @dataclass
