@@ -3,10 +3,13 @@ commit-resync hooks."""
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
 from pathlib import Path
+
+import pytest
 
 from auryn.core import app_config, hooks
 
@@ -178,6 +181,43 @@ def test_install_never_writes_through_a_symlinked_hook(tmp_path):
     assert wired == ["post-checkout", "post-rewrite"]
     assert tracked.read_text() == "#!/bin/sh\necho mine\n"
     assert not (repo / "scripts" / "gone").exists()
+
+
+@pytest.mark.parametrize("link, to", [("post-merge", "post-commit"), ("post-commit", "post-merge")])
+def test_a_hook_linked_to_another_hook_keeps_the_block(tmp_path, link, to):
+    """`post-merge -> post-commit`: one script for both events. The link has no text of its own,
+    so reading it showed the block install had just put in the other hook -- which looked like an
+    old block to take back out, and was stripped again. The status said installed and no commit
+    ever resynced. Whichever of the two comes first in HOOKS."""
+    repo = _init_repo(tmp_path / "r")
+    d = hooks.hooks_dir(repo)
+    (d / to).write_text("#!/bin/sh\necho mine\n")
+    (d / to).chmod(0o755)
+    (d / link).symlink_to(to)
+
+    assert hooks.install(repo, ["true"]) == list(hooks.HOOKS)  # the link counts through its target
+    assert "auryn resync" in (d / to).read_text() and (d / link).is_symlink()
+
+    hooks.uninstall(repo)
+    assert (d / to).read_text() == "#!/bin/sh\necho mine\n" and (d / link).is_symlink()
+
+
+def test_a_hook_we_may_not_read_is_left_alone(tmp_path):
+    """`chmod 000` on a hook: install and the status check raised PermissionError. It is skipped,
+    like a compiled hook."""
+    repo = _init_repo(tmp_path / "r")
+    locked = hooks.hooks_dir(repo) / "post-commit"
+    locked.write_text("#!/bin/sh\necho mine\n")
+    locked.chmod(0o000)
+    try:
+        if os.access(locked, os.R_OK):
+            pytest.skip("running as a user that can read any file")
+        assert hooks.install(repo, ["true"]) == ["post-checkout", "post-merge", "post-rewrite"]
+        assert hooks.is_installed(repo)
+        hooks.uninstall(repo)
+    finally:
+        locked.chmod(0o755)
+    assert locked.read_text() == "#!/bin/sh\necho mine\n"
 
 
 def test_a_crlf_hook_keeps_its_line_endings(tmp_path):

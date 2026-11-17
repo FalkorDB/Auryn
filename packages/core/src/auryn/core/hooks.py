@@ -86,12 +86,22 @@ def owns_hooks_dir(local_dir) -> bool:
 
 def _read(path: Path) -> str | None:
     """A hook's text, line endings untranslated (a CRLF hook is written back CRLF), or None for
-    one that isn't text at all (a compiled hook) -- never ours to edit."""
+    one that isn't text at all (a compiled hook) or that we may not read -- never ours to edit."""
     try:
         with path.open(newline="") as f:
             return f.read()
-    except UnicodeDecodeError:
+    except (UnicodeDecodeError, OSError):
         return None
+
+
+def _alias_of(path: Path, d: Path) -> str | None:
+    """The hook in `d` that `path` is a symlink to (`post-merge -> post-commit`, one script for
+    both events), else None. Such a link has no text of its own: whatever is read or written
+    through it is the other hook's, which gets its block -- and loses it -- under its own name."""
+    if not path.is_symlink():
+        return None
+    target = path.resolve()
+    return target.name if target.parent == d.resolve() and target.name in HOOKS else None
 
 
 def _is_shell(text: str) -> bool:
@@ -118,8 +128,13 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
     d.mkdir(parents=True, exist_ok=True)
     block = _block(sync_cmd)
     wired = []
+    aliases = {}  # a hook that is a link to another of ours -> that hook's name
     for name in HOOKS:
         path = d / name
+        alias = _alias_of(path, d)
+        if alias:
+            aliases[name] = alias  # nothing to add or repair here: it runs the other hook's block
+            continue
         if path.exists():
             text = _read(path)
             if text is None:
@@ -140,7 +155,7 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
             path.chmod(0o755)
         if os.access(path, os.X_OK):  # git skips a non-executable hook: the block is in, but inert
             wired.append(name)
-    return wired
+    return [name for name in HOOKS if name in wired or aliases.get(name) in wired]
 
 
 def uninstall(local_dir) -> None:
@@ -152,7 +167,7 @@ def uninstall(local_dir) -> None:
         return
     for name in HOOKS:
         path = d / name
-        if not path.exists():
+        if not path.exists() or _alias_of(path, d):
             continue
         text = _read(path)
         if text is None or _BEGIN not in text:

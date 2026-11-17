@@ -572,7 +572,10 @@ def _deregister_repo(path, graph_opt, project, graph_name) -> None:
                       if r.graph_name == graph_name and (project is None or r.project_name == project)), None)
         local_dir = match.local_dir if match else None
     if local_dir:
-        hooks.uninstall(local_dir)
+        try:
+            hooks.uninstall(local_dir)
+        except OSError as e:  # a hook we may not write: say so, and still forget the repo
+            click.echo(f"Could not remove the resync hooks from {local_dir} ({e}).", err=True)
         app_config.unregister_repo(local_dir)
 
 
