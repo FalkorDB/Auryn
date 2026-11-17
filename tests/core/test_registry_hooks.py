@@ -3,7 +3,6 @@ commit-resync hooks."""
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import time
@@ -202,22 +201,38 @@ def test_a_hook_linked_to_another_hook_keeps_the_block(tmp_path, link, to):
     assert (d / to).read_text() == "#!/bin/sh\necho mine\n" and (d / link).is_symlink()
 
 
-def test_a_hook_we_may_not_read_is_left_alone(tmp_path):
+def test_a_hook_we_may_not_read_is_left_alone(tmp_path, monkeypatch):
     """`chmod 000` on a hook: install and the status check raised PermissionError. It is skipped,
-    like a compiled hook."""
+    like a compiled hook. (The refusal is simulated, so this holds when run as root too.)"""
     repo = _init_repo(tmp_path / "r")
     locked = hooks.hooks_dir(repo) / "post-commit"
     locked.write_text("#!/bin/sh\necho mine\n")
-    locked.chmod(0o000)
-    try:
-        if os.access(locked, os.R_OK):
-            pytest.skip("running as a user that can read any file")
+    locked.chmod(0o755)
+    real_open = Path.open
+
+    def refuses_the_locked_hook(self, *args, **kwargs):
+        if self == locked:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_open(self, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "open", refuses_the_locked_hook)
         assert hooks.install(repo, ["true"]) == ["post-checkout", "post-merge", "post-rewrite"]
         assert hooks.is_installed(repo)
         hooks.uninstall(repo)
-    finally:
-        locked.chmod(0o755)
     assert locked.read_text() == "#!/bin/sh\necho mine\n"
+
+
+def test_a_hook_that_links_to_itself_does_not_stop_the_install(tmp_path):
+    """`post-merge -> post-merge`: resolving such a link raises on Python 3.12. It is skipped like
+    any other dangling link."""
+    repo = _init_repo(tmp_path / "r")
+    loop = hooks.hooks_dir(repo) / "post-merge"
+    loop.symlink_to("post-merge")
+
+    assert hooks.install(repo, ["true"]) == ["post-commit", "post-checkout", "post-rewrite"]
+    hooks.uninstall(repo)
+    assert loop.is_symlink()
 
 
 def test_a_crlf_hook_keeps_its_line_endings(tmp_path):

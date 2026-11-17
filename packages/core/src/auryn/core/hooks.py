@@ -100,7 +100,10 @@ def _alias_of(path: Path, d: Path) -> str | None:
     through it is the other hook's, which gets its block -- and loses it -- under its own name."""
     if not path.is_symlink():
         return None
-    target = path.resolve()
+    try:
+        target = path.resolve()
+    except (OSError, RuntimeError):  # a link that loops back on itself: not a hook of ours
+        return None
     return target.name if target.parent == d.resolve() and target.name in HOOKS else None
 
 
