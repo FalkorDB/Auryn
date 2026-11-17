@@ -25,7 +25,7 @@ from auryn.ingestors.python.raw_model import RawFunction, RawModule
 logger = logging.getLogger(__name__)
 
 
-def _dotted_by_file(source_dir: str, modules: list[RawModule]) -> dict[str, str]:
+def _dotted_by_file(source_dir: str, modules: Sequence[RawModule]) -> dict[str, str]:
     """Absolute file path (the form Jedi reports as a definition's `module_path`) -> the
     dotted name the ast pass gave that file."""
     root = Path(source_dir).absolute()
@@ -48,7 +48,9 @@ def _callee_name(full_name: str, module_name: str, module_path: str, dotted_by_f
 
 
 class JediOracle:
-    """Implements resolution.SemanticOracle over a materialized source directory."""
+    """Implements resolution.SemanticOracle over a materialized source directory. `modules` are
+    the parsed modules of the same ingest: callee names are re-anchored at the dotted names the
+    ast pass gave them (see _callee_name). Without them every callee keeps Jedi's own name."""
 
     def __init__(self, source_dir: str, modules: Sequence[RawModule] = ()):
         self._root = Path(source_dir)

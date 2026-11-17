@@ -108,4 +108,5 @@ class RawModule:
     classes: list[RawClass] = field(default_factory=list)
     functions: list[RawFunction] = field(default_factory=list)
     calls: list[RawCall] = field(default_factory=list)  # module-scope (top-level) call sites
+    local_names: list[str] = field(default_factory=list)  # names the top-level code rebinds (file_parser._local_names)
     parse_ok: bool = True  # False if the file failed to parse (SyntaxError) -- see file_parser

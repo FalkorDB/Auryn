@@ -309,7 +309,8 @@ def _emit_module(m: RawModule, idx: _Index, oracle: SemanticOracle | None) -> It
     # CALLS source for a script's driver code -- the only place a non-callable node originates a
     # CALLS edge. Resolved exactly like a function body (same helper), so a top-level `main()`
     # binds to the project function and a top-level `print()` becomes a builtin placeholder.
-    mod_call_edges, mod_externals, _ = _resolve_scope_calls(m.calls, scope_label, scope_id, ctx)
+    mod_call_edges, mod_externals, _ = _resolve_scope_calls(
+        m.calls, scope_label, scope_id, ctx, frozenset(m.local_names))
     yield from mod_externals
     yield from mod_call_edges
 

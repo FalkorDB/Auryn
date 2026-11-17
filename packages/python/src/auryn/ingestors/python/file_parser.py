@@ -130,6 +130,7 @@ def parse_module(source: bytes | str, path: str, package_dirs: frozenset[str] | 
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     module.functions.append(_function(node, src))
             module.calls = _module_calls(tree)
+            module.local_names = _local_names(tree.body, module_scope=True)
         return module
     except SyntaxError as e:
         # Broken (mid-edit) code: flag it so the resync can preserve the file's last-good
@@ -246,7 +247,7 @@ def _function(node: ast.FunctionDef | ast.AsyncFunctionDef, src: _Source, *, in_
         line_start=node.lineno,
         line_end=node.end_lineno or node.lineno,
         calls=_calls(node),
-        local_names=_local_names(node),
+        local_names=_local_names(node.body),
         source=src.segment(node),
         doc=src.leading_comment(_decl_top_line(node)),
     )
@@ -352,29 +353,35 @@ def _calls(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[RawCall]:
     return _calls_in_body(node.body)
 
 
-def _local_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
-    """The names a function/method body binds itself, parameters aside: an assignment / `for` /
-    `with` / walrus target, `except ... as e`, a `case` capture, a nested def or class. In the
-    body such a name is that local, whatever the module imports or defines under the same name
-    (see the jedi engine's fallback in resolution._resolve_call). Nested def/class/lambda bodies
-    are their own scopes, as in _calls_in_body; a comprehension's targets are counted although
-    they end with it -- a call through one, inside it, is just as dynamic. An `import` in the
-    body is not one: the name is still an import."""
+def _local_names(body: list[ast.stmt], *, module_scope: bool = False) -> list[str]:
+    """The names a scope's own code binds, parameters aside: an assignment / `for` / `with` /
+    walrus target, `except ... as e`, a `case` capture -- and, in a function body, a nested def or
+    class and an `import`. There such a name is that local, whatever the module imports or
+    defines under the same name (see the jedi engine's fallback in resolution._resolve_call).
+    At `module_scope` a def, a class and an import ARE the module's names -- what the ast rules
+    resolve to -- so only a name the top-level code rebinds counts (`db = make()` after
+    `from pkg import db`). Nested def/class/lambda bodies are their own scopes, as in
+    _calls_in_body; a comprehension's targets are counted although they end with it -- a call
+    through one, inside it, is just as dynamic."""
     names: set[str] = set()
 
     def visit(n: ast.AST) -> None:
         nested_scope = isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
             names.add(n.id)
-        elif (nested_scope or isinstance(n, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar))) and n.name:
+        elif isinstance(n, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and n.name:
             names.add(n.name)
         elif isinstance(n, ast.MatchMapping) and n.rest:
             names.add(n.rest)
+        elif nested_scope and not module_scope:
+            names.add(n.name)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)) and not module_scope:
+            names.update((alias.asname or alias.name).split(".")[0] for alias in n.names)
         if not (nested_scope or isinstance(n, ast.Lambda)):
             for child in ast.iter_child_nodes(n):
                 visit(child)
 
-    for stmt in node.body:
+    for stmt in body:
         visit(stmt)
     return sorted(names)
 

@@ -279,6 +279,15 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
             "        pass\n"
             "    except ValueError as core:\n"
             "        core.helper()\n"
+            "\n"
+            "\n"
+            "def test_shadowed_by_a_local_import():\n"
+            "    from notinstalled_lib import core\n"
+            "    core.helper()\n"
+            "\n"
+            "\n"
+            "core = object()\n"
+            "core.helper()\n"
         ),
     })
     items = list(resolution.resolve(modules, _PROJ, oracle=JediOracle(str(tmp_path), modules)))
@@ -289,6 +298,10 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
         "python://demo/module/pkg.core.func.helper()": "resolved",
         "extern://python/notinstalled_lib::fetch": "external",
     }
-    # ...but not where the scope's own parameter or local (an assignment, `except ... as`)
-    # shadows the import: that call IS dynamic
+    # ...but not where the scope's own parameter or local (an assignment, `except ... as`, an
+    # import in the body) shadows the import: that call IS dynamic. Nor at module scope, where
+    # the top-level code rebinds the name.
     assert not [e for e in _edges_of(items, "CALLS") if "test_shadowed" in str(e.from_key["id"])]
+    top_level = {str(e.to_key["id"]) for e in _edges_of(items, "CALLS")
+                 if e.from_key["id"] == "python://demo/module/tests.test_core"}
+    assert top_level and not any("helper" in callee for callee in top_level)  # `object()` only

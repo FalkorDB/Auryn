@@ -296,8 +296,8 @@ def test_nested_def_body_calls_do_not_fold_into_the_enclosing_function():
 
 def test_local_names_are_the_names_a_body_binds_itself():
     # What the jedi engine's fallback must not bind through (see resolution._resolve_call): every
-    # way a body binds a name -- but not its parameters (kept apart), a nested scope's own names,
-    # a name it only reads, or an `import` in the body (that name is still an import).
+    # way a body binds a name, an `import` in it included -- but not its parameters (kept apart),
+    # a nested scope's own names, or a name it only reads.
     m = _module(
         "def f(param, items):\n"
         "    a = b, (c, *d) = param\n"
@@ -322,6 +322,27 @@ def test_local_names_are_the_names_a_body_binds_itself():
         "    class Local:\n"
         "        attr = 1\n"
         "    import json\n"
+        "    from os import path as p, sep\n"
         "    print(unbound)\n"
     )
-    assert set(m.functions[0].local_names) == set("abcdeghijklmn") | {"nested", "Local"}
+    assert set(m.functions[0].local_names) == set("abcdeghijklmnp") | {"nested", "Local", "json", "sep"}
+
+
+def test_module_local_names_are_only_what_the_top_level_code_rebinds():
+    # At module scope a def, a class and an import are the module's own names -- what a top-level
+    # call resolves to. Only a rebinding shadows one: `db = make()` after `from pkg import db`.
+    m = _module(
+        "import json\n"
+        "from pkg import db\n"
+        "\n"
+        "def helper():\n"
+        "    local = 1\n"
+        "\n"
+        "class K:\n"
+        "    attr = 1\n"
+        "\n"
+        "db = make()\n"
+        "for i in range(3):\n"
+        "    helper()\n"
+    )
+    assert m.local_names == ["db", "i"]
