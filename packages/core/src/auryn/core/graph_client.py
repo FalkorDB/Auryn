@@ -419,7 +419,7 @@ class GraphWriter:
             if time.monotonic() >= deadline:
                 logger.warning("Indexes on :%s still building after %.0fs", label, timeout)
                 return False
-            time.sleep(min(pause, deadline - time.monotonic()))  # never past the deadline
+            time.sleep(max(0.0, min(pause, deadline - time.monotonic())))  # never past the deadline
             pause = min(pause * 2, _INDEX_POLL_MAX_INTERVAL_S)
 
     def query(self, cypher: str, params: dict | None = None):
