@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,7 +76,13 @@ class ClaudeCode:
         if self._config_path is not None:
             return self._config_path
         env = os.environ.get("AURYN_CLAUDE_CONFIG")  # test/override hook
-        return Path(env).expanduser() if env else Path.home() / ".claude.json"
+        if env:
+            return Path(env).expanduser()
+        # Patch the file `claude mcp add` actually wrote: Claude Code honors CLAUDE_CONFIG_DIR and
+        # puts the user-scope config at $CLAUDE_CONFIG_DIR/.claude.json when set, else ~/.claude.json.
+        cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        base = Path(cfg_dir).expanduser() if cfg_dir else Path.home()
+        return base / ".claude.json"
 
     def _enable_always_load(self) -> None:
         """Mark our server so Claude Code loads its tools into the agent's INITIAL tool list,
@@ -172,13 +179,26 @@ def _read_config(path: Path) -> dict:
 
 
 def _write_config(path: Path, data: dict) -> None:
-    """Write JSON as UTF-8 and atomically (temp file in the same dir + os.replace), so a failed or
-    raced write can never leave a half-written config -- these are the user's real agent configs,
-    which also hold settings we don't own."""
+    """Write JSON as UTF-8 and atomically (a UNIQUE temp file in the same dir + os.replace), so a
+    failed / raced / concurrent write can never leave a half-written config -- these are the user's
+    real agent configs, which also hold settings (and MCP env/secrets) we don't own. The temp file
+    inherits the existing config's permissions (or 0600 for a new file) so os.replace never widens
+    the mode and exposes secrets to other local users."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".auryn-tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        mode = path.stat().st_mode & 0o777  # preserve the existing file's perms
+    except OSError:
+        mode = 0o600  # new file: owner-only, since configs may hold secrets
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # don't leave a stray temp file behind on failure
+        raise
 
 
 @dataclass

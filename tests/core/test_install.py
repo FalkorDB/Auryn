@@ -152,6 +152,38 @@ def test_claudecode_always_load_write_failure_is_non_fatal(tmp_path, monkeypatch
     assert reg.skill_path  # register completed despite the write failure
 
 
+def test_claudecode_config_path_honors_claude_config_dir(tmp_path, monkeypatch):
+    # `claude mcp add` writes to $CLAUDE_CONFIG_DIR/.claude.json when that env is set, so the
+    # alwaysLoad patch must target the same file -- not ~/.claude.json (a possibly-unrelated profile).
+    from auryn.core.agents import ClaudeCode
+
+    monkeypatch.delenv("AURYN_CLAUDE_CONFIG", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfgdir"))
+    assert ClaudeCode()._claude_config() == tmp_path / "cfgdir" / ".claude.json"
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    assert ClaudeCode()._claude_config().name == ".claude.json"  # falls back to home dir
+
+
+def test_write_config_preserves_mode_and_is_clean(tmp_path):
+    # Security: replacing a 0600 config (may hold MCP env/secrets) must not widen it; a new file is
+    # created owner-only; and no stray temp files are left behind.
+    import os
+    import stat
+    from auryn.core.agents import _write_config
+
+    existing = tmp_path / "cfg.json"
+    existing.write_text("{}")
+    os.chmod(existing, 0o600)
+    _write_config(existing, {"mcpServers": {"auryn": {"alwaysLoad": True}}})
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o600
+    assert json.loads(existing.read_text())["mcpServers"]["auryn"]["alwaysLoad"] is True
+
+    new = tmp_path / "new.json"
+    _write_config(new, {"x": 1})
+    assert stat.S_IMODE(new.stat().st_mode) == 0o600
+    assert not list(tmp_path.glob("*.tmp"))  # no leftover temp files
+
+
 def test_claudecode_register_raises_when_add_fails(tmp_path):
     from auryn.core.agents import ClaudeCode
 
