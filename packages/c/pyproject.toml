@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "C language plugin for Auryn: fast tree-sitter-c engine (functions/structs/unions/enums/typedefs/globals/macros/#includes/calls, no build config). A deep libclang engine (resolved types, header<->.c linking, cross-TU calls) is the planned second phase."
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     "tree-sitter>=0.26.0",
