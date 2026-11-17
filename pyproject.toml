@@ -21,7 +21,7 @@ description = "Extracts structural metadata from source code (and SQL databases)
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 keywords = [
     "code-graph", "knowledge-graph", "code-intelligence", "static-analysis",
     "falkordb", "graph-database", "tree-sitter", "ast", "mcp", "ai-agents", "llm",

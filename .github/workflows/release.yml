@@ -1,8 +1,7 @@
 name: release
 
 # Builds every distribution (the `falkordb-auryn` umbrella + every `auryn-*` package under
-# packages/) and publishes them to PyPI in one lockstep release, authenticated with a PyPI API
-# token stored as a GitHub Actions secret.
+# packages/) and publishes them to PyPI in one lockstep release using Trusted Publishing.
 #
 # Publishing is GATED on the full test suite (tests.yml, reused): if the suite is red, neither
 # publish job runs, so a broken version can't be released.
@@ -12,15 +11,15 @@ name: release
 #   * Manually (workflow_dispatch)         -> pick TestPyPI (dry run) or PyPI, and a version.
 #
 # ONE-TIME SETUP:
-#   1. Create an ACCOUNT-SCOPED PyPI API token at https://pypi.org/manage/account/token/ and add
-#      it to this repo as the Actions secret `PYPI_API_TOKEN`. Account scope is required for the
-#      first release because the projects don't exist yet; afterwards you can rotate to a token
-#      scoped to just these projects.
-#   2. Same on https://test.pypi.org/manage/account/token/ -> repo secret `TEST_PYPI_API_TOKEN`.
-#
-# (A token is used rather than Trusted Publishing because PyPI's *pending* publishers require a
-# unique workflow config per project, which a multi-package monorepo sharing one workflow can't
-# satisfy. Once the projects exist you may migrate to per-project trusted publishers.)
+#   1. On each existing PyPI project, add a GitHub trusted publisher: owner `FalkorDB`,
+#      repository `Auryn`, workflow `release.yml`, environment `pypi`.
+#   2. Repeat on TestPyPI with environment `testpypi`.
+#   3. For projects not yet present on either index, register one pending publisher at a time
+#      with the corresponding settings above. Run this workflow against that index with
+#      `bootstrap_project` set to its project name, then repeat for each remaining project.
+#      Pending publishers sharing one workflow/environment cannot be registered simultaneously,
+#      and their minted tokens only authorize the pending project.
+# Configure appropriate protection rules for the `pypi` and `testpypi` GitHub environments.
 
 on:
   release:
@@ -36,8 +35,12 @@ on:
         description: "Version to build (e.g. 0.2.0). Blank = derive from the release tag."
         type: string
         default: ""
+      bootstrap_project:
+        description: "Optional: publish only this project to create it with a pending publisher."
+        type: string
+        default: ""
 
-# The workflow only reads the repo; publishing authenticates with the PyPI API token secret.
+# Only the publish jobs can request an OIDC token.
 permissions:
   contents: read
 
@@ -105,6 +108,27 @@ jobs:
           echo "built $n wheels; expected $expected ($members members + umbrella)"
           test "$n" -eq "$expected" || { echo "::error::expected $expected wheels, got $n"; exit 1; }
 
+      - name: Select a single project for pending publisher bootstrap
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap_project != '' }}
+        env:
+          PROJECT: ${{ inputs.bootstrap_project }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re
+
+          normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
+          project = normalize(os.environ["PROJECT"])
+          files = list(pathlib.Path("dist").iterdir())
+          selected = [f for f in files if normalize(f.name.split("-", 1)[0]) == project]
+          if not any(f.name.endswith(".whl") for f in selected) or not any(
+              f.name.endswith(".tar.gz") for f in selected
+          ):
+              raise SystemExit(f"::error::No wheel and sdist found for {project}")
+          for f in files:
+              if f not in selected:
+                  f.unlink()
+          PY
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -116,6 +140,9 @@ jobs:
     needs: [build, test]
     if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi' }}
     runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -124,7 +151,6 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
           skip-existing: true
           attestations: false
 
@@ -133,6 +159,9 @@ jobs:
     needs: [build, test]
     if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'pypi') }}
     runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -140,6 +169,5 @@ jobs:
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
           attestations: false
