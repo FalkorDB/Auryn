@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # annotations only (module has `from __future__ import annotations`) -- see connect_client
     from falkordb import FalkorDB, Graph
-from redis.exceptions import ResponseError
+from redis.exceptions import RedisError, ResponseError
 
 from auryn.core.graph_model import GraphEdge, GraphNode, NodeSchema
 from auryn.core.graph_sync import EdgeKey, GraphDelta, NodeKey, edge_key, fingerprint, node_key
@@ -409,7 +409,7 @@ class GraphWriter:
                     "CALL db.indexes() YIELD label, entitytype, status "
                     "WHERE label = $label AND entitytype = 'NODE' RETURN status", {"label": label}
                 ).result_set
-            except ResponseError as e:  # e.g. a server whose db.indexes() reports no status
+            except RedisError as e:  # a server whose db.indexes() reports no status, a dropped connection
                 logger.warning("Can't read the state of the indexes on :%s (%s)", label, e)
                 return False
             if not rows:
@@ -419,7 +419,7 @@ class GraphWriter:
             if time.monotonic() >= deadline:
                 logger.warning("Indexes on :%s still building after %.0fs", label, timeout)
                 return False
-            time.sleep(pause)
+            time.sleep(min(pause, deadline - time.monotonic()))  # never past the deadline
             pause = min(pause * 2, _INDEX_POLL_MAX_INTERVAL_S)
 
     def query(self, cypher: str, params: dict | None = None):

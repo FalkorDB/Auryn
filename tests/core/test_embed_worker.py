@@ -145,6 +145,7 @@ def test_await_indexes_backs_off_and_survives_an_unreadable_state(monkeypatch):
     """A long build is polled ever more slowly (20 ms doubling up to a second), not 50 times a
     second for minutes. And a server that can't answer `db.indexes()` this way means "can't tell",
     reported as not ready -- not an exception after every vector has already been written."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
     from redis.exceptions import ResponseError
 
     pauses = []
@@ -154,11 +155,29 @@ def test_await_indexes_backs_off_and_survives_an_unreadable_state(monkeypatch):
     assert GraphWriter(graph).await_indexes("Embeddable") is True
     assert pauses == [0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.0, 1.0]
 
-    class _NoStatusColumn:
-        def ro_query(self, cypher, params=None):
-            raise ResponseError("Procedure `db.indexes` does not yield output `status`")
+    for error in (ResponseError("Procedure `db.indexes` does not yield output `status`"),
+                  RedisConnectionError("Connection closed by server.")):
+        class _Unreadable:
+            def ro_query(self, cypher, params=None, error=error):
+                raise error
 
-    assert GraphWriter(_NoStatusColumn()).await_indexes("Embeddable") is False
+        assert GraphWriter(_Unreadable()).await_indexes("Embeddable") is False
+
+
+def test_await_indexes_never_sleeps_past_its_deadline(monkeypatch):
+    """A short timeout is respected: the last pause is cut to the time that is left."""
+    clock = [0.0]
+    pauses = []
+
+    def sleep(seconds):
+        pauses.append(round(seconds, 3))
+        clock[0] += seconds
+
+    monkeypatch.setattr("auryn.core.graph_client.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("auryn.core.graph_client.time.sleep", sleep)
+
+    assert GraphWriter(_IndexStatuses([_BUILDING])).await_indexes("Embeddable", timeout=0.05) is False
+    assert pauses == [0.02, 0.03]  # not 0.02 + 0.04
 
 
 def test_embed_graph_is_idempotent(writer):
