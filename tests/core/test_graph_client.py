@@ -278,12 +278,12 @@ def test_null_valued_edge_property_round_trips_through_compute_delta_correctly(g
     node, so this needs its own test rather than assuming node behavior carries
     over."""
     writer = GraphWriter(graph)
-    writer.merge_nodes([GraphNode("Column", {"id": "p://a"}, {}), GraphNode("Column", {"id": "p://b"}, {})])
-    key = edge_key(GraphEdge("REFERENCES", "Column", {"id": "p://a"}, "Column", {"id": "p://b"}))
+    writer.merge_nodes([GraphNode("Column", {"id": "p://db/a"}, {}), GraphNode("Column", {"id": "p://db/b"}, {})])
+    key = edge_key(GraphEdge("REFERENCES", "Column", {"id": "p://db/a"}, "Column", {"id": "p://db/b"}))
 
     def _references(constraint_name):
         return GraphEdge(
-            "REFERENCES", "Column", {"id": "p://a"}, "Column", {"id": "p://b"},
+            "REFERENCES", "Column", {"id": "p://db/a"}, "Column", {"id": "p://db/b"},
             {"constraint_name": constraint_name, "on_delete": "CASCADE"},
         )
 
@@ -291,7 +291,7 @@ def test_null_valued_edge_property_round_trips_through_compute_delta_correctly(g
     stored = graph.query("MATCH ()-[r:REFERENCES]->() RETURN properties(r)").result_set[0][0]
     assert "constraint_name" not in stored
 
-    _, fps_v1 = writer.read_fingerprints("p://", ["Column"])
+    _, fps_v1 = writer.read_fingerprints("p://db", ["Column"])
 
     delta = compute_delta({}, fps_v1, [_references(None)])
     assert delta.edges_to_upsert == []  # unnamed FK re-synced unchanged: no spurious update
@@ -302,14 +302,14 @@ def test_null_valued_edge_property_round_trips_through_compute_delta_correctly(g
     stored_named = graph.query("MATCH ()-[r:REFERENCES]->() RETURN properties(r)").result_set[0][0]
     assert stored_named["constraint_name"] == "fk_1"
 
-    _, fps_v2 = writer.read_fingerprints("p://", ["Column"])
+    _, fps_v2 = writer.read_fingerprints("p://db", ["Column"])
     delta = compute_delta({}, fps_v2, [_references(None)])
     assert len(delta.edges_to_upsert) == 1
     writer.apply_delta(delta)
     stored_unnamed_again = graph.query("MATCH ()-[r:REFERENCES]->() RETURN properties(r)").result_set[0][0]
     assert "constraint_name" not in stored_unnamed_again
 
-    _, fps_v3 = writer.read_fingerprints("p://", ["Column"])
+    _, fps_v3 = writer.read_fingerprints("p://db", ["Column"])
     assert fps_v3[key] == fps_v1[key]
 
 
@@ -550,12 +550,16 @@ def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(
     assert dump(graph) == dump(reference_graph)
 
 
-@pytest.mark.parametrize("sibling", ["api2", "api.tests"])
-def test_stream_apply_leaves_a_sibling_project_alone(graph, sibling):
-    """Two projects share a graph and one name is a prefix of the other (`api` / `api2`) or
-    continues it at a dot (`api` / `api.tests`, as in `Acme.Core` / `Acme.Core.Tests`).
-    Resyncing `api` after it drops two classes must remove those only -- every node and edge
-    of the sibling was read back as `api`'s own leftovers, and deleted."""
+@pytest.mark.parametrize("name, sibling", [
+    ("api", "api2"), ("api", "api.tests"), ("api.", "api.2"), ("django", "Flask"), ("Flask", "django"),
+])
+def test_stream_apply_leaves_a_sibling_project_alone(graph, name, sibling):
+    """Two projects share a graph and one name is a prefix of the other (`api` / `api2`),
+    continues it at a dot (`api` / `api.tests`, as in `Acme.Core` / `Acme.Core.Tests`), does so
+    after a name that itself ends in a dot (`api.` / `api.2`), or differs from it in letter case
+    (`django` / `Flask`: FalkorDB 4.x answers an indexed id range wrongly for those). Resyncing
+    the first after it drops two classes must remove those only -- every node and edge of the
+    sibling was read back as the first one's own leftovers, and deleted."""
     writer = GraphWriter(graph)
     writer.setup_schema([NodeSchema("Project"), NodeSchema("Class")])
 
@@ -571,10 +575,10 @@ def test_stream_apply_leaves_a_sibling_project_alone(graph, sibling):
         return items
 
     labels = ["Project", "Class"]
-    stream_apply(writer, "cpp://api", labels, _fresh(project("api", ["a", "gone", "top", "top_gone"])))
+    stream_apply(writer, f"cpp://{name}", labels, _fresh(project(name, ["a", "gone", "top", "top_gone"])))
     stream_apply(writer, f"cpp://{sibling}", labels, _fresh(project(sibling, ["a", "top"])))
 
-    stats, _, _ = stream_apply(writer, "cpp://api", labels, _fresh(project("api", ["a", "top"])))
+    stats, _, _ = stream_apply(writer, f"cpp://{name}", labels, _fresh(project(name, ["a", "top"])))
 
     # the two dropped classes (one of each id shape) and their HAS_CLASS edges -- nothing else
     assert (stats.nodes_added, stats.nodes_removed, stats.edges_removed) == (0, 2, 2)

@@ -149,12 +149,11 @@ def _owned_ids(id_prefix: str) -> dict[str, str]:
     FalkorDB 4.x -- the engine falkordblite embeds -- returns wrong rows for an indexed string
     range when ids differ in letter case. Either way a resync of one project deleted another's
     nodes. `STARTS WITH` is exact on every engine; it costs the index (a per-label scan + filter,
-    ~1.4x on a 500k-node label shared by 20 projects). A prefix that already ends at a boundary
-    (`p/`) is a plain prefix. The `.` rule also matches a project whose NAME continues this one's
-    at a dot (`Acme.Core` / `Acme.Core.Tests`); the reads drop what that one owns -- see
+    ~1.4x on a 500k-node label shared by 20 projects). A name that itself ends in `/` or `.` is
+    no special case: `cpp://api.` owns `cpp://api./...` and `cpp://api..class.x`, never
+    `cpp://api.2`. The `.` rule also matches a project whose NAME continues this one's at a dot
+    (`Acme.Core` / `Acme.Core.Tests`); the reads drop what that one owns -- see
     GraphWriter._dotted_siblings."""
-    if id_prefix.endswith(("/", ".")):
-        return {"own": id_prefix, "sub": id_prefix, "dot": id_prefix}
     return {"own": id_prefix, "sub": id_prefix + "/", "dot": id_prefix + "."}
 
 
@@ -637,8 +636,6 @@ class GraphWriter:
         like this project's own top-level `<proj>.class.x`; only its Project node tells the two
         apart. What it owns is left out of the reads (so never diffed away as this project's
         leftovers) -- where an id could be either's, it stays."""
-        if id_prefix.endswith(("/", ".")):
-            return ()
         rows = self._graph.ro_query(
             "MATCH (p:Project) WHERE p.id STARTS WITH $dot RETURN p.id", {"dot": id_prefix + "."}
         ).result_set
