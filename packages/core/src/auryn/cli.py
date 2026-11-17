@@ -62,8 +62,9 @@ class _LazyConnection(Mapping):
         if key != "falkordb_config":
             raise KeyError(key)
         if self._config is None:
-            host, *rest = self._args
-            if not host and any(rest):
+            host, port, username, password, ssl = self._args
+            # "given", not "truthy": `--port 0` or an empty `--password ""` was still asked for
+            if not host and (port is not None or username is not None or password is not None or ssl):
                 # These used to apply to the old `localhost` default. Dropping them silently would
                 # send the run to the configured backend instead of the server they describe.
                 raise click.UsageError(

@@ -67,7 +67,10 @@ def test_help_resolves_nothing(monkeypatch, group):
 
 
 @pytest.mark.parametrize("group", ["run", "git-sync"])
-@pytest.mark.parametrize("option", [["--port", "6380"], ["--password", "pw"], ["--ssl"]])
+@pytest.mark.parametrize("option", [
+    ["--port", "6380"], ["--username", "u"], ["--password", "pw"], ["--ssl"],
+    ["--port", "0"], ["--password", ""],  # given, though falsy (an empty $REDIS_PASSWORD)
+])
 def test_a_connection_option_without_host_is_refused(monkeypatch, connect_stub, group, option):
     """`auryn run --port 6380 ...` used to mean localhost:6380. With no `--host` the configured
     backend is used now, so honouring nothing and saying nothing would write to the wrong store:
