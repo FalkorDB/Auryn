@@ -240,7 +240,9 @@ def stream_apply(
                 continue  # unchanged -- already popped, so it won't be counted a removal
             if SYNC_MARKER in props:
                 # Clear the stamp right now, before anything else is written, and hold the real
-                # one back until everything is applied (see SYNC_MARKER).
+                # one back until everything is applied (see SYNC_MARKER). "Before anything else"
+                # holds because every engine's target LEADS with its Project node: a node yielded
+                # ahead of it could reach the graph in a batch while the old stamp still stood.
                 marker = item
                 writer.merge_nodes([unstamped(item)])
                 continue

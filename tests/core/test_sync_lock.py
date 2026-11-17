@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import queue
 import threading
+import time
 
 import pytest
 from click.testing import CliRunner
@@ -60,6 +61,30 @@ def test_a_sync_the_queued_one_would_not_cover_waits_instead_of_stepping_aside(t
     for t in waiters:
         t.join(timeout=10)
     assert not any(t.is_alive() for t in waiters)
+
+
+def test_a_waiting_sync_says_what_it_is_waiting_for(tmp_path, monkeypatch, caplog):
+    """Blocking with no word looked like a hang -- `auryn ingest dir` behind a hook's sync, say."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    done = threading.Event()
+
+    def waiter():
+        with sync_lock(repo, queue_one=False):
+            done.set()
+
+    with caplog.at_level("INFO", logger="auryn.core.sync_lock"), sync_lock(repo):
+        t = threading.Thread(target=waiter, daemon=True)
+        t.start()
+        for _ in range(100):  # until the waiter has announced itself (it is blocked on our lock)
+            if caplog.records:
+                break
+            time.sleep(0.05)
+        assert [r.getMessage() for r in caplog.records] == [f"Waiting for the running sync of {repo} to finish"]
+        assert not done.is_set()
+    assert done.wait(timeout=10)
+    t.join(timeout=10)
+    assert len(caplog.records) == 1  # an uncontended lock says nothing: see the tests above
 
 
 def test_another_repo_is_not_held_up(tmp_path, monkeypatch):

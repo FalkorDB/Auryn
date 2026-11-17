@@ -15,6 +15,7 @@ clone cache) and a background deep pass that outlives its command do not.
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -25,6 +26,8 @@ except ImportError:  # native Windows -- no fcntl; syncs there stay unserialized
 
 from auryn.core.home import run_dir
 from auryn.core.project import default_graph_name
+
+logger = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
@@ -47,7 +50,11 @@ def sync_lock(local_dir: Path, *, queue_one: bool = True) -> Iterator[bool]:
             except BlockingIOError:  # held: one is queued already (any other error is a real one)
                 yield False
                 return
-        fcntl.flock(running, fcntl.LOCK_EX)  # wait out the sync in progress, if any
+        try:
+            fcntl.flock(running, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:  # a sync is in progress: say what we are waiting for, then wait
+            logger.info("Waiting for the running sync of %s to finish", local_dir)
+            fcntl.flock(running, fcntl.LOCK_EX)
         if queue_one:
             fcntl.flock(queued, fcntl.LOCK_UN)  # running now: the next trigger may queue behind us
         try:
