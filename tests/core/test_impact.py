@@ -76,12 +76,44 @@ def test_impact_cli_on_a_clean_tree(tmp_path):
     assert "No changes in the given range." in res.output
 
 
+def _repo_with_a_change(root):
+    """A git repo at `root`: one committed file, then an uncommitted edit to it."""
+    root.mkdir(parents=True)
+    def git(*a): subprocess.run(["git", "-C", str(root), *a], check=True, capture_output=True)
+    git("init"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+    (root / "m.py").write_text("def f():\n    return 1\n")
+    git("add", "."); git("commit", "-m", "init")
+    (root / "m.py").write_text("def f():\n    return 2\n")
+    return root
+
+
+def _stub_the_graph(monkeypatch, indexed):
+    """No FalkorDB: the server "holds" the graphs named in `indexed`. Returns what gets selected
+    and the changed paths handed to the analysis."""
+    selected, analysed = [], []
+
+    class _Client:
+        def list_graphs(self):
+            return list(indexed)
+
+        def select_graph(self, name):
+            selected.append(name)
+            return object()
+
+    monkeypatch.setattr("auryn.cli._resolve_connection", lambda *conn: None)
+    monkeypatch.setattr("auryn.cli.connect_client", lambda config: _Client())
+    monkeypatch.setattr("auryn.core.impact.impact_of_diff",
+                        lambda graph, changed, max_depth: analysed.append(sorted(changed)) or {"impact": {}})
+    return selected, analysed
+
+
 @pytest.mark.parametrize("given_by, registered_as", [
-    ("--path", None), ("--path", "shared"), ("CLAUDE_PROJECT_DIR", None), ("a subfolder of it", "shared"),
+    ("--path", None), ("--path", "shared"), ("CLAUDE_PROJECT_DIR", None),
+    ("a subfolder of it", "shared"), ("a subfolder of it", None),
 ])
 def test_impact_cli_resolves_the_graph_of_the_repo_it_diffs(tmp_path, monkeypatch, given_by, registered_as):
     """The graph is the one `sync` writes for the repo being diffed -- its registered name, else
-    the default for that directory -- wherever the command runs, a subfolder of the indexed repo
+    the default for that directory -- wherever the command runs, a subfolder of the repo
     included. It used to be the current folder's, so with `--path` the CI gate crashed on a
     missing graph or, worse, silently checked a different one."""
     from auryn.core.app_config import RepoRegistration, register_repo
@@ -89,26 +121,11 @@ def test_impact_cli_resolves_the_graph_of_the_repo_it_diffs(tmp_path, monkeypatc
 
     monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-    r = tmp_path / "repo"
-    r.mkdir()
-    def git(*a): subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True)
-    git("init"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
-    (r / "m.py").write_text("def f():\n    return 1\n")
-    git("add", "."); git("commit", "-m", "init")
-    (r / "m.py").write_text("def f():\n    return 2\n")  # an uncommitted change to analyse
+    r = _repo_with_a_change(tmp_path / "repo")
     if registered_as:
         register_repo(RepoRegistration(local_dir=str(r.resolve()), graph_name=registered_as))
-
-    selected = []
-
-    class _Client:
-        def select_graph(self, name):
-            selected.append(name)
-            return object()
-
-    monkeypatch.setattr("auryn.cli._resolve_connection", lambda *conn: None)
-    monkeypatch.setattr("auryn.cli.connect_client", lambda config: _Client())
-    monkeypatch.setattr("auryn.core.impact.impact_of_diff", lambda graph, changed, max_depth: {"impact": {}})
+    expected = registered_as or default_graph_name(r.resolve())
+    selected, _ = _stub_the_graph(monkeypatch, indexed=[expected])
 
     for folder in (tmp_path / "elsewhere", r / "sub"):
         folder.mkdir()
@@ -118,14 +135,75 @@ def test_impact_cli_resolves_the_graph_of_the_repo_it_diffs(tmp_path, monkeypatc
     res = CliRunner().invoke(cli, ["impact", "--json"] + (["--path", str(r)] if given_by == "--path" else []))
 
     assert res.exit_code == 0, res.output
-    assert selected == [registered_as or default_graph_name(r.resolve())]
+    assert selected == [expected]
 
 
-def test_impact_cli_outside_a_git_repo_is_a_clean_error(tmp_path):
-    """Not a traceback: a one-line message and a non-zero exit, like the MCP tool's error."""
-    res = CliRunner().invoke(cli, ["impact", "--path", str(tmp_path)])
+@pytest.mark.parametrize("registered_above", ["a plain folder", "an outer repository"])
+def test_impact_cli_never_leaves_the_git_repo_of_its_target(tmp_path, monkeypatch, registered_above):
+    """The search for the indexed folder stops at the top of the target's own repository. A plain
+    folder registered above it made the command fail ("not a git repository"); an outer
+    repository around a nested one got diffed instead -- "No changes", a silent pass for
+    `--fail-on`. Either way the target's own repo is the one diffed and checked."""
+    from auryn.core.app_config import RepoRegistration, register_repo
+    from auryn.core.project import default_graph_name
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    outer = tmp_path / "outer"
+    if registered_above == "an outer repository":
+        _repo_with_a_change(outer)
+        subprocess.run(["git", "-C", str(outer), "checkout", "--", "m.py"], check=True)  # outer: clean
+    inner = _repo_with_a_change(outer / "inner")
+    register_repo(RepoRegistration(local_dir=str(outer.resolve()), graph_name="outer-graph"))
+    expected = default_graph_name(inner.resolve())
+    selected, analysed = _stub_the_graph(monkeypatch, indexed=["outer-graph", expected])
+
+    res = CliRunner().invoke(cli, ["impact", "--json", "--path", str(inner)])
+
+    assert res.exit_code == 0, res.output
+    assert (selected, analysed) == ([expected], [["m.py"]])
+
+
+def test_impact_cli_says_when_the_repo_is_not_indexed(tmp_path, monkeypatch):
+    """A repo with changes but no graph: one line saying so, not the server's "empty key" error
+    in a traceback."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    r = _repo_with_a_change(tmp_path / "repo")
+    _stub_the_graph(monkeypatch, indexed=[])
+
+    res = CliRunner().invoke(cli, ["impact", "--path", str(r)])
+
     assert res.exit_code == 1
-    assert "couldn't compute git diff" in res.output and "Traceback" not in res.output
+    assert "isn't indexed" in res.output and "Traceback" not in res.output
+
+
+def test_impact_cli_git_errors_are_one_clean_line(tmp_path, monkeypatch):
+    """Not a traceback, and not git's whole usage text: git's own first line and a non-zero exit --
+    outside a git repo, and for a revision git doesn't know."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    r = _repo_with_a_change(tmp_path / "repo")
+
+    for args, said in ((["--path", str(plain)], "not a git repository"), (["--path", str(r), "--base", "no-such-ref"], "no-such-ref")):
+        res = CliRunner().invoke(cli, ["impact", *args])
+        assert res.exit_code == 1
+        message = res.output.strip()
+        assert message.startswith("Error: couldn't compute git diff") and said in message
+        assert len(message.splitlines()) == 1 and "Traceback" not in message
+
+
+def test_git_diff_paths_are_relative_to_the_folder_it_runs_in(tmp_path):
+    """A graph indexed from a subfolder of a repository stores `a.py`, not `service/a.py`: the
+    diff taken there has to speak the same paths, or no changed symbol is ever found and the
+    gate passes. From the repository's top the paths are what they always were."""
+    r = _repo_with_a_change(tmp_path / "repo")
+    (r / "service").mkdir()
+    (r / "service" / "a.py").write_text("def g():\n    return 1\n")
+    subprocess.run(["git", "-C", str(r), "add", "."], check=True)
+
+    assert sorted(parse_unified_diff(git_diff(str(r / "service")))[0]) == ["a.py"]
+    assert sorted(parse_unified_diff(git_diff(str(r)))[0]) == ["m.py", "service/a.py"]
 
 
 # -- impact_of_diff (integration) ------------------------------------------------------------

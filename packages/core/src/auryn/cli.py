@@ -253,20 +253,26 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
     Use --fail-on to gate a PR in CI (exits non-zero). See auryn/core/impact.py."""
     import json as _json
     import subprocess
+    from pathlib import Path
 
     from auryn.core import impact as impact_mod
     from auryn.core.app_config import get_repo, load_config
     from auryn.core.project import default_graph_name, resolve_project_root
 
-    # The indexed repo this directory belongs to: the nearest registered directory at or above it
-    # (a run from a subfolder still means the repo), else the directory itself.
     target = resolve_project_root(path)
-    registered = {r.local_dir for r in load_config().repos}
-    root = next((d for d in (target, *target.parents) if str(d) in registered), target)
     try:
+        # The indexed folder the target belongs to: the nearest registered directory from the
+        # target up to the top of ITS git repository, else that top -- so a run from a subfolder
+        # still means the repo. Never above it: a plain folder registered higher up, or an outer
+        # repository around a nested one, is a different source with a different diff.
+        top = Path(impact_mod.git_toplevel(str(target))).resolve()
+        chain = [target, *target.parents]
+        registered = {r.local_dir for r in load_config().repos}
+        root = next((d for d in chain[:chain.index(top) + 1] if str(d) in registered), top)
         diff = impact_mod.git_diff(str(root), base, head, staged=staged)
     except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"couldn't compute git diff in {root}: {(e.stderr or '').strip() or e}") from e
+        reason = ((e.stderr or "").strip().splitlines() or [str(e)])[0]  # git's own first line
+        raise click.ClickException(f"couldn't compute git diff in {target}: {reason}") from e
     changed, _deleted = impact_mod.parse_unified_diff(diff)
     if not changed:
         click.echo("No changes in the given range.")
@@ -277,7 +283,11 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
     # folder's, which is a different graph (or none) whenever `--path` points elsewhere.
     reg = get_repo(str(root))
     graph_name = graph_name or (reg.graph_name if reg and reg.graph_name else default_graph_name(root))
-    graph = connect_client(config).select_graph(graph_name)
+    client = connect_client(config)
+    if graph_name not in client.list_graphs():  # querying a graph that isn't there is a server error
+        raise click.ClickException(
+            f"{root} isn't indexed (no graph {graph_name!r}). Index it first: auryn ingest dir {root}")
+    graph = client.select_graph(graph_name)
     report = impact_mod.impact_of_diff(graph, changed, max_depth=max_depth)
 
     if as_json:
