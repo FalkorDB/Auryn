@@ -83,12 +83,12 @@ def test_embed_graph_returns_only_once_the_indexes_are_searchable(writer):
 @pytest.mark.parametrize("embedded, index_ready, said", [
     (0, False, "vector index unchanged."),
     (3, True, "vector index ready."),
-    (3, False, "vector index still building"),
+    (3, False, "vector index not ready yet"),
 ])
-def test_embed_command_says_when_the_index_is_still_building(monkeypatch, embedded, index_ready, said):
-    """`index_ready` is False both when nothing was embedded and when the build outlasted the
-    wait. `auryn embed` printed "unchanged" for both -- telling the user all was well while
-    searches still came back empty, the very confusion the wait is there to end."""
+def test_embed_command_says_when_the_index_is_not_ready(monkeypatch, embedded, index_ready, said):
+    """`index_ready` is False both when nothing was embedded and when the index couldn't be
+    confirmed built. `auryn embed` printed "unchanged" for both -- telling the user all was well
+    while searches still came back empty, the very confusion the wait is there to end."""
     from click.testing import CliRunner
 
     from auryn.cli import cli
