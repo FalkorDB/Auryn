@@ -1,17 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Workspace root + umbrella distribution.
-#
-# The project is a uv workspace: `auryn-core` plus one `auryn-<lang>` package
-# per language, each under packages/*, each with its own third-party dependencies so
-# a consumer only pays for the languages they install. This root is the umbrella
-# `falkordb-auryn` distribution whose extras pull the language plugins in:
-#
-#     pip install falkordb-auryn                 # batteries-included: every language + embedded DB + hooks
-#     pip install "falkordb-auryn[all]"          # + live-DB drivers (oracledb / postgres / mysql)
-#     pip install auryn-python                   # lean: a single language plugin (pulls auryn-core)
-#
-# For local development, `uv sync` installs the whole workspace editable (all members
-# are in the dev group below), so the full test suite and benchmarks run unchanged.
+# Workspace root + umbrella distribution. The required dependency is only auryn-core;
+# extensions are independently published and opt in through the extras below.
+# `uv sync` installs the full workspace editable through the dev group.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [project]
@@ -35,25 +25,10 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Operating System :: OS Independent",
 ]
-# Batteries-included: `pip install falkordb-auryn` graphs any repo out of the box -- every file-based
-# language plugin + the cross-ingestor hooks (their tree-sitter deps ship prebuilt wheels for every
-# platform, incl. Windows). Deliberately NOT hard-depended on here:
-#   * the embedded FalkorDB (`auryn-core[embedded]` -> falkordblite) -- POSIX-only, with wheels only for
-#     recent-glibc Linux + macOS, so forcing it would break `pip install` on Windows and older-glibc
-#     Linux (Ubuntu 22.04 etc.). `auryn quickstart` auto-fetches it at runtime where supported; on
-#     native Windows or older-glibc Linux it errors, so point at a remote FalkorDB there. `[embedded]`
-#     pre-installs it opt-in (handy for offline / first-run speed; the runtime fetch targets the
-#     running interpreter, so it also works under `uv tool install` -- see core.plugins._install_command).
-#   * the COMPILED live-DB drivers (oracledb / postgres / mysql) -- opt-in via `[all]`/`[oracle-live]`/
-#     `[sql-all]`.
-# For a lean install, depend on a single `auryn-<lang>` plugin directly (each pulls `auryn-core`).
+# Install only the core by default. Extensions and their third-party dependencies are
+# opt-in through project extras; the core is installed automatically with each extra.
 dependencies = [
-    "auryn-core",
-    "auryn-python", "auryn-csharp", "auryn-c", "auryn-cpp", "auryn-cuda",
-    "auryn-typescript", "auryn-java", "auryn-go", "auryn-rust", "auryn-php",
-    "auryn-julia", "auryn-ruby", "auryn-kotlin", "auryn-swift", "auryn-bash",
-    "auryn-oracle", "auryn-sql",
-    "auryn-http", "auryn-orm", "auryn-grpc", "auryn-events",
+    "auryn-core>=0.1.0",
 ]
 
 [project.urls]
@@ -63,31 +38,31 @@ Documentation = "https://github.com/FalkorDB/Auryn/tree/main/docs"
 Issues = "https://github.com/FalkorDB/Auryn/issues"
 
 [project.optional-dependencies]
-python = ["auryn-python"]
-csharp = ["auryn-csharp"]
-oracle = ["auryn-oracle"]                 # lean: file-based `plsql` + SQL DDL parsing, no DB drivers
-oracle-live = ["auryn-oracle[live]"]      # + oracledb for the live `oracle` PL/SQL ingestor
-sql = ["auryn-sql"]                        # generic relational-DB schema ingestor (SQLAlchemy; SQLite works out of the box)
-sql-all = ["auryn-sql[all]"]              # + postgres/mysql/oracle DBAPI drivers pre-installed
-http = ["auryn-http"]                     # HTTP call<->endpoint stitch hook (ADR 0006; language-agnostic)
-orm = ["auryn-orm"]                        # ORM model<->DB-table stitch hook (SQLAlchemy; joins code to schema)
-grpc = ["auryn-grpc"]                       # gRPC/Protobuf contract stitch hook (client RPC call<->server handler, cross-language)
-events = ["auryn-events"]                   # message/event-bus stitch hook (publisher<->subscriber via topic; Kafka/Rabbit/NATS/...)
-c = ["auryn-c"]
-cpp = ["auryn-cpp"]
-cuda = ["auryn-cuda"]                       # CUDA (.cu/.cuh): reuses the C++ engine + kernel-launch/exec-space signal
-typescript = ["auryn-typescript"]
-java = ["auryn-java"]
-go = ["auryn-go"]
-rust = ["auryn-rust"]
-php = ["auryn-php"]
-julia = ["auryn-julia"]
-ruby = ["auryn-ruby"]
-kotlin = ["auryn-kotlin"]
-swift = ["auryn-swift"]
-bash = ["auryn-bash"]
-embedded = ["auryn-core[embedded]"]       # serverless, in-process FalkorDB (no server/Docker); powers `auryn quickstart`
-all = ["auryn-python", "auryn-csharp", "auryn-oracle[live]", "auryn-sql[all]", "auryn-http", "auryn-orm", "auryn-grpc", "auryn-events", "auryn-c", "auryn-cpp", "auryn-cuda", "auryn-typescript", "auryn-java", "auryn-go", "auryn-rust", "auryn-php", "auryn-julia", "auryn-ruby", "auryn-kotlin", "auryn-swift", "auryn-bash"]
+python = ["auryn-python>=0.1.0"]
+csharp = ["auryn-csharp>=0.1.0"]
+oracle = ["auryn-oracle>=0.1.0"]                 # lean: file-based `plsql` + SQL DDL parsing, no DB drivers
+oracle-live = ["auryn-oracle[live]>=0.1.0"]      # + oracledb for the live `oracle` PL/SQL ingestor
+sql = ["auryn-sql>=0.1.0"]                       # generic relational-DB schema ingestor (SQLAlchemy; SQLite works out of the box)
+sql-all = ["auryn-sql[all]>=0.1.0"]              # + postgres/mysql/oracle DBAPI drivers pre-installed
+http = ["auryn-http>=0.1.0"]                     # HTTP call<->endpoint stitch hook (ADR 0006; language-agnostic)
+orm = ["auryn-orm>=0.1.0"]                       # ORM model<->DB-table stitch hook (SQLAlchemy; joins code to schema)
+grpc = ["auryn-grpc>=0.1.0"]                     # gRPC/Protobuf contract stitch hook (client RPC call<->server handler, cross-language)
+events = ["auryn-events>=0.1.0"]                 # message/event-bus stitch hook (publisher<->subscriber via topic; Kafka/Rabbit/NATS/...)
+c = ["auryn-c>=0.1.0"]
+cpp = ["auryn-cpp>=0.1.0"]
+cuda = ["auryn-cuda>=0.1.0"]                     # CUDA (.cu/.cuh): reuses the C++ engine + kernel-launch/exec-space signal
+typescript = ["auryn-typescript>=0.1.0"]
+java = ["auryn-java>=0.1.0"]
+go = ["auryn-go>=0.1.0"]
+rust = ["auryn-rust>=0.1.0"]
+php = ["auryn-php>=0.1.0"]
+julia = ["auryn-julia>=0.1.0"]
+ruby = ["auryn-ruby>=0.1.0"]
+kotlin = ["auryn-kotlin>=0.1.0"]
+swift = ["auryn-swift>=0.1.0"]
+bash = ["auryn-bash>=0.1.0"]
+embedded = ["auryn-core[embedded]>=0.1.0"]       # serverless, in-process FalkorDB (no server/Docker); powers `auryn quickstart`
+all = ["auryn-python>=0.1.0", "auryn-csharp>=0.1.0", "auryn-oracle[live]>=0.1.0", "auryn-sql[all]>=0.1.0", "auryn-http>=0.1.0", "auryn-orm>=0.1.0", "auryn-grpc>=0.1.0", "auryn-events>=0.1.0", "auryn-c>=0.1.0", "auryn-cpp>=0.1.0", "auryn-cuda>=0.1.0", "auryn-typescript>=0.1.0", "auryn-java>=0.1.0", "auryn-go>=0.1.0", "auryn-rust>=0.1.0", "auryn-php>=0.1.0", "auryn-julia>=0.1.0", "auryn-ruby>=0.1.0", "auryn-kotlin>=0.1.0", "auryn-swift>=0.1.0", "auryn-bash>=0.1.0"]
 
 # Re-declare the CLI entry point on the umbrella so `uv tool install falkordb-auryn` (or a published
 # name / a local path / `.[all]`) exposes the `auryn` executable. uv tool install only

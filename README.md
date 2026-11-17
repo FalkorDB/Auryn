@@ -59,9 +59,21 @@ flowchart LR
 Two commands, zero infrastructure. You'll be looking at a real graph in about a second.
 
 ```bash
-pip install falkordb-auryn
+pip install 'falkordb-auryn[python]'
 auryn quickstart
 ```
+
+The base package installs the core only. Choose extensions with extras; combine extras with commas:
+
+```bash
+pip install falkordb-auryn                  # Core only
+pip install 'falkordb-auryn[http]'           # Core + HTTP
+pip install 'falkordb-auryn[http,sql]'       # Core + HTTP + SQL
+pip install 'falkordb-auryn[all]'            # Core + all extensions
+```
+
+See [What it can read](#what-it-can-read) for the extension-to-extra mapping. `all` also pre-installs
+the optional live database drivers; use `oracle-live` or `sql-all` to install those drivers separately.
 
 This boots FalkorDB **embedded** (in-process, no daemon), ingests a small payments API that ships inside the package, and opens the viewer at <http://127.0.0.1:8080>.
 
@@ -79,7 +91,7 @@ Find a path between any two symbols and the viewer shows every hop, with the edg
 
 The codegraph persists at `<path>/.auryn/graph.db`, so re-running reuses it.
 
-> **Requirements:** Python ≥ 3.12. `falkordb-auryn` includes every language plugin out of the box. The in-process database is fetched automatically on first `auryn quickstart` on macOS and Linux (recent glibc). On native Windows or older-glibc Linux, point at a remote FalkorDB with `auryn install --backend remote`. Add live-DB drivers with `"falkordb-auryn[all]"`. For an isolated tool install, include the DB up front: `uv tool install "falkordb-auryn[embedded]"`. From a clone: `uv sync`, then `uv run auryn quickstart`.
+> **Requirements:** Python ≥ 3.12. Install the language and analysis extensions you need with extras. The in-process database is fetched automatically on first `auryn quickstart` on macOS and Linux (recent glibc). On native Windows or older-glibc Linux, point at a remote FalkorDB with `auryn install --backend remote`. Add live-DB drivers with `"falkordb-auryn[all]"`. For an isolated tool install, include the DB up front: `uv tool install "falkordb-auryn[embedded]"`. From a clone: `uv sync`, then `uv run auryn quickstart`.
 
 ## Connect your agent
 
@@ -168,7 +180,7 @@ Blast radius: the two callers on the left. Closure: everything it reaches on the
 
 ## What it can read
 
-Sixteen languages plus live SQL and Oracle schemas, all **auto-detected** by `auryn ingest` in a single pass. Live databases are read with `auryn run <name>`. `pip install falkordb-auryn` includes every language. For a lean, single-language install, use `pip install auryn-python` (each plugin pulls `auryn-core`).
+Sixteen languages plus live SQL and Oracle schemas, all **auto-detected** by `auryn ingest` in a single pass when their extras are installed. Live databases are read with `auryn run <name>`. For a lean, single-language install, use `pip install 'falkordb-auryn[python]'` or install `auryn-python` directly (each plugin pulls `auryn-core`).
 
 <details>
 <summary><b>All sources and engines</b></summary>
