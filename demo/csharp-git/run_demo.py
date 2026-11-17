@@ -138,8 +138,10 @@ def main() -> None:
     print("\nTry moving between commits yourself:")
     for i, commit in enumerate(commits, start=1):
         tag = tag_by_commit[commit.hexsha]
-        print(f'  uv run auryn git-sync csharp --repo-uri "{repo_path}" --project-name {PROJECT_NAME} '
-              f'--solution-name {SOLUTION_NAME} --ref {tag}  # commit {i}')
+        # --host/--port: the viewer above reads the Docker FalkorDB; without them `git-sync`
+        # writes to the configured backend, and the open viewer would never change.
+        print(f'  uv run auryn git-sync --host localhost --port {FALKORDB_PORT} csharp --repo-uri "{repo_path}" '
+              f'--project-name {PROJECT_NAME} --solution-name {SOLUTION_NAME} --ref {tag}  # commit {i}')
     print(
         '...or open the viewer\'s "Git-tracked projects" panel and pick '
         "v1-core-domain / v2-http-api / v3-dedicated-dtos from the Widgets project's dropdown."

@@ -13,6 +13,10 @@ All notable changes to Auryn are documented here. The format is based on
   in `auryn-oracle`) retain their own licenses — see that package's `LICENSE`. The
   already-published 0.1.0 packages on PyPI keep their original SSPL metadata (PyPI
   releases are immutable).
+- `auryn run` and `auryn git-sync` use the configured backend when `--host` isn't given, like
+  every other command; they used to connect to `localhost:6379`. Pass
+  `--host localhost --port 6379` for the old behaviour. A `--port`, `--username`, `--password`
+  or `--ssl` given without `--host` is now an error instead of being applied to that default.
 
 ## [0.1.0] — Initial public release
 

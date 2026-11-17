@@ -21,6 +21,9 @@ the CLI twin of the MCP `ingest_repository`/`ingest_directory` tools.
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Iterator, Mapping
+
 import click
 
 from auryn.core.graph_client import FalkorDBConfig, GraphWriter, connect, connect_client
@@ -44,10 +47,11 @@ def cli(verbose: bool) -> None:
         progress.set_verbose(True)
 
 
-class _LazyConnection:
-    """`ctx.obj` for the `run` / `git-sync` groups: `obj["falkordb_config"]` is resolved on first
-    use, not in the group callback. click runs that callback even for `auryn run <name> --help`,
-    and resolving the configured backend starts the local FalkorDB (see _resolve_connection)."""
+class _LazyConnection(Mapping):
+    """`ctx.obj` for the `run` / `git-sync` groups: a one-key mapping whose `falkordb_config` is
+    resolved on first READ, not in the group callback. click runs that callback even for
+    `auryn run <name> --help`, and resolving the configured backend starts the local FalkorDB
+    (see _resolve_connection). Asking whether the key is there resolves nothing."""
 
     def __init__(self, host, port, username, password, ssl, graph_name) -> None:
         self._args = (host, port, username, password, ssl)
@@ -58,10 +62,24 @@ class _LazyConnection:
         if key != "falkordb_config":
             raise KeyError(key)
         if self._config is None:
-            import dataclasses
-
+            host, *rest = self._args
+            if not host and any(rest):
+                # These used to apply to the old `localhost` default. Dropping them silently would
+                # send the run to the configured backend instead of the server they describe.
+                raise click.UsageError(
+                    "--port / --username / --password / --ssl need --host as well; "
+                    "without --host the configured backend is used.")
             self._config = dataclasses.replace(_resolve_connection(*self._args), graph_name=self._graph_name)
         return self._config
+
+    def __contains__(self, key: object) -> bool:
+        return key == "falkordb_config"
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("falkordb_config",))
+
+    def __len__(self) -> int:
+        return 1
 
 
 @click.group()

@@ -64,3 +64,38 @@ def test_help_resolves_nothing(monkeypatch, group):
     res = CliRunner().invoke(cli, [group, _SUBCOMMAND[group][0], "--help"])
 
     assert res.exit_code == 0, res.output
+
+
+@pytest.mark.parametrize("group", ["run", "git-sync"])
+@pytest.mark.parametrize("option", [["--port", "6380"], ["--password", "pw"], ["--ssl"]])
+def test_a_connection_option_without_host_is_refused(monkeypatch, connect_stub, group, option):
+    """`auryn run --port 6380 ...` used to mean localhost:6380. With no `--host` the configured
+    backend is used now, so honouring nothing and saying nothing would write to the wrong store:
+    it is a usage error, raised before any backend is resolved."""
+
+    def no_resolution(*conn):  # pragma: no cover - must not be called
+        raise AssertionError("a refused command must not resolve a connection")
+
+    monkeypatch.setattr("auryn.cli._resolve_connection", no_resolution)
+
+    res = CliRunner().invoke(cli, [group, *option, *_SUBCOMMAND[group]])
+
+    assert res.exit_code == 2, res.output
+    assert "need --host" in res.output
+
+
+def test_the_lazy_connection_is_a_mapping_that_resolves_only_on_read(monkeypatch):
+    """Ingestor plugins get `ctx.obj` and may treat it as the dict it used to be: `in` and `.get`
+    work, and neither a membership test nor a missing key resolves (or starts) the backend."""
+    from auryn.cli import _LazyConnection
+
+    resolved = []
+    monkeypatch.setattr("auryn.cli._resolve_connection", lambda *conn: resolved.append(conn) or FalkorDBConfig(host="h"))
+    obj = _LazyConnection(None, None, None, None, False, "g")
+
+    assert "falkordb_config" in obj and "other" not in obj
+    assert (list(obj), len(obj), obj.get("other")) == (["falkordb_config"], 1, None)
+    assert resolved == []
+
+    assert (obj.get("falkordb_config").host, obj["falkordb_config"].graph_name) == ("h", "g")
+    assert len(resolved) == 1  # resolved once, then kept

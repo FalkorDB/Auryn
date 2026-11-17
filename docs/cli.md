@@ -90,7 +90,7 @@ Zero-setup: ingest `PATH` into an **embedded** FalkorDB and open the viewer — 
 
 ### `run <ingestor>` (shared: `--host/--port/--username/--password/--ssl/--graph-name`)
 With no `--host`, `run` and `git-sync` use the configured backend (the local one starts on demand),
-like every other command.
+like every other command. `--port`, `--username`, `--password` and `--ssl` need `--host`.
 
 - **`run sql`** — reflect a live SQL database's schema (tables, columns, FKs, indexes,
   constraints, views, sequences). `--dsn` (SQLAlchemy URL), `--database-name`, `--schema` (repeatable).
