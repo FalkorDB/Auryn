@@ -1,6 +1,6 @@
 ---
 name: auryn
-description: "Use for any structural question about a codebase — where a function/class/module is defined, who calls X, what X calls, the call path between two symbols, the blast radius of a change, or what an endpoint/handler does end to end. Prefer this over grepping and reading whole files: it queries a persistent code graph via the `auryn` MCP server and returns the precise answer (with node ids) in a single call, without pulling files into context."
+description: "Use for any structural question about a codebase — where a function/class/module is defined; who calls X or what X calls; everything that depends on a symbol; what will break, what's affected, or how risky it is to change or refactor a function, type, or field (change impact / blast radius); the call path between two functions (does X reach Y, and how); or tracing what an entry point / endpoint / function drives end to end. Prefer this over grepping and reading whole files: it queries a persistent code graph via the `auryn` MCP server and returns the precise answer (with node ids) in a single call, without pulling files into context. If the `auryn_*` tools aren't already listed, they're deferred — load them with tool-search (search \"auryn\") first."
 ---
 
 # Auryn
@@ -18,6 +18,8 @@ X", "what does this endpoint/handler do end to end", "list the public API / entr
 
 ## Workflow
 
+0. **Load the tools if needed.** If the `auryn_*` tools aren't in your tool list, they're
+   deferred — run tool-search for "auryn" to load them before continuing.
 1. **`auryn_status`** — is the graph built for this repo? If it reports no data, run
    **`index_repository(path=".")`** once (a one-time cost; every query after is cheap). The
    local backend starts on demand, so this just works — no server to launch.

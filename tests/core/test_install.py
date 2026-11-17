@@ -105,6 +105,37 @@ def test_claudecode_register_then_deregister(tmp_path):
     assert not (tmp_path / "skills" / "auryn").exists()  # skill removed
 
 
+def test_claudecode_register_sets_always_load(tmp_path):
+    # `claude mcp add` can't set alwaysLoad, so register() patches the config it wrote so the
+    # server's tools load into the agent's INITIAL tool list instead of being deferred.
+    from auryn.core.agents import ClaudeCode
+
+    cfg = tmp_path / "claude.json"
+    cfg.write_text(json.dumps({"mcpServers": {"auryn": {"type": "stdio", "command": "PY", "args": ["-m", "auryn", "mcp"]}}}))
+
+    cc = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills", config_path=cfg)
+    cc.register(["PY", "-m", "auryn", "mcp"])
+
+    entry = json.loads(cfg.read_text())["mcpServers"]["auryn"]
+    assert entry["alwaysLoad"] is True  # tools surfaced upfront, not hidden behind tool-search
+    assert entry["command"] == "PY" and entry["args"] == ["-m", "auryn", "mcp"]  # other fields preserved
+
+
+def test_claudecode_register_always_load_is_best_effort(tmp_path):
+    # No config file yet (or an unwritten one) -> register still succeeds; the server just stays
+    # deferred rather than erroring. Also must not clobber an unparseable config.
+    from auryn.core.agents import ClaudeCode
+
+    missing = tmp_path / "nope.json"
+    reg = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills", config_path=missing).register(["PY", "-m", "auryn", "mcp"])
+    assert reg.skill_path and not missing.exists()  # didn't raise, didn't create a bogus file
+
+    junk = tmp_path / "junk.json"
+    junk.write_text("{not json")
+    ClaudeCode(run=_ok, skills_dir=tmp_path / "skills2", config_path=junk).register(["PY", "-m", "auryn", "mcp"])
+    assert junk.read_text() == "{not json"  # left untouched
+
+
 def test_claudecode_register_raises_when_add_fails(tmp_path):
     from auryn.core.agents import ClaudeCode
 

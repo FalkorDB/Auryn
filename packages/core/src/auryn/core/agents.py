@@ -54,9 +54,12 @@ class ClaudeCode:
 
     name = "claude-code"
 
-    def __init__(self, run: Runner = _default_run, skills_dir: Path | None = None) -> None:
+    def __init__(
+        self, run: Runner = _default_run, skills_dir: Path | None = None, config_path: Path | None = None
+    ) -> None:
         self._run = run
         self._skills_dir = skills_dir
+        self._config_path = config_path
 
     def detect(self) -> bool:
         """Present iff the `claude` CLI is on PATH."""
@@ -68,6 +71,32 @@ class ClaudeCode:
         env = os.environ.get("AURYN_CLAUDE_SKILLS")  # test/override hook
         return Path(env).expanduser() if env else Path.home() / ".claude" / "skills"
 
+    def _claude_config(self) -> Path:
+        if self._config_path is not None:
+            return self._config_path
+        env = os.environ.get("AURYN_CLAUDE_CONFIG")  # test/override hook
+        return Path(env).expanduser() if env else Path.home() / ".claude.json"
+
+    def _enable_always_load(self) -> None:
+        """Mark our server so Claude Code loads its tools into the agent's INITIAL tool list,
+        instead of deferring them behind tool-search. `claude mcp add` has no flag for this, so we
+        patch the config it just wrote (user scope -> ~/.claude.json, a `mcpServers` map). Without
+        it, in a tool-heavy setup the code-graph tools are invisible until the agent happens to
+        search for them -- so it often just greps instead (measured). Best-effort: if the config is
+        missing or not valid JSON, leave it (the server still works, only deferred)."""
+        path = self._claude_config()
+        try:
+            data = json.loads(path.read_text()) if path.exists() else None
+        except ValueError:
+            return  # don't clobber a config we can't round-trip
+        if not isinstance(data, dict):
+            return
+        servers = data.get(_MCP_SERVERS_KEY)
+        entry = servers.get(_SERVER_NAME) if isinstance(servers, dict) else None
+        if isinstance(entry, dict) and entry.get("alwaysLoad") is not True:
+            entry["alwaysLoad"] = True
+            _write_config(path, data)
+
     def register(self, server_command: list[str]) -> AgentRegistration:
         """Register the MCP server (user scope) and install the skill. Idempotent: any prior
         registration under the same name is removed first, so re-running install is safe."""
@@ -75,6 +104,7 @@ class ClaudeCode:
         added = self._run(["claude", "mcp", "add", "-s", "user", _SERVER_NAME, "--", *server_command])
         if added.returncode != 0:
             raise RuntimeError(f"`claude mcp add` failed: {(added.stderr or added.stdout).strip()}")
+        self._enable_always_load()  # surface the tools upfront, don't let them hide behind tool-search
 
         dest = self._skills_root() / _SKILL_NAME
         dest.parent.mkdir(parents=True, exist_ok=True)
