@@ -5,7 +5,7 @@ description = "Language-agnostic HTTP call<->endpoint stitch for Auryn (ADR 0006
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     # Reads/writes the finished graph via GraphWriter; matches routes with plain graph queries.
     # No language-extraction engines -- it joins facts the language parsers already emitted.

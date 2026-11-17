@@ -5,7 +5,7 @@ description = "C# language plugin for Auryn: fast tree-sitter parse + deep Rosly
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     "click>=8.1",

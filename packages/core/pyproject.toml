@@ -5,7 +5,7 @@ description = "Core of Auryn: registry/plugin discovery, git+local sources, the 
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "falkordb>=1.5.0",
     "click>=8.1",

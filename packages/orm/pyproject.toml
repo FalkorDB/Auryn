@@ -5,7 +5,7 @@ description = "Language-agnostic ORM model<->database-table stitch for Auryn: a 
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
 ]

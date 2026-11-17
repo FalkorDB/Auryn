@@ -5,7 +5,7 @@ description = "C language plugin for Auryn: fast tree-sitter-c engine (functions
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     "tree-sitter>=0.26.0",

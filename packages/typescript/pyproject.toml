@@ -5,7 +5,7 @@ description = "TypeScript/JavaScript language plugin for Auryn: one fast tree-si
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     "tree-sitter>=0.26.0",
