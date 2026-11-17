@@ -37,7 +37,9 @@ def _sync_blocker(project: dict) -> str | None:
         except git.InvalidGitRepositoryError:  # a folder that exists but isn't a repository's root
             return ("Indexed from a folder that isn't the root of a git repository: there is no "
                     "branch or tag to sync to. Re-ingest the folder to refresh the graph.")
-        except Exception:  # noqa: BLE001 -- gone, unreadable, malformed: the sync itself will tell
+        except git.NoSuchPathError:  # it was there when the graph was built
+            return "The source folder no longer exists, so there is nothing to sync from. Re-ingest it from where it is now."
+        except Exception:  # noqa: BLE001 -- unreadable, malformed: the sync itself will tell
             pass
     if not str(project["id"]).startswith("csharp://"):
         return "Sync from the viewer handles C# projects only. Re-ingest this one to refresh the graph."
@@ -245,7 +247,7 @@ def create_app(client: FalkorDB) -> Flask:
             return jsonify({"error": "this Project node has no repo_uri -- it wasn't created by git-sync"}), 400
         blocker = _sync_blocker(project)
         if blocker:
-            return jsonify({"error": blocker, "sync_unavailable": True}), 400
+            return jsonify({"error": blocker, "sync_unavailable": blocker}), 400  # as in git-projects
         # Only now: a refusal must not depend on the C# plugin being installed (auryn-core alone,
         # or with another language's plugin, serves the viewer too).
         from auryn.ingestors.csharp.git_sync import repos_cache_dir
@@ -279,7 +281,7 @@ def create_app(client: FalkorDB) -> Flask:
             return jsonify({"error": "this Project node has no repo_uri -- it wasn't created by git-sync"}), 400
         blocker = _sync_blocker(project)
         if blocker:
-            return jsonify({"error": blocker, "sync_unavailable": True}), 400
+            return jsonify({"error": blocker, "sync_unavailable": blocker}), 400  # as in git-projects
         from auryn.ingestors.csharp.git_sync import GitCSharpProjectConfig, sync  # see graph_git_refs
 
         config = GitCSharpProjectConfig(

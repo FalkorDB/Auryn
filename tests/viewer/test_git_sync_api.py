@@ -121,7 +121,7 @@ def test_git_refs_and_git_sync_refuse_a_project_the_viewer_cannot_sync(
     for resp in (refs, synced):
         assert resp.status_code == 400
         assert resp.get_json()["error"] == listed[project_id]["sync_unavailable"]  # one reason, everywhere
-        assert resp.get_json()["sync_unavailable"] is True  # a refusal, told apart from a failed request
+        assert resp.get_json()["sync_unavailable"] == resp.get_json()["error"]  # a refusal, not a failed request
     assert graph.query("MATCH (n) RETURN count(n)").result_set == before  # nothing was synced
 
 
@@ -139,18 +139,17 @@ def test_a_refusal_does_not_need_the_csharp_plugin(origin_repo, graph, falkordb_
     synced = client.post(f"/api/graphs/{graph_name}/git-sync", json={"project_id": "python://Widgets"})
 
     for resp in (refs, synced):
-        assert resp.status_code == 400 and resp.get_json()["sync_unavailable"] is True
+        assert resp.status_code == 400 and "C# projects only" in resp.get_json()["sync_unavailable"]
 
 
 @pytest.mark.parametrize("repo_uri", [
-    "https://github.com/org/Widgets.git", "git@github.com:org/Widgets.git", ".", "../Widgets", "/gone/Widgets",
-    "/tmp/has\x00nul",
+    "https://github.com/org/Widgets.git", "git@github.com:org/Widgets.git", ".", "../Widgets",
 ])
 def test_a_csharp_project_the_viewer_cannot_judge_is_not_refused(repo_uri, tmp_path, monkeypatch):
     """Only an absolute path that exists can be called "not a git repository" from here. A remote
     or scp-style URI is git's to open; a relative path (`auryn ingest repo .` stores it as given)
     was relative to where the ingest ran -- judged against the viewer's own folder, a real C# git
-    project lost its Sync. And a path git can't even open must not turn the listing into a 500."""
+    project lost its Sync."""
     from auryn.viewer.app import _sync_blocker
 
     monkeypatch.chdir(tmp_path)  # a plain folder: `.` must not be probed here
@@ -167,6 +166,9 @@ def test_sync_blocker_names_a_subfolder_of_a_repo_and_a_missing_source(origin_re
 
     for empty in ("", None):
         assert "No source is recorded" in _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": empty}})
+
+    gone = _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": str(origin_repo[0] / "deleted")}})
+    assert "no longer exists" in gone  # it used to offer Sync and fail on a raw `git clone` error
 
 
 def test_git_projects_endpoint_unknown_graph_returns_404(falkordb_connection):
@@ -219,7 +221,8 @@ def _seed_unreachable_project(graph):
         GraphNode(
             "Project",
             {"id": "csharp://Unreachable"},
-            {"name": "Unreachable", "repo_uri": "/nonexistent/path/to/a/repo"},
+            # a URI, not a bare path: a missing local FOLDER is refused up front (see _sync_blocker)
+            {"name": "Unreachable", "repo_uri": "file:///nonexistent/path/to/a/repo"},
         )
     )
 
