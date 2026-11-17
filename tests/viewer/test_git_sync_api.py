@@ -125,6 +125,23 @@ def test_git_refs_and_git_sync_refuse_a_project_the_viewer_cannot_sync(
     assert graph.query("MATCH (n) RETURN count(n)").result_set == before  # nothing was synced
 
 
+def test_a_refusal_does_not_need_the_csharp_plugin(origin_repo, graph, falkordb_connection, tmp_path, monkeypatch):
+    """`auryn-core` with another language's plugin serves the viewer too (`pip install
+    auryn-python`). Refusing a project that isn't C# must not start by importing the C# sync it
+    is refusing to run -- that was a 500, and the inspector's Sync button stayed enabled."""
+    import sys
+
+    client, graph_name, _ = _seeded_client(origin_repo, graph, falkordb_connection, tmp_path)
+    _seed_unsyncable_projects(origin_repo, graph, tmp_path)
+    monkeypatch.setitem(sys.modules, "auryn.ingestors.csharp.git_sync", None)  # "not installed"
+
+    refs = client.get(f"/api/graphs/{graph_name}/git-refs", query_string={"project_id": "python://Widgets"})
+    synced = client.post(f"/api/graphs/{graph_name}/git-sync", json={"project_id": "python://Widgets"})
+
+    for resp in (refs, synced):
+        assert resp.status_code == 400 and resp.get_json()["sync_unavailable"] is True
+
+
 @pytest.mark.parametrize("repo_uri", [
     "https://github.com/org/Widgets.git", "git@github.com:org/Widgets.git", ".", "../Widgets", "/gone/Widgets",
     "/tmp/has\x00nul",
