@@ -144,24 +144,30 @@ def test_claudecode_always_load_write_failure_is_non_fatal(tmp_path, monkeypatch
     cfg = tmp_path / "claude.json"
     cfg.write_text(json.dumps({"mcpServers": {"auryn": {"command": "PY"}}}))
 
+    calls = []
+
     def boom(*a, **k):
+        calls.append(1)
         raise OSError("read-only fs")
 
     monkeypatch.setattr(agents, "_write_config", boom)
     reg = agents.ClaudeCode(run=_ok, skills_dir=tmp_path / "skills", config_path=cfg).register(["PY", "-m", "auryn", "mcp"])
-    assert reg.skill_path  # register completed despite the write failure
+    assert calls, "the alwaysLoad write must have actually been attempted (failure path exercised)"
+    assert reg.skill_path  # ...yet register still completed despite the write failure
 
 
 def test_claudecode_config_path_honors_claude_config_dir(tmp_path, monkeypatch):
     # `claude mcp add` writes to $CLAUDE_CONFIG_DIR/.claude.json when that env is set, so the
     # alwaysLoad patch must target the same file -- not ~/.claude.json (a possibly-unrelated profile).
+    from pathlib import Path
+
     from auryn.core.agents import ClaudeCode
 
     monkeypatch.delenv("AURYN_CLAUDE_CONFIG", raising=False)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfgdir"))
     assert ClaudeCode()._claude_config() == tmp_path / "cfgdir" / ".claude.json"
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    assert ClaudeCode()._claude_config().name == ".claude.json"  # falls back to home dir
+    assert ClaudeCode()._claude_config() == Path.home() / ".claude.json"  # falls back to home dir
 
 
 def test_write_config_preserves_mode_and_is_clean(tmp_path):
@@ -182,6 +188,23 @@ def test_write_config_preserves_mode_and_is_clean(tmp_path):
     _write_config(new, {"x": 1})
     assert stat.S_IMODE(new.stat().st_mode) == 0o600
     assert not list(tmp_path.glob("*.tmp"))  # no leftover temp files
+
+
+def test_write_config_follows_symlink(tmp_path):
+    # A symlinked config (e.g. managed dotfiles) must be updated at its target, not have the link
+    # replaced by a regular file -- which a naive atomic rename would do.
+    from auryn.core.agents import _write_config
+
+    real = tmp_path / "real" / "claude.json"
+    real.parent.mkdir()
+    real.write_text("{}")
+    link = tmp_path / "claude.json"
+    link.symlink_to(real)
+
+    _write_config(link, {"ok": True})
+
+    assert link.is_symlink()  # link preserved
+    assert json.loads(real.read_text())["ok"] is True  # the target received the update
 
 
 def test_claudecode_register_raises_when_add_fails(tmp_path):

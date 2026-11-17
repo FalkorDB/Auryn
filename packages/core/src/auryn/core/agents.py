@@ -185,17 +185,21 @@ def _write_config(path: Path, data: dict) -> None:
     inherits the existing config's permissions (or 0600 for a new file) so os.replace never widens
     the mode and exposes secrets to other local users."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Follow a symlink to its target so we update the real file (e.g. a managed dotfiles config)
+    # rather than replacing the link with a regular file, as a plain write_text would.
+    target = Path(os.path.realpath(path))
+    target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        mode = path.stat().st_mode & 0o777  # preserve the existing file's perms
+        mode = target.stat().st_mode & 0o777  # preserve the existing file's perms
     except OSError:
         mode = 0o600  # new file: owner-only, since configs may hold secrets
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(json.dumps(data, indent=2) + "\n")
         os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        os.replace(tmp, target)
     except BaseException:
         tmp.unlink(missing_ok=True)  # don't leave a stray temp file behind on failure
         raise
