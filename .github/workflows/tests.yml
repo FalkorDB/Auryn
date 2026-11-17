@@ -71,12 +71,24 @@ jobs:
           for t in $HEAVY_TESTS; do ignores="$ignores --ignore=$t"; done
           uv run pytest $ignores -n 2 --cov=auryn --cov-report=term-missing
 
+  # Install what users install -- the umbrella, and the core with a few plugin extras -- from wheels
+  # built from THIS checkout, then check the exact auryn-* set, the versions, `pip check`, and that
+  # the CLI and every plugin entry point load. The packages are stamped with a version that exists
+  # only here, so every auryn-* package comes from the local build and third-party ones from PyPI.
   package-install:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        extras: ["", "http", "grpc", "http,sql", "all"]
+        spec:
+          - "falkordb-auryn"            # default: everything
+          - "falkordb-auryn[all]"       # + the live-DB drivers
+          - "auryn-core"                # core only
+          - "auryn-core[python]"        # custom: one plugin
+          - "auryn-core[http,sql]"      # custom: several plugins
+          - "auryn-core[cuda]"          # a plugin that pulls another (auryn-cpp)
+    env:
+      LOCAL_VERSION: "0.0.0.dev0"
     steps:
       - uses: actions/checkout@v4
 
@@ -84,51 +96,27 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install package selection and verify imports
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build every package at a local-only version
+        run: |
+          python .github/scripts/stamp_version.py "$LOCAL_VERSION"
+          mkdir -p "$RUNNER_TEMP/dist"
+          uv build --out-dir "$RUNNER_TEMP/dist" .
+          for d in packages/*/; do
+            uv build --out-dir "$RUNNER_TEMP/dist" "$d"
+          done
+
+      - name: Install ${{ matrix.spec }} and verify
         env:
-          EXTRAS: ${{ matrix.extras }}
+          SPEC: ${{ matrix.spec }}
         run: |
           python -m venv "$RUNNER_TEMP/package-env"
           python_bin="$RUNNER_TEMP/package-env/bin/python"
-          if [ -n "$EXTRAS" ]; then
-            "$python_bin" -m pip install ".[${EXTRAS}]"
-          else
-            "$python_bin" -m pip install .
-          fi
+          "$python_bin" -m pip install --find-links "$RUNNER_TEMP/dist" "${SPEC}==${LOCAL_VERSION}"
           "$python_bin" -m pip check
-          "$python_bin" - <<'PY'
-          import importlib.metadata
-          import re
-          import tomllib
-          from pathlib import Path
-          import os
-
-          normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
-          root = Path.cwd()
-          project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
-          extras = project["optional-dependencies"]
-          extension_names = {
-              normalize(tomllib.loads(path.read_text())["project"]["name"])
-              for path in (root / "packages").glob("*/pyproject.toml")
-              if tomllib.loads(path.read_text())["project"]["name"] != "auryn-core"
-          }
-          requested = os.environ["EXTRAS"].split(",") if os.environ["EXTRAS"] else []
-          expected = {
-              normalize(re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", requirement).group())
-              for extra in requested
-              for requirement in extras[extra]
-          } & extension_names
-          installed = {normalize(dist.metadata["Name"]) for dist in importlib.metadata.distributions()}
-          actual = installed & extension_names
-          assert "auryn-core" in installed
-          assert actual == expected, f"expected {sorted(expected)}, installed {sorted(actual)}"
-
-          import auryn.cli
-
-          for group in ("auryn.languages", "auryn.ingestors", "auryn.enrichments"):
-              for entry_point in importlib.metadata.entry_points(group=group):
-                  entry_point.load()
-          PY
+          "$python_bin" .github/scripts/check_install.py "$SPEC" "$LOCAL_VERSION" .
 
   # Dedicated performance-regression gate. The whole value of delta-sync is that editing one file
   # re-parses ~one file, not the repo -- a change that drags a file's whole package/module back in is

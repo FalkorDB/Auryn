@@ -28,6 +28,35 @@ llm = ["anthropic>=0.40"]
 # on demand (opt-out) -- in graph_client.connect_client only when a config requests
 # embedded mode, so the normal server path never carries it. Powers `auryn quickstart`.
 embedded = ["falkordblite>=0.10"]
+# Plugins, for a custom install: `pip install "auryn-core[python,http]"`. Each extra is named
+# after its package (`auryn-<name>`) and pinned to this release's version (release.yml stamps
+# the pins with the version). `pip install falkordb-auryn` installs all of them.
+# languages
+python = ["auryn-python==0.1.0"]
+typescript = ["auryn-typescript==0.1.0"]       # also .js/.jsx/.mjs/.cjs
+java = ["auryn-java==0.1.0"]
+go = ["auryn-go==0.1.0"]
+rust = ["auryn-rust==0.1.0"]
+c = ["auryn-c==0.1.0"]
+cpp = ["auryn-cpp==0.1.0"]
+cuda = ["auryn-cuda==0.1.0"]                   # reuses the C++ engine (pulls auryn-cpp)
+csharp = ["auryn-csharp==0.1.0"]
+php = ["auryn-php==0.1.0"]
+ruby = ["auryn-ruby==0.1.0"]
+kotlin = ["auryn-kotlin==0.1.0"]
+swift = ["auryn-swift==0.1.0"]
+julia = ["auryn-julia==0.1.0"]
+bash = ["auryn-bash==0.1.0"]
+# database schemas
+sql = ["auryn-sql==0.1.0"]                     # relational-DB schemas (SQLAlchemy; SQLite works out of the box)
+sql-all = ["auryn-sql[all]==0.1.0"]            # + postgres/mysql/oracle DBAPI drivers
+oracle = ["auryn-oracle==0.1.0"]               # file-based PL/SQL + SQL DDL, no DB driver
+oracle-live = ["auryn-oracle[live]==0.1.0"]    # + oracledb for the live `oracle` ingestor
+# cross-language links
+http = ["auryn-http==0.1.0"]                   # HTTP client call <-> server endpoint
+orm = ["auryn-orm==0.1.0"]                     # ORM model <-> DB table
+grpc = ["auryn-grpc==0.1.0"]                   # gRPC client call <-> server handler
+events = ["auryn-events==0.1.0"]               # message publisher <-> subscriber (Kafka/Rabbit/NATS/...)
 
 [project.scripts]
 auryn = "auryn.cli:cli"

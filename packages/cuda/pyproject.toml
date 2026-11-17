@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
     "auryn-core",
-    "auryn-cpp",                 # the shared C++ extraction engine (CUDA is a superset)
+    "auryn-cpp==0.1.0",          # the shared C++ extraction engine (CUDA is a superset); same release
     "tree-sitter>=0.26.0",
     "tree-sitter-cuda>=0.21.2",
 ]

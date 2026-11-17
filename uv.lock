@@ -139,16 +139,108 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+bash = [
+    { name = "auryn-bash" },
+]
+c = [
+    { name = "auryn-c" },
+]
+cpp = [
+    { name = "auryn-cpp" },
+]
+csharp = [
+    { name = "auryn-csharp" },
+]
+cuda = [
+    { name = "auryn-cuda" },
+]
 embedded = [
     { name = "falkordblite" },
 ]
+events = [
+    { name = "auryn-events" },
+]
+go = [
+    { name = "auryn-go" },
+]
+grpc = [
+    { name = "auryn-grpc" },
+]
+http = [
+    { name = "auryn-http" },
+]
+java = [
+    { name = "auryn-java" },
+]
+julia = [
+    { name = "auryn-julia" },
+]
+kotlin = [
+    { name = "auryn-kotlin" },
+]
 llm = [
     { name = "anthropic" },
+]
+oracle = [
+    { name = "auryn-oracle" },
+]
+oracle-live = [
+    { name = "auryn-oracle", extra = ["live"] },
+]
+orm = [
+    { name = "auryn-orm" },
+]
+php = [
+    { name = "auryn-php" },
+]
+python = [
+    { name = "auryn-python" },
+]
+ruby = [
+    { name = "auryn-ruby" },
+]
+rust = [
+    { name = "auryn-rust" },
+]
+sql = [
+    { name = "auryn-sql" },
+]
+sql-all = [
+    { name = "auryn-sql", extra = ["all"] },
+]
+swift = [
+    { name = "auryn-swift" },
+]
+typescript = [
+    { name = "auryn-typescript" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'llm'", specifier = ">=0.40" },
+    { name = "auryn-bash", marker = "extra == 'bash'", editable = "packages/bash" },
+    { name = "auryn-c", marker = "extra == 'c'", editable = "packages/c" },
+    { name = "auryn-cpp", marker = "extra == 'cpp'", editable = "packages/cpp" },
+    { name = "auryn-csharp", marker = "extra == 'csharp'", editable = "packages/csharp" },
+    { name = "auryn-cuda", marker = "extra == 'cuda'", editable = "packages/cuda" },
+    { name = "auryn-events", marker = "extra == 'events'", editable = "packages/events" },
+    { name = "auryn-go", marker = "extra == 'go'", editable = "packages/go" },
+    { name = "auryn-grpc", marker = "extra == 'grpc'", editable = "packages/grpc" },
+    { name = "auryn-http", marker = "extra == 'http'", editable = "packages/http" },
+    { name = "auryn-java", marker = "extra == 'java'", editable = "packages/java" },
+    { name = "auryn-julia", marker = "extra == 'julia'", editable = "packages/julia" },
+    { name = "auryn-kotlin", marker = "extra == 'kotlin'", editable = "packages/kotlin" },
+    { name = "auryn-oracle", marker = "extra == 'oracle'", editable = "packages/oracle" },
+    { name = "auryn-oracle", extras = ["live"], marker = "extra == 'oracle-live'", editable = "packages/oracle" },
+    { name = "auryn-orm", marker = "extra == 'orm'", editable = "packages/orm" },
+    { name = "auryn-php", marker = "extra == 'php'", editable = "packages/php" },
+    { name = "auryn-python", marker = "extra == 'python'", editable = "packages/python" },
+    { name = "auryn-ruby", marker = "extra == 'ruby'", editable = "packages/ruby" },
+    { name = "auryn-rust", marker = "extra == 'rust'", editable = "packages/rust" },
+    { name = "auryn-sql", marker = "extra == 'sql'", editable = "packages/sql" },
+    { name = "auryn-sql", extras = ["all"], marker = "extra == 'sql-all'", editable = "packages/sql" },
+    { name = "auryn-swift", marker = "extra == 'swift'", editable = "packages/swift" },
+    { name = "auryn-typescript", marker = "extra == 'typescript'", editable = "packages/typescript" },
     { name = "click", specifier = ">=8.1" },
     { name = "falkordb", specifier = ">=1.5.0" },
     { name = "falkordblite", marker = "extra == 'embedded'", specifier = ">=0.10" },
@@ -157,7 +249,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.2,<2.1" },
     { name = "tomli-w", specifier = ">=1.0" },
 ]
-provides-extras = ["llm", "embedded"]
+provides-extras = ["llm", "embedded", "python", "typescript", "java", "go", "rust", "c", "cpp", "cuda", "csharp", "php", "ruby", "kotlin", "swift", "julia", "bash", "sql", "sql-all", "oracle", "oracle-live", "http", "orm", "grpc", "events"]
 
 [[package]]
 name = "auryn-cpp"
@@ -945,104 +1037,43 @@ name = "falkordb-auryn"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "auryn-bash" },
+    { name = "auryn-c" },
     { name = "auryn-core" },
+    { name = "auryn-cpp" },
+    { name = "auryn-csharp" },
+    { name = "auryn-cuda" },
+    { name = "auryn-events" },
+    { name = "auryn-go" },
+    { name = "auryn-grpc" },
+    { name = "auryn-http" },
+    { name = "auryn-java" },
+    { name = "auryn-julia" },
+    { name = "auryn-kotlin" },
+    { name = "auryn-oracle" },
+    { name = "auryn-orm" },
+    { name = "auryn-php" },
+    { name = "auryn-python" },
+    { name = "auryn-ruby" },
+    { name = "auryn-rust" },
+    { name = "auryn-sql" },
+    { name = "auryn-swift" },
+    { name = "auryn-typescript" },
 ]
 
 [package.optional-dependencies]
 all = [
-    { name = "auryn-bash" },
-    { name = "auryn-c" },
-    { name = "auryn-cpp" },
-    { name = "auryn-csharp" },
-    { name = "auryn-cuda" },
-    { name = "auryn-events" },
-    { name = "auryn-go" },
-    { name = "auryn-grpc" },
-    { name = "auryn-http" },
-    { name = "auryn-java" },
-    { name = "auryn-julia" },
-    { name = "auryn-kotlin" },
     { name = "auryn-oracle", extra = ["live"] },
-    { name = "auryn-orm" },
-    { name = "auryn-php" },
-    { name = "auryn-python" },
-    { name = "auryn-ruby" },
-    { name = "auryn-rust" },
     { name = "auryn-sql", extra = ["all"] },
-    { name = "auryn-swift" },
-    { name = "auryn-typescript" },
-]
-bash = [
-    { name = "auryn-bash" },
-]
-c = [
-    { name = "auryn-c" },
-]
-cpp = [
-    { name = "auryn-cpp" },
-]
-csharp = [
-    { name = "auryn-csharp" },
-]
-cuda = [
-    { name = "auryn-cuda" },
 ]
 embedded = [
     { name = "auryn-core", extra = ["embedded"] },
 ]
-events = [
-    { name = "auryn-events" },
-]
-go = [
-    { name = "auryn-go" },
-]
-grpc = [
-    { name = "auryn-grpc" },
-]
-http = [
-    { name = "auryn-http" },
-]
-java = [
-    { name = "auryn-java" },
-]
-julia = [
-    { name = "auryn-julia" },
-]
-kotlin = [
-    { name = "auryn-kotlin" },
-]
-oracle = [
-    { name = "auryn-oracle" },
-]
 oracle-live = [
     { name = "auryn-oracle", extra = ["live"] },
 ]
-orm = [
-    { name = "auryn-orm" },
-]
-php = [
-    { name = "auryn-php" },
-]
-python = [
-    { name = "auryn-python" },
-]
-ruby = [
-    { name = "auryn-ruby" },
-]
-rust = [
-    { name = "auryn-rust" },
-]
-sql = [
-    { name = "auryn-sql" },
-]
 sql-all = [
     { name = "auryn-sql", extra = ["all"] },
-]
-swift = [
-    { name = "auryn-swift" },
-]
-typescript = [
-    { name = "auryn-typescript" },
 ]
 
 [package.dev-dependencies]
@@ -1079,54 +1110,35 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "auryn-bash", marker = "extra == 'all'", editable = "packages/bash" },
-    { name = "auryn-bash", marker = "extra == 'bash'", editable = "packages/bash" },
-    { name = "auryn-c", marker = "extra == 'all'", editable = "packages/c" },
-    { name = "auryn-c", marker = "extra == 'c'", editable = "packages/c" },
+    { name = "auryn-bash", editable = "packages/bash" },
+    { name = "auryn-c", editable = "packages/c" },
     { name = "auryn-core", editable = "packages/core" },
     { name = "auryn-core", extras = ["embedded"], marker = "extra == 'embedded'", editable = "packages/core" },
-    { name = "auryn-cpp", marker = "extra == 'all'", editable = "packages/cpp" },
-    { name = "auryn-cpp", marker = "extra == 'cpp'", editable = "packages/cpp" },
-    { name = "auryn-csharp", marker = "extra == 'all'", editable = "packages/csharp" },
-    { name = "auryn-csharp", marker = "extra == 'csharp'", editable = "packages/csharp" },
-    { name = "auryn-cuda", marker = "extra == 'all'", editable = "packages/cuda" },
-    { name = "auryn-cuda", marker = "extra == 'cuda'", editable = "packages/cuda" },
-    { name = "auryn-events", marker = "extra == 'all'", editable = "packages/events" },
-    { name = "auryn-events", marker = "extra == 'events'", editable = "packages/events" },
-    { name = "auryn-go", marker = "extra == 'all'", editable = "packages/go" },
-    { name = "auryn-go", marker = "extra == 'go'", editable = "packages/go" },
-    { name = "auryn-grpc", marker = "extra == 'all'", editable = "packages/grpc" },
-    { name = "auryn-grpc", marker = "extra == 'grpc'", editable = "packages/grpc" },
-    { name = "auryn-http", marker = "extra == 'all'", editable = "packages/http" },
-    { name = "auryn-http", marker = "extra == 'http'", editable = "packages/http" },
-    { name = "auryn-java", marker = "extra == 'all'", editable = "packages/java" },
-    { name = "auryn-java", marker = "extra == 'java'", editable = "packages/java" },
-    { name = "auryn-julia", marker = "extra == 'all'", editable = "packages/julia" },
-    { name = "auryn-julia", marker = "extra == 'julia'", editable = "packages/julia" },
-    { name = "auryn-kotlin", marker = "extra == 'all'", editable = "packages/kotlin" },
-    { name = "auryn-kotlin", marker = "extra == 'kotlin'", editable = "packages/kotlin" },
-    { name = "auryn-oracle", marker = "extra == 'oracle'", editable = "packages/oracle" },
+    { name = "auryn-cpp", editable = "packages/cpp" },
+    { name = "auryn-csharp", editable = "packages/csharp" },
+    { name = "auryn-cuda", editable = "packages/cuda" },
+    { name = "auryn-events", editable = "packages/events" },
+    { name = "auryn-go", editable = "packages/go" },
+    { name = "auryn-grpc", editable = "packages/grpc" },
+    { name = "auryn-http", editable = "packages/http" },
+    { name = "auryn-java", editable = "packages/java" },
+    { name = "auryn-julia", editable = "packages/julia" },
+    { name = "auryn-kotlin", editable = "packages/kotlin" },
+    { name = "auryn-oracle", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'all'", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'oracle-live'", editable = "packages/oracle" },
-    { name = "auryn-orm", marker = "extra == 'all'", editable = "packages/orm" },
-    { name = "auryn-orm", marker = "extra == 'orm'", editable = "packages/orm" },
-    { name = "auryn-php", marker = "extra == 'all'", editable = "packages/php" },
-    { name = "auryn-php", marker = "extra == 'php'", editable = "packages/php" },
-    { name = "auryn-python", marker = "extra == 'all'", editable = "packages/python" },
-    { name = "auryn-python", marker = "extra == 'python'", editable = "packages/python" },
-    { name = "auryn-ruby", marker = "extra == 'all'", editable = "packages/ruby" },
-    { name = "auryn-ruby", marker = "extra == 'ruby'", editable = "packages/ruby" },
-    { name = "auryn-rust", marker = "extra == 'all'", editable = "packages/rust" },
-    { name = "auryn-rust", marker = "extra == 'rust'", editable = "packages/rust" },
-    { name = "auryn-sql", marker = "extra == 'sql'", editable = "packages/sql" },
+    { name = "auryn-orm", editable = "packages/orm" },
+    { name = "auryn-php", editable = "packages/php" },
+    { name = "auryn-python", editable = "packages/python" },
+    { name = "auryn-ruby", editable = "packages/ruby" },
+    { name = "auryn-rust", editable = "packages/rust" },
+    { name = "auryn-sql", editable = "packages/sql" },
     { name = "auryn-sql", extras = ["all"], marker = "extra == 'all'", editable = "packages/sql" },
     { name = "auryn-sql", extras = ["all"], marker = "extra == 'sql-all'", editable = "packages/sql" },
-    { name = "auryn-swift", marker = "extra == 'all'", editable = "packages/swift" },
-    { name = "auryn-swift", marker = "extra == 'swift'", editable = "packages/swift" },
-    { name = "auryn-typescript", marker = "extra == 'all'", editable = "packages/typescript" },
-    { name = "auryn-typescript", marker = "extra == 'typescript'", editable = "packages/typescript" },
+    { name = "auryn-swift", editable = "packages/swift" },
+    { name = "auryn-typescript", editable = "packages/typescript" },
 ]
-provides-extras = ["python", "csharp", "oracle", "oracle-live", "sql", "sql-all", "http", "orm", "grpc", "events", "c", "cpp", "cuda", "typescript", "java", "go", "rust", "php", "julia", "ruby", "kotlin", "swift", "bash", "embedded", "all"]
+provides-extras = ["embedded", "oracle-live", "sql-all", "all"]
 
 [package.metadata.requires-dev]
 dev = [
