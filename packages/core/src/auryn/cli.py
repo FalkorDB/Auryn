@@ -202,9 +202,13 @@ def embed(
     graph = connect_client(config).select_graph(graph_name or default_graph_name())
     run = reembed_all if reembed else embed_graph
     stats = run(GraphWriter(graph), get_embedder(model))
+    # `index_ready` is False both when nothing was embedded (the index wasn't touched) and when
+    # its build outlasted the wait: only the first is "unchanged".
+    index = ("unchanged" if not stats.embedded else "ready" if stats.index_ready
+             else "still building -- searches may return nothing until it finishes")
     click.echo(
         f"Embedded {stats.embedded} node(s) ({stats.scanned} scanned) with {stats.model_id} "
-        f"(dim={stats.dim}); vector index {'ready' if stats.index_ready else 'unchanged'}."
+        f"(dim={stats.dim}); vector index {index}."
     )
 
 

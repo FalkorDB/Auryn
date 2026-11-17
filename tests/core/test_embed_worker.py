@@ -80,13 +80,30 @@ def test_embed_graph_returns_only_once_the_indexes_are_searchable(writer):
     assert len(writer.fulltext_search("database connection", 5)) == 5
 
 
-def test_index_ready_is_false_when_the_build_outlasts_the_wait(writer, monkeypatch):
-    """`index_ready` is the wait's own verdict: an index still under construction at the deadline
-    is reported as not ready rather than as searchable."""
-    _seed(writer)
-    monkeypatch.setattr(writer, "await_indexes", lambda label: False)
+@pytest.mark.parametrize("embedded, index_ready, said", [
+    (0, False, "vector index unchanged."),
+    (3, True, "vector index ready."),
+    (3, False, "vector index still building"),
+])
+def test_embed_command_says_when_the_index_is_still_building(monkeypatch, embedded, index_ready, said):
+    """`index_ready` is False both when nothing was embedded and when the build outlasted the
+    wait. `auryn embed` printed "unchanged" for both -- telling the user all was well while
+    searches still came back empty, the very confusion the wait is there to end."""
+    from click.testing import CliRunner
 
-    assert embed_graph(writer, FakeEmbedder()).index_ready is False
+    from auryn.cli import cli
+    from auryn.core.embeddings.worker import EmbedStats
+
+    stats = EmbedStats(scanned=embedded, embedded=embedded, model_id="fake", dim=8, index_ready=index_ready)
+    monkeypatch.setattr("auryn.cli._resolve_connection", lambda *conn: None)
+    monkeypatch.setattr("auryn.cli.connect_client", lambda config: SimpleNamespace(select_graph=lambda name: None))
+    monkeypatch.setattr("auryn.core.embeddings.get_embedder", lambda model: None)
+    monkeypatch.setattr("auryn.core.embeddings.worker.embed_graph", lambda writer, embedder: stats)
+
+    res = CliRunner().invoke(cli, ["embed", "--graph-name", "g"])
+
+    assert res.exit_code == 0, res.output
+    assert said in res.output
 
 
 class _IndexStatuses:
@@ -122,6 +139,26 @@ def test_await_indexes_gives_up_at_the_deadline_and_without_an_index():
 
     no_index = _IndexStatuses([])  # creation failed: nothing is building, nothing will be ready
     assert GraphWriter(no_index).await_indexes("Embeddable") is False
+
+
+def test_await_indexes_backs_off_and_survives_an_unreadable_state(monkeypatch):
+    """A long build is polled ever more slowly (20 ms doubling up to a second), not 50 times a
+    second for minutes. And a server that can't answer `db.indexes()` this way means "can't tell",
+    reported as not ready -- not an exception after every vector has already been written."""
+    from redis.exceptions import ResponseError
+
+    pauses = []
+    monkeypatch.setattr("auryn.core.graph_client.time.sleep", pauses.append)
+    graph = _IndexStatuses(*([[_BUILDING]] * 8), ["OPERATIONAL"])
+
+    assert GraphWriter(graph).await_indexes("Embeddable") is True
+    assert pauses == [0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.0, 1.0]
+
+    class _NoStatusColumn:
+        def ro_query(self, cypher, params=None):
+            raise ResponseError("Procedure `db.indexes` does not yield output `status`")
+
+    assert GraphWriter(_NoStatusColumn()).await_indexes("Embeddable") is False
 
 
 def test_embed_graph_is_idempotent(writer):

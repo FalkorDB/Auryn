@@ -112,12 +112,18 @@ testing and just adds contention."""
 
 _INDEX_BUILD_TIMEOUT_S = 300.0
 """How long await_indexes() waits for FalkorDB to finish building an index it just created.
-The build runs in the background after CREATE INDEX returns, at roughly 14k embedded nodes a
-second on a laptop (measured: ~6 ms for 300 nodes, ~0.4 s for 6,000), and a search against the
-index meanwhile returns NOTHING. That gap is why a search right after an embed pass came back
-empty -- on a loaded CI runner even for three nodes. Five minutes covers a few million nodes."""
+The build runs in the background after CREATE INDEX returns, and a search against the index
+meanwhile returns NOTHING. That gap is why a search right after an embed pass came back empty --
+on a loaded CI runner even for three nodes. Measured with the tests' small fake vectors it builds
+about 14k nodes a second on a laptop (~6 ms for 300 nodes, ~0.4 s for 6,000); real 384- or
+768-dimension vectors build slower. Five minutes is headroom, not a guarantee: past it the pass
+reports the index as still building."""
 
 _INDEX_POLL_INTERVAL_S = 0.02
+_INDEX_POLL_MAX_INTERVAL_S = 1.0
+"""await_indexes() looks every 20 ms at first -- a small index is built within a look or two --
+and doubles the pause up to a second, so a long build costs a few hundred `db.indexes()` calls
+rather than thousands."""
 
 _WRITE_BATCH_SIZE = 2000
 """One UNWIND-based write per this many entities rather than one query per entity --
@@ -389,16 +395,23 @@ class GraphWriter:
             logger.debug("Full-text index on :%s already exists", label)
 
     def await_indexes(self, label: str, timeout: float = _INDEX_BUILD_TIMEOUT_S) -> bool:
-        """Block until every index on :label is built: True once they all are, False if `timeout`
-        seconds ran out first -- or if the label has no index at all (nothing is building, so
-        nothing will become ready). FalkorDB returns from CREATE INDEX at once and populates the
-        index in the background; until `db.indexes()` reports it OPERATIONAL, a vector or
-        full-text query against it comes back EMPTY -- not partial (see _INDEX_BUILD_TIMEOUT_S)."""
+        """Block until every node index on :label is built: True once they all are, False if
+        `timeout` seconds ran out first -- or if the label has no index at all (nothing is
+        building, so nothing will become ready), or its state can't be read. FalkorDB returns
+        from CREATE INDEX at once and populates the index in the background; until `db.indexes()`
+        reports it OPERATIONAL, a vector or full-text query against it comes back EMPTY -- not
+        partial (see _INDEX_BUILD_TIMEOUT_S)."""
         deadline = time.monotonic() + timeout
+        pause = _INDEX_POLL_INTERVAL_S
         while True:
-            rows = self._graph.ro_query(
-                "CALL db.indexes() YIELD label, status WHERE label = $label RETURN status", {"label": label}
-            ).result_set
+            try:
+                rows = self._graph.ro_query(
+                    "CALL db.indexes() YIELD label, entitytype, status "
+                    "WHERE label = $label AND entitytype = 'NODE' RETURN status", {"label": label}
+                ).result_set
+            except ResponseError as e:  # e.g. a server whose db.indexes() reports no status
+                logger.warning("Can't read the state of the indexes on :%s (%s)", label, e)
+                return False
             if not rows:
                 return False
             if all(status == "OPERATIONAL" for (status,) in rows):
@@ -406,7 +419,8 @@ class GraphWriter:
             if time.monotonic() >= deadline:
                 logger.warning("Indexes on :%s still building after %.0fs", label, timeout)
                 return False
-            time.sleep(_INDEX_POLL_INTERVAL_S)
+            time.sleep(pause)
+            pause = min(pause * 2, _INDEX_POLL_MAX_INTERVAL_S)
 
     def query(self, cypher: str, params: dict | None = None):
         """Escape hatch for passes that need arbitrary Cypher (reads, or targeted
