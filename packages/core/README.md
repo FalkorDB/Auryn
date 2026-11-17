@@ -7,11 +7,12 @@ Part of [Auryn](https://github.com/FalkorDB/Auryn), which turns a codebase into 
 ## Install
 
 ```bash
-pip install auryn-core
+pip install falkordb-auryn                  # Auryn with every plugin
+pip install "auryn-core[python,http]"       # the core with only the plugins you name
 ```
 
-To install Auryn with every language plugin, use `pip install falkordb-auryn`.
+Plugins are named after their packages without `auryn-`; see [What it can read](https://github.com/FalkorDB/Auryn#what-it-can-read).
 
 ## License
 
-SSPL-1.0. See the [LICENSE](https://github.com/FalkorDB/Auryn/blob/main/LICENSE).
+MIT. See the [LICENSE](https://github.com/FalkorDB/Auryn/blob/main/packages/core/LICENSE).

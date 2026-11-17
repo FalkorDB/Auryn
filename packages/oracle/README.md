@@ -7,11 +7,11 @@ Part of [Auryn](https://github.com/FalkorDB/Auryn), which turns a codebase into 
 ## Install
 
 ```bash
-pip install auryn-oracle
+pip install falkordb-auryn                  # Auryn with every plugin
+pip install "auryn-core[oracle]"            # Auryn with only this plugin
+pip install "auryn-core[oracle-live]"       # + the oracledb driver for live databases
 ```
-
-To install Auryn with every language plugin, use `pip install falkordb-auryn`.
 
 ## License
 
-SSPL-1.0. See the [LICENSE](https://github.com/FalkorDB/Auryn/blob/main/LICENSE).
+MIT. See the [LICENSE](https://github.com/FalkorDB/Auryn/blob/main/packages/oracle/LICENSE). The vendored ANTLR PL/SQL grammar is Apache-2.0; its notice is in the same file.
