@@ -1,10 +1,10 @@
 [project]
 name = "auryn-cuda"
 dynamic = ["version"]
-description = "CUDA language plugin for Auryn: a fast tree-sitter-cuda engine. CUDA is a strict superset of C++, so this plugin reuses the auryn-cpp extraction engine verbatim (namespaces/classes/structs/unions/enums/methods/fields/params, the type hierarchy, templates, #includes/macros, calls -- including out-of-line Class::method definitions) and adds the CUDA-only graph signal: an `execution_space` property on kernels/device/host functions (__global__/__device__/__host__) and a LAUNCHES edge for `kernel<<<grid, block>>>(...)` launches. A deep libclang/nvcc pass is the planned second phase."
+description = "CUDA language plugin for Auryn: a fast tree-sitter-cuda engine. CUDA is a superset of C++, so it reuses the auryn-cpp extraction engine verbatim (namespaces/classes/structs/enums/methods/fields/params, type hierarchy, templates, includes/macros, calls) and adds the CUDA-only graph signals: an `execution_space` property (__global__/__device__/__host__) and a LAUNCHES edge for `kernel<<<...>>>` launches. A deep libclang/nvcc pass is the planned second phase."
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     "auryn-cpp",                 # the shared C++ extraction engine (CUDA is a superset)

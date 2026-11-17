@@ -4,7 +4,7 @@ dynamic = ["version"]
 description = "Java language plugin for Auryn: a fast tree-sitter-java engine extracting packages/classes/interfaces/enums/records/methods/fields/params, the type hierarchy (EXTENDS/IMPLEMENTS), and calls. A deep pass (Eclipse JDT / javac symbol resolution) is the planned second phase."
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     "tree-sitter>=0.26.0",
