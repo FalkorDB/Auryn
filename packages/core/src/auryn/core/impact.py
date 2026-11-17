@@ -71,17 +71,21 @@ def git_diff(repo_dir: str, base: str | None = None, head: str | None = None, *,
     given, `base` vs the working tree if only base, staged changes with `staged=True`, else all
     uncommitted changes vs HEAD. Raises CalledProcessError if git fails."""
     cmd = ["git", "-C", repo_dir, "diff", "-U0", "--no-color"]
-    # `base`/`head` come from the caller (the impact_of_diff MCP tool, --base/--head). End option
-    # parsing before them so a value starting with `-` fails as a bad revision instead of running
-    # as a git option (`--output=<file>` would overwrite that file). `--end-of-options`: git >= 2.24.
     if base and head:
-        cmd += ["--end-of-options", base, head]
+        cmd += [base, head]
     elif base:
-        cmd += ["--end-of-options", base]
+        cmd += [base]
     elif staged:
         cmd += ["--staged"]
     else:
         cmd += ["HEAD"]
+    # `base`/`head` come from the caller (the impact_of_diff MCP tool, --base/--head). One that
+    # starts with `-` would run as a git option (`--output=<file>` overwrites that file), so it is
+    # refused here the way git refuses any other bad revision. Checked in Python rather than with
+    # git's `--end-of-options`: that flag needs git 2.24, and this must hold on any git.
+    for rev in (base, head):
+        if rev and rev.startswith("-"):
+            raise subprocess.CalledProcessError(129, cmd, stderr=f"fatal: bad revision '{rev}'")
     return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
 
 

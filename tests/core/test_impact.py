@@ -48,25 +48,29 @@ def test_parse_multiple_hunks_and_files():
     assert changed["b.py"] == [(5, 5)]  # +5,0 deletion -> anchored at 5
 
 
-def test_git_diff_never_runs_a_ref_as_an_option(tmp_path):
+def test_git_diff_never_runs_a_ref_as_an_option(tmp_path, monkeypatch):
     """`base` / `head` arrive from the caller; one that starts with `-` must fail as a bad
-    revision, not run as a git option (`--output=<file>` would write that file). A real ref
-    still diffs."""
+    revision, not run as a git option (`--output=<file>` would write that file). It is refused
+    before git is started, and without `--end-of-options`, which git only has from 2.24 -- on an
+    older git that flag failed every diff. A real ref still diffs."""
     r = tmp_path / "repo"
     r.mkdir()
     def git(*a): subprocess.run(["git", "-C", str(r), *a], check=True, capture_output=True)
     git("init"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
     (r / "m.py").write_text("def f():\n    return 1\n")
     git("add", "."); git("commit", "-m", "init")
+    diffs, real_run = [], subprocess.run
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (diffs.append(cmd) if "diff" in cmd else None) or real_run(cmd, **kw))
     victim = tmp_path / "victim.txt"
     for kwargs in ({"base": f"--output={victim}"}, {"base": "HEAD", "head": f"--output={victim}"}):
         with pytest.raises(subprocess.CalledProcessError):
             git_diff(str(r), **kwargs)
-    assert not victim.exists()
+    assert not victim.exists() and diffs == []
 
     (r / "m.py").write_text("def f():\n    return 2\n")
     assert "+    return 2" in git_diff(str(r), base="HEAD")
     assert git_diff(str(r), base="HEAD", head="HEAD") == ""
+    assert len(diffs) == 2 and not any("--end-of-options" in cmd for cmd in diffs)
 
 
 def test_git_diff_roundtrip(tmp_path):

@@ -79,7 +79,7 @@ Find a path between any two symbols and the viewer shows every hop, with the edg
 
 The codegraph persists at `<path>/.auryn/graph.db`, so re-running reuses it.
 
-> **Requirements:** Python ≥ 3.12 and git ≥ 2.24. `falkordb-auryn` includes every language plugin out of the box. The in-process database is fetched automatically on first `auryn quickstart` on macOS and Linux (recent glibc). On native Windows or older-glibc Linux, point at a remote FalkorDB with `auryn install --backend remote`. Add live-DB drivers with `"falkordb-auryn[all]"`. For an isolated tool install, include the DB up front: `uv tool install "falkordb-auryn[embedded]"`. From a clone: `uv sync`, then `uv run auryn quickstart`.
+> **Requirements:** Python ≥ 3.12. `falkordb-auryn` includes every language plugin out of the box. The in-process database is fetched automatically on first `auryn quickstart` on macOS and Linux (recent glibc). On native Windows or older-glibc Linux, point at a remote FalkorDB with `auryn install --backend remote`. Add live-DB drivers with `"falkordb-auryn[all]"`. For an isolated tool install, include the DB up front: `uv tool install "falkordb-auryn[embedded]"`. From a clone: `uv sync`, then `uv run auryn quickstart`.
 
 ## Connect your agent
 

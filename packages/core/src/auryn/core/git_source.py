@@ -52,6 +52,15 @@ def cache_home() -> Path:
     return Path(env) if env else DEFAULT_CACHE_ROOT
 
 
+def refuse_option_like(rev: str) -> None:
+    """Refuse a revision git would read as an option -- `--output=<file>` makes `git diff`
+    overwrite that file -- with the error git raises for any other bad revision. Checked here
+    rather than with git's `--end-of-options`: that flag only exists from git 2.24, and this has
+    to hold with whatever git is installed."""
+    if rev.startswith("-"):
+        raise git.GitCommandError(("git", "diff", rev), 129, f"fatal: bad revision '{rev}'")
+
+
 def parse_name_status(out: str, suffix: str) -> dict:
     """Parse `git diff --name-status -M` output into {modified, added, deleted, renamed} of
     `suffix` paths -- shared by GitRepoCache (commit-to-commit) and the working-tree source
@@ -219,8 +228,9 @@ class GitRepoCache:
         orchestrator intersects these paths with the live file listing (which is filtered),
         so an excluded or already-gone path simply drops out there."""
         repo = git.Repo(str(self._path))
-        # --end-of-options: `old_sha` is read back from the graph -- never let it run as an option.
-        out = repo.git.diff("-M", "--name-status", "--end-of-options", old_sha, new_sha)
+        for sha in (old_sha, new_sha):  # `old_sha` is read back from the graph: never an option
+            refuse_option_like(sha)
+        out = repo.git.diff("-M", "--name-status", old_sha, new_sha)
         return parse_name_status(out, suffix)
 
     def materialize(self, sha: str, dest_dir: Path) -> None:
