@@ -8,7 +8,9 @@ async function req(url, options) {
   if (!res.ok) {
     const msg = (data && data.error) || `${res.status} ${res.statusText}`;
     const err = new Error(msg);
-    err.status = res.status;  // lets a caller tell a refusal (4xx) from a failure (5xx)
+    // The viewer can't sync this project at all (see _sync_blocker in viewer/app.py), as
+    // opposed to a request that failed: `error` is the reason to show.
+    err.syncUnavailable = Boolean(data && data.sync_unavailable);
     throw err;
   }
   return data;

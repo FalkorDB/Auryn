@@ -100,7 +100,7 @@ def test_git_projects_endpoint_says_which_projects_the_viewer_cannot_sync(origin
     projects = {p["id"]: p for p in client.get(f"/api/graphs/{graph_name}/git-projects").get_json()}
 
     assert "sync_unavailable" not in projects["csharp://Widgets"]
-    assert "plain folder" in projects["python://sample"]["sync_unavailable"]
+    assert "isn't the root of a git repository" in projects["python://sample"]["sync_unavailable"]
     assert "C# projects only" in projects["python://Widgets"]["sync_unavailable"]
 
 
@@ -121,7 +121,35 @@ def test_git_refs_and_git_sync_refuse_a_project_the_viewer_cannot_sync(
     for resp in (refs, synced):
         assert resp.status_code == 400
         assert resp.get_json()["error"] == listed[project_id]["sync_unavailable"]  # one reason, everywhere
+        assert resp.get_json()["sync_unavailable"] is True  # a refusal, told apart from a failed request
     assert graph.query("MATCH (n) RETURN count(n)").result_set == before  # nothing was synced
+
+
+@pytest.mark.parametrize("repo_uri", [
+    "https://github.com/org/Widgets.git", "git@github.com:org/Widgets.git", ".", "../Widgets", "/gone/Widgets",
+    "/tmp/has\x00nul",
+])
+def test_a_csharp_project_the_viewer_cannot_judge_is_not_refused(repo_uri, tmp_path, monkeypatch):
+    """Only an absolute path that exists can be called "not a git repository" from here. A remote
+    or scp-style URI is git's to open; a relative path (`auryn ingest repo .` stores it as given)
+    was relative to where the ingest ran -- judged against the viewer's own folder, a real C# git
+    project lost its Sync. And a path git can't even open must not turn the listing into a 500."""
+    from auryn.viewer.app import _sync_blocker
+
+    monkeypatch.chdir(tmp_path)  # a plain folder: `.` must not be probed here
+    assert _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": repo_uri}}) is None
+
+
+def test_sync_blocker_names_a_subfolder_of_a_repo_and_a_missing_source(origin_repo):
+    from auryn.viewer.app import _sync_blocker
+
+    subfolder = origin_repo[0] / "src"
+    subfolder.mkdir(exist_ok=True)
+    inside = _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": str(subfolder)}})
+    assert "isn't the root of a git repository" in inside
+
+    for empty in ("", None):
+        assert "No source is recorded" in _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": empty}})
 
 
 def test_git_projects_endpoint_unknown_graph_returns_404(falkordb_connection):

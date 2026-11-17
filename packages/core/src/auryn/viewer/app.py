@@ -6,6 +6,8 @@ fetch, to list current branches/tags) but still never touches FalkorDB."""
 
 from __future__ import annotations
 
+import os
+
 import git
 from falkordb import FalkorDB
 from flask import Flask, jsonify, request
@@ -21,13 +23,22 @@ def _sync_blocker(project: dict) -> str | None:
     repository. Not a project indexed from a plain folder -- what `auryn quickstart` shows first:
     there is no branch or tag to move it to -- and not another language's, which the C# sync
     would quietly ingest a second time, as C#."""
-    try:
-        git.Repo(project["properties"].get("repo_uri") or "")
-    except git.InvalidGitRepositoryError:  # a folder that exists but isn't a repository
-        return ("Indexed from a plain folder, not a git repository: there is no branch or tag "
-                "to sync to. Re-ingest the folder to refresh the graph.")
-    except git.NoSuchPathError:  # a remote URI (or a path that is gone): git itself will tell
-        pass
+    uri = project["properties"].get("repo_uri") or ""
+    if not uri:
+        return "No source is recorded for this project, so there is nothing to sync from."
+    # Only an ABSOLUTE local path can be judged from here. A relative one (`auryn ingest repo .`
+    # stores it as given) was relative to where the ingest ran, not to this viewer; a remote URI
+    # is git's to open.
+    path = os.path.expanduser(uri)
+    if os.path.isabs(path):
+        try:
+            with git.Repo(path):
+                pass
+        except git.InvalidGitRepositoryError:  # a folder that exists but isn't a repository's root
+            return ("Indexed from a folder that isn't the root of a git repository: there is no "
+                    "branch or tag to sync to. Re-ingest the folder to refresh the graph.")
+        except Exception:  # noqa: BLE001 -- gone, unreadable, malformed: the sync itself will tell
+            pass
     if not str(project["id"]).startswith("csharp://"):
         return "Sync from the viewer handles C# projects only. Re-ingest this one to refresh the graph."
     return None
@@ -235,7 +246,7 @@ def create_app(client: FalkorDB) -> Flask:
             return jsonify({"error": "this Project node has no repo_uri -- it wasn't created by git-sync"}), 400
         blocker = _sync_blocker(project)
         if blocker:
-            return jsonify({"error": blocker}), 400
+            return jsonify({"error": blocker, "sync_unavailable": True}), 400
 
         try:
             refs = GitRepoCache(repo_uri, repos_cache_dir()).list_refs()
@@ -268,7 +279,7 @@ def create_app(client: FalkorDB) -> Flask:
             return jsonify({"error": "this Project node has no repo_uri -- it wasn't created by git-sync"}), 400
         blocker = _sync_blocker(project)
         if blocker:
-            return jsonify({"error": blocker}), 400
+            return jsonify({"error": blocker, "sync_unavailable": True}), 400
 
         config = GitCSharpProjectConfig(
             repo_uri=props["repo_uri"],
