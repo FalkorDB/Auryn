@@ -123,10 +123,11 @@ def test_claudecode_deregister_leaves_the_users_own_files_in_the_skill_dir(tmp_p
     assert (skill / "MINE.md").read_text() == "mine"  # theirs: untouched
 
 
-def test_claudecode_deregister_does_not_reach_through_a_symlinked_skill_dir(tmp_path):
+def test_claudecode_never_reaches_through_a_symlinked_skill_dir(tmp_path):
     # After install the user replaces the skill folder with a link to a skill they maintain
-    # elsewhere. Its SKILL.md has the bundled file's name but is theirs -- uninstall must not
-    # follow the link and delete it.
+    # elsewhere. Its SKILL.md has the bundled file's name but is theirs: a re-install must not
+    # copy the bundled skill over it through the link (it still registers the MCP server), and
+    # uninstall must not follow the link and delete it.
     from auryn.core.agents import ClaudeCode
 
     cc = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills")
@@ -140,7 +141,13 @@ def test_claudecode_deregister_does_not_reach_through_a_symlinked_skill_dir(tmp_
     skill.rmdir()
     skill.symlink_to(theirs, target_is_directory=True)
 
+    reinstalled = cc.register(["PY", "-m", "auryn", "mcp"])
+    assert reinstalled.skill_path is None and reinstalled.server_name == "auryn"
+    assert [p.name for p in theirs.iterdir()] == ["SKILL.md"]
+    assert (theirs / "SKILL.md").read_text() == "mine"
+
     cc.deregister(reg)
+    cc.deregister(reinstalled)
     assert (theirs / "SKILL.md").read_text() == "mine"
 
 
@@ -463,6 +470,19 @@ def test_agents_md_deregister_keeps_file_when_it_predated_us(tmp_path):
     assert md.exists() and md.read_text() == "# Preexisting\n"
 
 
+def test_mcp_config_agent_treats_a_null_servers_map_as_absent(tmp_path):
+    # `"mcpServers": null` holds nothing to preserve, unlike a map of another shape: merge into
+    # it as if the key weren't there, and keep the rest of the file.
+    from auryn.core.agents import McpConfigAgent
+
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text('{"mcpServers": null, "note": 1}')
+    McpConfigAgent("cursor", tmp_path, cfg).register(["cairn", "mcp"])
+
+    data = json.loads(cfg.read_text())
+    assert data["note"] == 1 and data["mcpServers"]["auryn"]["command"] == "cairn"
+
+
 def test_agents_md_deregister_keeps_an_empty_file_that_predated_us(tmp_path):
     # "Predated us" holds for an EMPTY file too: with only our section left it looked like a file
     # install had created, and was deleted. Also after a re-install in between.
@@ -477,15 +497,19 @@ def test_agents_md_deregister_keeps_an_empty_file_that_predated_us(tmp_path):
     assert md.exists() and md.read_text() == ""
 
 
-def test_agents_md_deregister_removes_a_file_install_created(tmp_path):
+@pytest.mark.parametrize("editor_added_a_bom", [False, True])
+def test_agents_md_deregister_removes_a_file_install_created(tmp_path, editor_added_a_bom):
     # ...while a file that exists only because install wrote it is removed again -- also after a
-    # re-install in between (the block is still the file's first byte).
+    # re-install in between (the block is still the file's first byte), and also when an editor
+    # has since put a byte-order mark in front of it.
     from auryn.core.agents import AgentsMdAgent
 
     md = tmp_path / "AGENTS.md"
     agent = AgentsMdAgent("agents-md", md)
     agent.register(["cairn", "mcp"])
     reg = agent.register(["cairn", "mcp"])  # re-run of install
+    if editor_added_a_bom:
+        md.write_text("\ufeff" + md.read_text())
     agent.deregister(reg)
     assert not md.exists()
 

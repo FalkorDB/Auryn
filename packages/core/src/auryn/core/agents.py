@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -32,6 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from auryn.core.app_config import AgentRegistration
+
+logger = logging.getLogger("auryn.agents")
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess]
 
@@ -97,6 +100,11 @@ class ClaudeCode:
             raise RuntimeError(f"`claude mcp add` failed: {(added.stderr or added.stdout).strip()}")
 
         dest = self._skills_root() / _SKILL_NAME
+        if dest.is_symlink():
+            # The user pointed the skill at a folder of their own (see _remove_skill): a copy would
+            # go through the link and replace their files. The MCP server is registered regardless.
+            logger.warning("Kept your own skill at %s (a symlink); the bundled one was not copied", dest)
+            return AgentRegistration(name=self.name, scope="user", server_name=_SERVER_NAME)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(_skill_source(), dest, dirs_exist_ok=True)
         return AgentRegistration(name=self.name, scope="user", server_name=_SERVER_NAME, skill_path=str(dest))
@@ -189,7 +197,9 @@ class McpConfigAgent:
 
     def register(self, server_command: list[str]) -> AgentRegistration:
         data = _read_config(self.config_path)
-        servers = data.setdefault(self.servers_key, {})
+        servers = data.get(self.servers_key)
+        if servers is None:  # absent, or an explicit `null`: nothing there to preserve
+            servers = data[self.servers_key] = {}
         if not isinstance(servers, dict):  # some other shape: not ours to replace with an empty map
             raise RuntimeError(f"{self.config_path}: `{self.servers_key}` is not an object; refusing to overwrite it")
         entry = {"command": server_command[0], "args": list(server_command[1:])}
@@ -356,10 +366,15 @@ class AgentsMdAgent:
             return
         text = path.read_text()
         stripped = _strip_md_section(text)
-        if stripped.strip():
+        # A byte-order mark an editor added since is not content: without this a file we created
+        # would be kept, holding nothing but the mark.
+        if stripped.lstrip("\ufeff").strip():
             path.write_text(stripped.rstrip("\n") + "\n")
-        elif text.startswith(_AGENTS_MD_BEGIN):
-            path.unlink()  # file held only our section, from its first byte (we created it) -> remove it
+        elif text.lstrip("\ufeff").startswith(_AGENTS_MD_BEGIN):
+            # The file held only our section, from its first byte (we created it) -> remove it.
+            # An EMPTY file that an older version merged into looks the same -- that version kept
+            # nothing to tell the two apart -- and is removed too.
+            path.unlink()
         else:
             path.write_text("")  # an empty file that predated us (see _merge_md_section): still the user's
 
