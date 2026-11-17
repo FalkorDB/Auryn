@@ -509,7 +509,7 @@ def test_agents_md_deregister_removes_a_file_install_created(tmp_path, editor_ad
     agent.register(["cairn", "mcp"])
     reg = agent.register(["cairn", "mcp"])  # re-run of install
     if editor_added_a_bom:
-        md.write_text("\ufeff" + md.read_text())
+        md.write_text("\ufeff" + md.read_text(encoding="utf-8"), encoding="utf-8")
     agent.deregister(reg)
     assert not md.exists()
 
