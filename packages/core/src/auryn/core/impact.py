@@ -73,13 +73,16 @@ def git_toplevel(path: str) -> str:
     ).stdout.strip()
 
 
-def git_diff(repo_dir: str, base: str | None = None, head: str | None = None, *, staged: bool = False) -> str:
+def git_diff(repo_dir: str, base: str | None = None, head: str | None = None, *, staged: bool = False,
+             relative: bool = False) -> str:
     """Unified diff (`-U0`, exact changed lines) for the requested range: `base..head` if both
     given, `base` vs the working tree if only base, staged changes with `staged=True`, else all
-    uncommitted changes vs HEAD. Paths are relative to `repo_dir` and limited to it (`--relative`):
-    a graph indexed from a subfolder of a repository stores its paths relative to that subfolder.
-    Raises CalledProcessError if git fails."""
-    cmd = ["git", "-C", repo_dir, "diff", "-U0", "--no-color", "--relative"]
+    uncommitted changes vs HEAD. Paths are relative to the top of the repository, wherever in it
+    `repo_dir` is. `relative=True` is for a caller that has resolved `repo_dir` to the folder its
+    graph was indexed from: paths are then relative to that folder, and the diff is limited to
+    it -- a graph indexed from a subfolder stores its paths that way. Raises CalledProcessError
+    if git fails."""
+    cmd = ["git", "-C", repo_dir, "diff", "-U0", "--no-color", *(["--relative"] if relative else [])]
     if base and head:
         cmd += [base, head]
     elif base:

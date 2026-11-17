@@ -193,17 +193,28 @@ def test_impact_cli_git_errors_are_one_clean_line(tmp_path, monkeypatch):
         assert len(message.splitlines()) == 1 and "Traceback" not in message
 
 
-def test_git_diff_paths_are_relative_to_the_folder_it_runs_in(tmp_path):
-    """A graph indexed from a subfolder of a repository stores `a.py`, not `service/a.py`: the
-    diff taken there has to speak the same paths, or no changed symbol is ever found and the
-    gate passes. From the repository's top the paths are what they always were."""
+def test_impact_speaks_the_paths_of_a_graph_indexed_from_a_subfolder(tmp_path, monkeypatch):
+    """A graph indexed from a subfolder of a repository stores `a.py`, not `service/a.py`. The
+    command diffs relative to the indexed folder, or no changed symbol is ever found and the gate
+    passes. `git_diff` itself keeps repository paths unless asked: its other callers (the MCP
+    tool, the edit hook) may sit in a subfolder of a repo that was indexed from its top."""
+    from auryn.core.app_config import RepoRegistration, register_repo
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
     r = _repo_with_a_change(tmp_path / "repo")
     (r / "service").mkdir()
     (r / "service" / "a.py").write_text("def g():\n    return 1\n")
     subprocess.run(["git", "-C", str(r), "add", "."], check=True)
 
-    assert sorted(parse_unified_diff(git_diff(str(r / "service")))[0]) == ["a.py"]
-    assert sorted(parse_unified_diff(git_diff(str(r)))[0]) == ["m.py", "service/a.py"]
+    assert sorted(parse_unified_diff(git_diff(str(r / "service"), relative=True))[0]) == ["a.py"]
+    assert sorted(parse_unified_diff(git_diff(str(r / "service")))[0]) == ["m.py", "service/a.py"]
+
+    register_repo(RepoRegistration(local_dir=str((r / "service").resolve()), graph_name="svc"))
+    selected, analysed = _stub_the_graph(monkeypatch, indexed=["svc"])
+    res = CliRunner().invoke(cli, ["impact", "--json", "--path", str(r / "service")])
+
+    assert res.exit_code == 0, res.output
+    assert (selected, analysed) == (["svc"], [["a.py"]])
 
 
 # -- impact_of_diff (integration) ------------------------------------------------------------

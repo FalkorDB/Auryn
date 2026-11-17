@@ -269,7 +269,7 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
         chain = [target, *target.parents]
         registered = {r.local_dir for r in load_config().repos}
         root = next((d for d in chain[:chain.index(top) + 1] if str(d) in registered), top)
-        diff = impact_mod.git_diff(str(root), base, head, staged=staged)
+        diff = impact_mod.git_diff(str(root), base, head, staged=staged, relative=True)
     except subprocess.CalledProcessError as e:
         reason = ((e.stderr or "").strip().splitlines() or [str(e)])[0]  # git's own first line
         raise click.ClickException(f"couldn't compute git diff in {target}: {reason}") from e
