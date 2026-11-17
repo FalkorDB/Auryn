@@ -304,4 +304,4 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
     assert not [e for e in _edges_of(items, "CALLS") if "test_shadowed" in str(e.from_key["id"])]
     top_level = {str(e.to_key["id"]) for e in _edges_of(items, "CALLS")
                  if e.from_key["id"] == "python://demo/module/tests.test_core"}
-    assert top_level and not any("helper" in callee for callee in top_level)  # `object()` only
+    assert [callee.rsplit("::", 1)[-1] for callee in top_level] == ["object"]  # `object()`, nothing else
