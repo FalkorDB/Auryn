@@ -1,0 +1,3 @@
+# `git archive` and GitHub's source ZIPs carry no git history: this fills in the commit and the
+# nearest tag there, so a build from one still gets its real version (see [tool.hatch.version]).
+.git_archival.txt  export-subst

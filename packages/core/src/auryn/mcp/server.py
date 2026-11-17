@@ -35,6 +35,7 @@ from auryn.core import usage
 from auryn.core.embeddings import get_embedder, hybrid_search
 from auryn.core.graph_client import GraphWriter
 from auryn.core.project import resolve_project_root
+from auryn.core.version import installed
 
 INSTRUCTIONS = """\
 Curated tools over the FalkorDB **code graphs** built by the `auryn` project across every
@@ -106,7 +107,7 @@ def create_server(client: FalkorDB, graph_name: str) -> MCPServer:
     graphs: dict[str, Any] = {default_name: client.select_graph(default_name)}
     state = {"name": default_name}  # the session default; use_graph mutates it
 
-    server = MCPServer(name="auryn", instructions=INSTRUCTIONS, version="0.2.0")
+    server = MCPServer(name="auryn", instructions=INSTRUCTIONS, version=installed())
 
     read_only = ToolAnnotations(read_only_hint=True)
     writes = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True)

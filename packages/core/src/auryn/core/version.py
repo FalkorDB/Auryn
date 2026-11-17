@@ -3,7 +3,8 @@
 Versions are derived from git at build time (hatch-vcs, see the pyproject files): a release tag
 gives a plain version (`0.3.0`); any other commit gives `<next>.dev<N>+g<sha>`, and a build of a
 modified tree appends `.d<UTC timestamp>`. So the version alone says which commit -- and whether a
-modified tree -- an install came from. A release, or a build made without git, names no commit.
+modified tree -- an install came from. A release names no commit. Neither does a build from a
+source tree with no git history and no archive metadata, which falls back to `0.0.0`.
 """
 
 from __future__ import annotations
@@ -33,10 +34,16 @@ def parse(version: str) -> dict:
     return {"commit": m["sha"], "modified": bool(ts), "built": built}
 
 
+def installed() -> str:
+    """The installed `auryn-core` version -- what `auryn --version` and the MCP server report --
+    or "unknown" when there is no package metadata (code run straight from a source tree)."""
+    return _dist_version("auryn-core") or "unknown"
+
+
 def describe() -> str:
     """The `auryn --version` line: the installed `auryn-core` version, plus the commit (and the
     build time of a modified tree) when the version carries them."""
-    core = _dist_version("auryn-core") or "unknown"
+    core = installed()
     info = parse(core)
     if not info["commit"]:
         return f"auryn {core}"

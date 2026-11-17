@@ -42,6 +42,17 @@ def test_describe_without_git_metadata_is_the_version_only(monkeypatch):
     assert version.describe() == "auryn 0.3.0"
 
 
+def test_the_mcp_server_reports_the_installed_version(monkeypatch):
+    """It announced a hard-coded `0.2.0` to every client, whatever was installed."""
+    from types import SimpleNamespace
+
+    from auryn.mcp import server
+
+    monkeypatch.setattr(server, "installed", lambda: "0.8.2.dev4+gabc1234")
+    mcp = server.create_server(SimpleNamespace(select_graph=lambda name: None), "g")
+    assert mcp.version == "0.8.2.dev4+gabc1234"
+
+
 def test_cli_version_flag_prints_and_exits():
     """Eager: no subcommand is needed (or run), and the line is exactly `describe()`."""
     from auryn.cli import cli

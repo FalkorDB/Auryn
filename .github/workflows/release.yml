@@ -101,7 +101,10 @@ jobs:
           # form (`0.4.0-rc.1` -> `0.4.0rc1`).
           versions=$(ls -1 dist | sed -E 's/^.+-([^-]+)(-py3-none-any\.whl|\.tar\.gz)$/\1/' | sort -u)
           echo "version(s) built: $versions"
-          test "$(echo "$versions" | wc -l)" -eq 1 || { echo "::error::built more than one version"; exit 1; }
+          if [ "$(echo "$versions" | wc -l)" -ne 1 ]; then
+            ls -1 dist | sed -E 's/^(.+)-([^-]+)(-py3-none-any\.whl|\.tar\.gz)$/\2  &/' | sort
+            echo "::error::built more than one version"; exit 1
+          fi
 
       - name: Select a single project for pending publisher bootstrap
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap_project != '' }}
