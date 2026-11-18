@@ -156,6 +156,27 @@ def test_claudecode_always_load_write_failure_is_non_fatal(tmp_path, monkeypatch
     assert reg.skill_path  # ...yet register still completed despite the write failure
 
 
+def test_claudecode_always_load_skips_when_config_changed_mid_patch(tmp_path, monkeypatch):
+    # Claude Code also writes ~/.claude.json during sessions, and the alwaysLoad patch rewrites the
+    # WHOLE file. If it changes between our snapshot read and the write, skip rather than clobber the
+    # concurrent writer (the server just stays deferred). Narrows the read-modify-write race.
+    from auryn.core import agents
+
+    cfg = tmp_path / "claude.json"
+    snapshot = json.dumps({"mcpServers": {"auryn": {"command": "PY"}}})
+    cfg.write_text(snapshot)
+    changed = json.dumps({"mcpServers": {"auryn": {"command": "PY"}, "other": {"command": "X"}}})
+
+    # Snapshot read returns the original; the re-read just before writing sees a concurrent change.
+    seq = [snapshot, changed]
+    monkeypatch.setattr(agents.Path, "read_text", lambda self, *a, **k: seq.pop(0) if seq else changed)
+    writes = []
+    monkeypatch.setattr(agents, "_write_config", lambda p, d: writes.append(d))
+
+    agents.ClaudeCode(run=_ok, skills_dir=tmp_path / "skills", config_path=cfg)._enable_always_load()
+    assert not writes, "the whole-file rewrite must be skipped when the config changed under us"
+
+
 def test_claudecode_config_path_honors_claude_config_dir(tmp_path, monkeypatch):
     # `claude mcp add` writes to $CLAUDE_CONFIG_DIR/.claude.json when that env is set, so the
     # alwaysLoad patch must target the same file -- not ~/.claude.json (a possibly-unrelated profile).
@@ -177,16 +198,23 @@ def test_write_config_preserves_mode_and_is_clean(tmp_path):
     import stat
     from auryn.core.agents import _write_config
 
+    # The mode-bit assertions are POSIX-only: native Windows chmod honors just the read-only bit, so
+    # S_IMODE reports a writable file as 0o666, not 0o600. Gate them by platform (the file content /
+    # no-stray-temp checks still run everywhere); Windows access control would be a separate check.
+    posix = os.name == "posix"
+
     existing = tmp_path / "cfg.json"
     existing.write_text("{}")
     os.chmod(existing, 0o600)
     _write_config(existing, {"mcpServers": {"auryn": {"alwaysLoad": True}}})
-    assert stat.S_IMODE(existing.stat().st_mode) == 0o600
+    if posix:
+        assert stat.S_IMODE(existing.stat().st_mode) == 0o600
     assert json.loads(existing.read_text())["mcpServers"]["auryn"]["alwaysLoad"] is True
 
     new = tmp_path / "new.json"
     _write_config(new, {"x": 1})
-    assert stat.S_IMODE(new.stat().st_mode) == 0o600
+    if posix:
+        assert stat.S_IMODE(new.stat().st_mode) == 0o600
     assert not list(tmp_path.glob("*.tmp"))  # no leftover temp files
 
 

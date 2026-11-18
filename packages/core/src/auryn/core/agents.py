@@ -95,9 +95,15 @@ class ClaudeCode:
         unknown field, so writing it is harmless either way."""
         path = self._claude_config()
         try:
-            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
-        except (ValueError, OSError):
-            return  # missing / unparseable / unreadable -> leave it; don't clobber what we can't round-trip
+            raw = path.read_text(encoding="utf-8") if path.exists() else None
+        except OSError:
+            return  # unreadable -> leave it; don't clobber what we can't round-trip
+        if raw is None:
+            return  # missing -> nothing to patch
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return  # unparseable -> leave it; don't clobber what we can't round-trip
         if not isinstance(data, dict):
             return
         servers = data.get(_MCP_SERVERS_KEY)
@@ -105,7 +111,14 @@ class ClaudeCode:
         if isinstance(entry, dict) and entry.get("alwaysLoad") is not True:
             entry["alwaysLoad"] = True
             try:
-                _write_config(path, data)
+                # Re-read immediately before the whole-file replace: Claude Code also writes
+                # ~/.claude.json during sessions, and _write_config rewrites the ENTIRE file. If it
+                # changed since the snapshot above, a concurrent writer (e.g. `claude mcp add`)
+                # committed in between -- skip rather than clobber it (the server just stays deferred,
+                # which the best-effort design accepts). Narrows the race to the re-read..replace
+                # window; it does not eliminate it.
+                if path.read_text(encoding="utf-8") == raw:
+                    _write_config(path, data)
             except OSError:
                 pass  # best-effort: a failed patch must never abort registration
 
