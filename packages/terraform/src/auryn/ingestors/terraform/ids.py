@@ -32,8 +32,9 @@ def resource_id(proj_id: str, module_dir: str, address: str) -> str:
 
 
 def database_id(proj_id: str, module_dir: str, address: str) -> str:
-    # Keyed off the (unique) resource id with a `#` marker -- which can't appear in a module dir -- so a
-    # provisioned node never collides with a nested-module `Resource` that happens to share the path.
+    # Keyed off the (unique) resource id with a `#` suffix. A Terraform ADDRESS never contains `#`, so
+    # `<resource_id>#database` can never equal some other resource's plain id -- the provisioned node
+    # can't collide with a `Resource`, even one in a module dir that itself contains a `#`.
     return f"{resource_id(proj_id, module_dir, address)}#database"
 
 

@@ -68,9 +68,40 @@ def test_nested_image_attribute_is_found():
 
 
 def test_interpolated_image_uri_is_kept():
-    # an `image_uri` built from an ECR reference must still produce an (unresolved) Image, not vanish
+    # an `image_uri` built from an ECR reference must still produce an (unresolved) Image, not vanish --
+    # and the WHOLE ref is kept (dropping the `:1.0` tag or returning an extra image is a regression)
     p = parse_source('resource "aws_apprunner_service" "s" { image_uri = "${aws_ecr_repository.r.url}:1.0" }')
-    assert any("$" in img for img in p.blocks[0].images)
+    assert p.blocks[0].images == ("${aws_ecr_repository.r.url}:1.0",)
+
+
+def test_interpolated_image_in_blob_is_kept():
+    # an interpolated image inside a container_definitions jsonencode blob must survive too (the blob
+    # extractor used to reject any `${...}` value)
+    p = parse_source(
+        'resource "aws_ecs_task_definition" "api" {\n'
+        '  container_definitions = jsonencode([{ name = "api", image = "${aws_ecr_repository.r.url}:1.0" }])\n}\n'
+    )
+    assert p.blocks[0].images == ("${aws_ecr_repository.r.url}:1.0",)
+
+
+def test_container_typed_resource_collects_top_level_image():
+    # the Docker provider's `docker_container` has a bare top-level `image` and NO nested container
+    # block -- the resource TYPE is what marks the context
+    p = parse_source('resource "docker_container" "c" { image = "nginx:1.25" }')
+    assert p.blocks[0].images == ("nginx:1.25",)
+
+
+def test_container_substring_key_does_not_enable_image_context():
+    # a key that merely CONTAINS "container" (e.g. `container_owner`) must NOT turn on the container
+    # context and mis-collect a nested `image`
+    p = parse_source('resource "aws_x" "y" { metadata = { container_owner = { image = "example/app:1" } } }')
+    assert p.blocks[0].images == ()
+
+
+def test_quoted_literal_argument_is_not_a_reference():
+    # a string ARGUMENT inside an interpolation that looks like an address must not fabricate a ref
+    p = parse_source('resource "aws_x" "y" { v = "${lookup(local.m, "aws_iam_role.exec")}" }')
+    assert p.blocks[0].refs == ()
 
 
 def test_vm_boot_disk_image_is_not_a_container_image():

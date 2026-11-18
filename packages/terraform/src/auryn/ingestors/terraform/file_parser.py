@@ -19,29 +19,77 @@ from auryn.ingestors.terraform.model import Block, ParsedTf
 _REF = re.compile(
     r"(?<![\w.])(module\.[A-Za-z_][\w-]*|data\.[A-Za-z_]\w*\.[A-Za-z_][\w-]*|[A-Za-z_]\w*_[A-Za-z_]\w*\.[A-Za-z_][\w-]*)"
 )
-# `image = "x"` / `"image": "x"` inside an attribute (e.g. a container_definitions jsonencode blob).
-_IMAGE = re.compile(r'"?image(?:_uri)?"?\s*[:=]\s*"([^"${}\s]+)"')
+# `image = "x"` / `"image": "x"` inside a serialized blob (e.g. a container_definitions jsonencode).
+# The value may itself be an interpolation (`"${ecr_url}:tag"`) -- keep it whole; the shared
+# `image_node` flags it unresolved. It is bounded by the surrounding quotes, so stop only at a quote
+# or whitespace (an image ref never contains either).
+_IMAGE = re.compile(r'"?image(?:_uri)?"?\s*[:=]\s*"([^"\s]+)"')
 
 
 def _interpolations(s: str):
-    """Yield the CONTENT of each top-level `${...}` in `s`, brace-BALANCED (so
-    `${lookup({}, aws_x.y.z)}` keeps the whole expression) and skipping an escaped `$${` (which
-    Terraform treats as a literal `${`). References live only here -- a quoted string literal like
-    `"aws_x.y"` is NOT an interpolation and must not fabricate a reference."""
+    """Yield the CONTENT of each top-level `${...}` in `s`, brace-BALANCED and QUOTE-aware (so a
+    `}` inside a quoted argument -- `${lookup(x, "a}b")}` -- does not end the interpolation early)
+    and skipping an escaped `$${` (which Terraform treats as a literal `${`). References live only
+    here -- a quoted string literal like `"aws_x.y"` is NOT an interpolation and must not fabricate
+    a reference (see `_expr_refs`)."""
     i, n = 0, len(s)
     while i < n - 1:
         if s[i] == "$" and s[i + 1] == "{":
             if i > 0 and s[i - 1] == "$":  # `$${` -> literal, not an interpolation
                 i += 2
                 continue
-            depth, j = 1, i + 2
+            depth, j, in_str, esc = 1, i + 2, False, False
             while j < n and depth:
-                depth += (s[j] == "{") - (s[j] == "}")
+                c = s[j]
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif in_str:
+                    in_str = c != '"'
+                elif c == '"':
+                    in_str = True
+                elif c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
                 j += 1
             yield s[i + 2 : j - 1]
             i = j
         else:
             i += 1
+
+
+def _split_quoted(s: str):
+    """Yield `(segment, is_quoted)` runs of `s`, splitting on double-quoted spans (respecting an
+    escaped `\\"`). A quoted segment is the text BETWEEN the quotes; surrounding expression text
+    comes back as `is_quoted=False`."""
+    i, n, start = 0, len(s), 0
+    while i < n:
+        if s[i] == '"':
+            if i > start:
+                yield s[start:i], False
+            j = i + 1
+            while j < n and s[j] != '"':
+                j += 2 if s[j] == "\\" else 1
+            yield s[i + 1 : j], True
+            i = start = j + 1
+        else:
+            i += 1
+    if start < n:
+        yield s[start:], False
+
+
+def _expr_refs(content: str):
+    """Addresses referenced in an interpolation's EXPRESSION. A quoted string literal is not an
+    expression -- its literal text (even if it looks like `aws_x.y`) can't be a reference -- but a
+    string may embed further `${...}` interpolations, which ARE expressions, so recurse into those."""
+    for seg, quoted in _split_quoted(content):
+        if quoted:
+            for inner in _interpolations(seg):  # a nested ${...} inside the string literal
+                yield from _expr_refs(inner)
+        else:
+            yield from _REF.findall(seg)
 
 
 def _unq(s):
@@ -80,19 +128,29 @@ def _refs(attrs: dict, self_address: str) -> tuple[str, ...]:
     out: dict[str, None] = {}
     for s in _strings(attrs):
         for interp in _interpolations(s):  # only ${...} content, not plain string literals
-            for m in _REF.findall(interp):
+            for m in _expr_refs(interp):   # ... and only the EXPRESSION, not quoted literals within
                 addr = _address(m)
                 if addr != self_address:
                     out.setdefault(addr, None)
     return tuple(out)
 
 
+def _is_container_resource(rtype: str) -> bool:
+    """A resource whose TYPE denotes a container (the Docker provider's `docker_container`) carries a
+    top-level `image` with no nested `containers` block to mark the context -- so its root attributes
+    ARE a container context."""
+    return rtype.endswith("_container")
+
+
 def _collect_image_keys(v, out: dict, in_container: bool = False) -> None:
     """Find CONTAINER image refs at any nesting. `image_uri` (Lambda/App Runner) is container-specific,
-    so collected anywhere; a bare `image` is collected ONLY inside a container context (`containers`
-    block -- Cloud Run's `template.containers.image`), so a VM boot disk's `boot_disk.initialize_params
-    .image` is NOT mistaken for a container image. Interpolated (`${...}`) values are KEPT -- the shared
-    `image_node` flags them unresolved -- so an `image_uri = "${ecr...}:tag"` still gets an Image."""
+    so collected anywhere; a bare `image` is collected ONLY inside a container context -- a `container`
+    / `containers` block (Cloud Run's `template.containers.image`, the k8s provider's `spec...container`)
+    or a container-typed resource root. So a VM boot disk's `boot_disk.initialize_params.image` is NOT
+    mistaken for a container image, and a metadata map keyed `container_owner` does NOT turn the context
+    on (the key must BE `container`/`containers`, not merely contain the word). Interpolated (`${...}`)
+    values are KEPT -- `image_node` flags them unresolved -- so `image_uri = "${ecr...}:tag"` still
+    yields an Image."""
     if isinstance(v, dict):
         for k, x in v.items():
             if _meta_key(k):
@@ -102,16 +160,16 @@ def _collect_image_keys(v, out: dict, in_container: bool = False) -> None:
                 if img:
                     out.setdefault(img, None)
             else:
-                child_container = in_container or (isinstance(k, str) and "container" in k.lower())
+                child_container = in_container or (isinstance(k, str) and k.lower() in ("container", "containers"))
                 _collect_image_keys(x, out, child_container)
     elif isinstance(v, list):
         for x in v:
             _collect_image_keys(x, out, in_container)
 
 
-def _images(attrs: dict) -> tuple[str, ...]:
+def _images(attrs: dict, rtype: str = "") -> tuple[str, ...]:
     out: dict[str, None] = {}
-    _collect_image_keys(attrs, out)                 # image keys at any depth
+    _collect_image_keys(attrs, out, _is_container_resource(rtype))  # image keys at any depth
     for s in _strings(attrs):                       # + images inside a jsonencode/container_definitions blob
         for m in _IMAGE.findall(s):
             out.setdefault(m, None)
@@ -137,7 +195,7 @@ def _blocks(doc: dict, block_type: str) -> list[Block]:
                     attrs = attrs if isinstance(attrs, dict) else {}
                     name = _unq(name)
                     addr = f"{rtype}.{name}" if block_type == "resource" else f"data.{rtype}.{name}"
-                    out.append(Block(block_type, rtype, name, addr, _refs(attrs, addr), _images(attrs)))
+                    out.append(Block(block_type, rtype, name, addr, _refs(attrs, addr), _images(attrs, rtype)))
     return out
 
 
