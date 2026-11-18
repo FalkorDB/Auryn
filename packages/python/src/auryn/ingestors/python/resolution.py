@@ -80,6 +80,7 @@ class _ModCtx:
     idx: "_Index"
     import_map: dict
     local_funcs: set
+    rebound: frozenset  # names the module's top-level code rebinds (RawModule.local_names)
     module_path: str
     module_dotted: str
     oracle: SemanticOracle | None
@@ -295,6 +296,7 @@ def _emit_module(m: RawModule, idx: _Index, oracle: SemanticOracle | None) -> It
         idx=idx,
         import_map={imp.local: imp for imp in m.imports},
         local_funcs={fn.name for fn in m.functions},
+        rebound=frozenset(m.local_names),
         module_path=m.path,
         module_dotted=m.dotted,
         oracle=oracle,
@@ -309,8 +311,7 @@ def _emit_module(m: RawModule, idx: _Index, oracle: SemanticOracle | None) -> It
     # CALLS source for a script's driver code -- the only place a non-callable node originates a
     # CALLS edge. Resolved exactly like a function body (same helper), so a top-level `main()`
     # binds to the project function and a top-level `print()` becomes a builtin placeholder.
-    mod_call_edges, mod_externals, _ = _resolve_scope_calls(
-        m.calls, scope_label, scope_id, ctx, frozenset(m.local_names))
+    mod_call_edges, mod_externals, _ = _resolve_scope_calls(m.calls, scope_label, scope_id, ctx)
     yield from mod_externals
     yield from mod_call_edges
 
@@ -605,9 +606,10 @@ def _resolve_call(call: RawCall, ctx: _ModCtx, local_names: frozenset[str] = fro
             # ast rules instead of dropping an edge the fast pass draws -- they name a callee from
             # its import or its own module, and still surface a bare builtin call. Those rules are
             # module-wide, though: a parameter or local of the calling scope that shadows the name
-            # IS the dynamic case (`def run(client): client.get()`, `db = make(); db.get()`), so
-            # that one stays unresolved.
-            if (call.name if call.is_simple_name else call.receiver) in local_names:
+            # IS the dynamic case (`def run(client): client.get()`, `db = make(); db.get()`), and
+            # so is a name the module's top-level code rebinds (`from pkg import db`, then
+            # `db = make()`) for every scope of that module -- those stay unresolved.
+            if (call.name if call.is_simple_name else call.receiver) in local_names | ctx.rebound:
                 return None
             return _resolve_call_ast(call, ctx)
         target = ctx.idx.callable_by_qname.get(full_name)

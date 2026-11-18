@@ -286,6 +286,10 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
             "    core.helper()\n"
             "\n"
             "\n"
+            "def test_shadowed_by_the_module():\n"
+            "    core.helper()\n"
+            "\n"
+            "\n"
             "core = object()\n"
             "core.helper()\n"
         ),
@@ -299,8 +303,8 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
         "extern://python/notinstalled_lib::fetch": "external",
     }
     # ...but not where the scope's own parameter or local (an assignment, `except ... as`, an
-    # import in the body) shadows the import: that call IS dynamic. Nor at module scope, where
-    # the top-level code rebinds the name.
+    # import in the body) shadows the import: that call IS dynamic. Nor where the top-level code
+    # rebinds the name -- at module scope, or in a function that calls through that global.
     assert not [e for e in _edges_of(items, "CALLS") if "test_shadowed" in str(e.from_key["id"])]
     top_level = {str(e.to_key["id"]) for e in _edges_of(items, "CALLS")
                  if e.from_key["id"] == "python://demo/module/tests.test_core"}
