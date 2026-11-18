@@ -93,7 +93,7 @@ def test_claudecode_register_then_deregister(tmp_path):
         ran.append(cmd)
         return _ok(cmd)
 
-    cc = ClaudeCode(run=run, skills_dir=tmp_path / "skills")
+    cc = ClaudeCode(run=run, skills_dir=tmp_path / "skills", config_path=tmp_path / "claude.json")
     reg = cc.register(["PY", "-m", "auryn", "mcp"])
 
     assert ["claude", "mcp", "add", "-s", "user", "auryn", "--", "PY", "-m", "auryn", "mcp"] in ran
@@ -168,6 +168,136 @@ def test_claudecode_deregister_carries_on_past_a_file_it_cannot_remove(tmp_path,
     cc.deregister(reg)  # does not raise
 
 
+def test_claudecode_register_sets_always_load(tmp_path):
+    # `claude mcp add` can't set alwaysLoad, so register() patches the config it wrote so the
+    # server's tools load into the agent's INITIAL tool list instead of being deferred.
+    from auryn.core.agents import ClaudeCode
+
+    cfg = tmp_path / "claude.json"
+    cfg.write_text(json.dumps({"mcpServers": {"auryn": {"type": "stdio", "command": "PY", "args": ["-m", "auryn", "mcp"]}}}))
+
+    cc = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills", config_path=cfg)
+    cc.register(["PY", "-m", "auryn", "mcp"])
+
+    entry = json.loads(cfg.read_text())["mcpServers"]["auryn"]
+    assert entry["alwaysLoad"] is True  # tools surfaced upfront, not hidden behind tool-search
+    assert entry["command"] == "PY" and entry["args"] == ["-m", "auryn", "mcp"]  # other fields preserved
+
+
+def test_claudecode_register_always_load_is_best_effort(tmp_path):
+    # No config file yet (or an unwritten one) -> register still succeeds; the server just stays
+    # deferred rather than erroring. Also must not clobber an unparseable config.
+    from auryn.core.agents import ClaudeCode
+
+    missing = tmp_path / "nope.json"
+    reg = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills", config_path=missing).register(["PY", "-m", "auryn", "mcp"])
+    assert reg.skill_path and not missing.exists()  # didn't raise, didn't create a bogus file
+
+    junk = tmp_path / "junk.json"
+    junk.write_text("{not json")
+    ClaudeCode(run=_ok, skills_dir=tmp_path / "skills2", config_path=junk).register(["PY", "-m", "auryn", "mcp"])
+    assert junk.read_text() == "{not json"  # left untouched
+
+
+def test_claudecode_always_load_write_failure_is_non_fatal(tmp_path, monkeypatch):
+    # Patching the config is strictly best-effort: if the write raises (read-only / raced fs), the
+    # agent must still register (server stays, tools just deferred) rather than aborting install.
+    from auryn.core import agents
+
+    cfg = tmp_path / "claude.json"
+    cfg.write_text(json.dumps({"mcpServers": {"auryn": {"command": "PY"}}}))
+
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise OSError("read-only fs")
+
+    monkeypatch.setattr(agents, "_write_config", boom)
+    reg = agents.ClaudeCode(run=_ok, skills_dir=tmp_path / "skills", config_path=cfg).register(["PY", "-m", "auryn", "mcp"])
+    assert calls, "the alwaysLoad write must have actually been attempted (failure path exercised)"
+    assert reg.skill_path  # ...yet register still completed despite the write failure
+
+
+def test_claudecode_always_load_skips_when_config_changed_mid_patch(tmp_path, monkeypatch):
+    # Claude Code also writes ~/.claude.json during sessions, and the alwaysLoad patch rewrites the
+    # WHOLE file. If it changes between our snapshot read and the write, skip rather than clobber the
+    # concurrent writer (the server just stays deferred). Narrows the read-modify-write race.
+    from auryn.core import agents
+
+    cfg = tmp_path / "claude.json"
+    snapshot = json.dumps({"mcpServers": {"auryn": {"command": "PY"}}})
+    cfg.write_text(snapshot)
+    changed = json.dumps({"mcpServers": {"auryn": {"command": "PY"}, "other": {"command": "X"}}})
+
+    # Snapshot read returns the original; the re-read just before writing sees a concurrent change.
+    seq = [snapshot, changed]
+    monkeypatch.setattr(agents.Path, "read_text", lambda self, *a, **k: seq.pop(0) if seq else changed)
+    writes = []
+    monkeypatch.setattr(agents, "_write_config", lambda p, d: writes.append(d))
+
+    agents.ClaudeCode(run=_ok, skills_dir=tmp_path / "skills", config_path=cfg)._enable_always_load()
+    assert not writes, "the whole-file rewrite must be skipped when the config changed under us"
+
+
+def test_claudecode_config_path_honors_claude_config_dir(tmp_path, monkeypatch):
+    # `claude mcp add` writes to $CLAUDE_CONFIG_DIR/.claude.json when that env is set, so the
+    # alwaysLoad patch must target the same file -- not ~/.claude.json (a possibly-unrelated profile).
+    from pathlib import Path
+
+    from auryn.core.agents import ClaudeCode
+
+    monkeypatch.delenv("AURYN_CLAUDE_CONFIG", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfgdir"))
+    assert ClaudeCode()._claude_config() == tmp_path / "cfgdir" / ".claude.json"
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    assert ClaudeCode()._claude_config() == Path.home() / ".claude.json"  # falls back to home dir
+
+
+def test_write_config_preserves_mode_and_is_clean(tmp_path):
+    # Security: replacing a 0600 config (may hold MCP env/secrets) must not widen it; a new file is
+    # created owner-only; and no stray temp files are left behind.
+    import os
+    import stat
+    from auryn.core.agents import _write_config
+
+    # The mode-bit assertions are POSIX-only: native Windows chmod honors just the read-only bit, so
+    # S_IMODE reports a writable file as 0o666, not 0o600. Gate them by platform (the file content /
+    # no-stray-temp checks still run everywhere); Windows access control would be a separate check.
+    posix = os.name == "posix"
+
+    existing = tmp_path / "cfg.json"
+    existing.write_text("{}")
+    os.chmod(existing, 0o600)
+    _write_config(existing, {"mcpServers": {"auryn": {"alwaysLoad": True}}})
+    if posix:
+        assert stat.S_IMODE(existing.stat().st_mode) == 0o600
+    assert json.loads(existing.read_text())["mcpServers"]["auryn"]["alwaysLoad"] is True
+
+    new = tmp_path / "new.json"
+    _write_config(new, {"x": 1})
+    if posix:
+        assert stat.S_IMODE(new.stat().st_mode) == 0o600
+    assert not list(tmp_path.glob("*.tmp"))  # no leftover temp files
+
+
+def test_write_config_follows_symlink(tmp_path):
+    # A symlinked config (e.g. managed dotfiles) must be updated at its target, not have the link
+    # replaced by a regular file -- which a naive atomic rename would do.
+    from auryn.core.agents import _write_config
+
+    real = tmp_path / "real" / "claude.json"
+    real.parent.mkdir()
+    real.write_text("{}")
+    link = tmp_path / "claude.json"
+    link.symlink_to(real)
+
+    _write_config(link, {"ok": True})
+
+    assert link.is_symlink()  # link preserved
+    assert json.loads(real.read_text())["ok"] is True  # the target received the update
+
+
 def test_claudecode_register_raises_when_add_fails(tmp_path):
     from auryn.core.agents import ClaudeCode
 
@@ -175,7 +305,7 @@ def test_claudecode_register_raises_when_add_fails(tmp_path):
         rc = 1 if "add" in cmd else 0  # `remove` (idempotent clear) ok, `add` fails
         return subprocess.CompletedProcess(cmd, rc, "", "boom")
 
-    cc = ClaudeCode(run=run, skills_dir=tmp_path / "skills")
+    cc = ClaudeCode(run=run, skills_dir=tmp_path / "skills", config_path=tmp_path / "claude.json")
     with pytest.raises(RuntimeError, match="claude mcp add"):
         cc.register(["x"])
 

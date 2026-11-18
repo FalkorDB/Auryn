@@ -28,6 +28,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,9 +78,12 @@ class ClaudeCode:
 
     name = "claude-code"
 
-    def __init__(self, run: Runner = _default_run, skills_dir: Path | None = None) -> None:
+    def __init__(
+        self, run: Runner = _default_run, skills_dir: Path | None = None, config_path: Path | None = None
+    ) -> None:
         self._run = run
         self._skills_dir = skills_dir
+        self._config_path = config_path
 
     def detect(self) -> bool:
         """Present iff the `claude` CLI is on PATH."""
@@ -91,6 +95,56 @@ class ClaudeCode:
         env = os.environ.get("AURYN_CLAUDE_SKILLS")  # test/override hook
         return Path(env).expanduser() if env else Path.home() / ".claude" / "skills"
 
+    def _claude_config(self) -> Path:
+        if self._config_path is not None:
+            return self._config_path
+        env = os.environ.get("AURYN_CLAUDE_CONFIG")  # test/override hook
+        if env:
+            return Path(env).expanduser()
+        # Patch the file `claude mcp add` actually wrote: Claude Code honors CLAUDE_CONFIG_DIR and
+        # puts the user-scope config at $CLAUDE_CONFIG_DIR/.claude.json when set, else ~/.claude.json.
+        cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        base = Path(cfg_dir).expanduser() if cfg_dir else Path.home()
+        return base / ".claude.json"
+
+    def _enable_always_load(self) -> None:
+        """Mark our server so Claude Code loads its tools into the agent's INITIAL tool list,
+        instead of deferring them behind tool search. `claude mcp add` has no flag for this, so we
+        patch the config it just wrote (user scope -> ~/.claude.json, a `mcpServers` map). Without
+        it, in a tool-heavy setup the code-graph tools are invisible until the agent happens to
+        search for them -- so it often just greps instead (measured). Best-effort and never fatal:
+        a missing / unparseable / unwritable config is left as-is (the server still works, only
+        deferred). `alwaysLoad` is understood by Claude Code >= 2.1.121; older versions ignore the
+        unknown field, so writing it is harmless either way."""
+        path = self._claude_config()
+        try:
+            raw = path.read_text(encoding="utf-8") if path.exists() else None
+        except OSError:
+            return  # unreadable -> leave it; don't clobber what we can't round-trip
+        if raw is None:
+            return  # missing -> nothing to patch
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return  # unparseable -> leave it; don't clobber what we can't round-trip
+        if not isinstance(data, dict):
+            return
+        servers = data.get(_MCP_SERVERS_KEY)
+        entry = servers.get(_SERVER_NAME) if isinstance(servers, dict) else None
+        if isinstance(entry, dict) and entry.get("alwaysLoad") is not True:
+            entry["alwaysLoad"] = True
+            try:
+                # Re-read immediately before the whole-file replace: Claude Code also writes
+                # ~/.claude.json during sessions, and _write_config rewrites the ENTIRE file. If it
+                # changed since the snapshot above, a concurrent writer (e.g. `claude mcp add`)
+                # committed in between -- skip rather than clobber it (the server just stays deferred,
+                # which the best-effort design accepts). Narrows the race to the re-read..replace
+                # window; it does not eliminate it.
+                if path.read_text(encoding="utf-8") == raw:
+                    _write_config(path, data)
+            except OSError:
+                pass  # best-effort: a failed patch must never abort registration
+
     def register(self, server_command: list[str]) -> AgentRegistration:
         """Register the MCP server (user scope) and install the skill. Idempotent: any prior
         registration under the same name is removed first, so re-running install is safe."""
@@ -98,6 +152,7 @@ class ClaudeCode:
         added = self._run(["claude", "mcp", "add", "-s", "user", _SERVER_NAME, "--", *server_command])
         if added.returncode != 0:
             raise RuntimeError(f"`claude mcp add` failed: {(added.stderr or added.stdout).strip()}")
+        self._enable_always_load()  # surface the tools upfront, don't let them hide behind tool-search
 
         dest = self._skills_root() / _SKILL_NAME
         if dest.is_symlink():
@@ -155,7 +210,7 @@ def _read_config(path: Path) -> dict:
     servers."""
     if not path.exists():
         return {}
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if not text.strip():
         return {}
     try:
@@ -168,8 +223,30 @@ def _read_config(path: Path) -> dict:
 
 
 def _write_config(path: Path, data: dict) -> None:
+    """Write JSON as UTF-8 and atomically (a UNIQUE temp file in the same dir + os.replace), so a
+    failed / raced / concurrent write can never leave a half-written config -- these are the user's
+    real agent configs, which also hold settings (and MCP env/secrets) we don't own. The temp file
+    inherits the existing config's permissions (or 0600 for a new file) so os.replace never widens
+    the mode and exposes secrets to other local users."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    # Follow a symlink to its target so we update the real file (e.g. a managed dotfiles config)
+    # rather than replacing the link with a regular file, as a plain write_text would.
+    target = Path(os.path.realpath(path))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = target.stat().st_mode & 0o777  # preserve the existing file's perms
+    except OSError:
+        mode = 0o600  # new file: owner-only, since configs may hold secrets
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # don't leave a stray temp file behind on failure
+        raise
 
 
 @dataclass
