@@ -59,6 +59,7 @@ grpc = ["auryn-grpc==0.1.0"]                   # gRPC client call <-> server han
 events = ["auryn-events==0.1.0"]               # message publisher <-> subscriber (Kafka/Rabbit/NATS/...)
 # deployment
 docker = ["auryn-docker==0.1.0"]               # Dockerfiles + the `deploy` stitch (ADR 0007)
+compose = ["auryn-compose==0.1.0"]             # docker-compose files + the `deploy-compose` stitch
 # every plugin + both live-DB drivers: the same as `pip install "falkordb-auryn[all]"`
 all = [
     "auryn-python==0.1.0",
@@ -83,6 +84,7 @@ all = [
     "auryn-grpc==0.1.0",
     "auryn-events==0.1.0",
     "auryn-docker==0.1.0",
+    "auryn-compose==0.1.0",
 ]
 
 [project.scripts]

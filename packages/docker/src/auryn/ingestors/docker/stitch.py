@@ -23,6 +23,7 @@ import logging
 import posixpath
 import re
 
+from auryn.core import deploy
 from auryn.core.graph_client import GraphWriter
 from auryn.core.graph_model import GraphEdge
 
@@ -51,8 +52,8 @@ def stitch(writer: GraphWriter) -> dict | None:
         if edges:
             writer.merge_edges(edges)
 
-    _recompute_image_resolved(writer)
-    orphans = _gc_orphan_images(writer)
+    deploy.recompute_image_resolved(writer)
+    orphans = deploy.gc_orphan_images(writer)
 
     if not edges and not orphans:
         return None
@@ -182,30 +183,5 @@ def _path_under(path: str, target: str) -> bool:
     return path == target or path.startswith(target + "/")
 
 
-def _recompute_image_resolved(writer: GraphWriter) -> None:
-    """`resolved` = is this image built in-graph (some BUILDS_IMAGE points at it)? Recomputed over
-    every Image so the flag is a pure function of the graph, independent of ingest order. `origin`
-    follows: `internal` when built here, else `registry` (an external pull). No-op if no images."""
-    writer.query(
-        "MATCH (i:Image) OPTIONAL MATCH ()-[b:BUILDS_IMAGE]->(i) "
-        "WITH i, count(b) AS builders "
-        "SET i.resolved = builders > 0, i.origin = CASE WHEN builders > 0 THEN 'internal' ELSE 'registry' END"
-    )
-
-
-def _gc_orphan_images(writer: GraphWriter) -> int:
-    """Delete `Image` nodes left with no inbound reference at all -- no base (`BASED_ON`), builder
-    (`BUILDS_IMAGE`), runner (`RUNS_IMAGE`), nor provisioner (`PROVISIONS`, a Terraform `Resource`).
-    (`COPIES_FROM` is `BuildStage -> BuildStage` and can never target an `Image`, so it's not a keep
-    reason.) These are the residue of a removed Dockerfile/manifest; the `image://` node lives outside
-    any project prefix, so a project resync can't reclaim it -- this does (shared-node lifecycle, §6)."""
-    # Predicate test AND delete in ONE write query: a separate check-then-delete could DETACH DELETE
-    # an image a concurrent ingest referenced in between (the delete rechecked only ids, not the
-    # orphan predicate). One query closes that TOCTOU -- same pattern as the http stitch's orphan GC.
-    res = writer.query(
-        "MATCH (i:Image) WHERE NOT ()-[:BASED_ON]->(i) AND NOT ()-[:BUILDS_IMAGE]->(i) "
-        "AND NOT ()-[:RUNS_IMAGE]->(i) AND NOT ()-[:PROVISIONS]->(i) "
-        "WITH i, i.id AS gone DETACH DELETE i RETURN count(gone)"
-    )
-    rows = res.result_set
-    return int(rows[0][0]) if rows and rows[0][0] else 0
+# Image `resolved`-recompute and orphan GC now live in `auryn.core.deploy` (shared with the compose
+# and future k8s/terraform arms so the semantics can't diverge) -- see stitch()'s calls above.

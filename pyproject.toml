@@ -77,6 +77,7 @@ dependencies = [
     "auryn-events==0.1.0",
     # deployment
     "auryn-docker==0.1.0",
+    "auryn-compose==0.1.0",
 ]
 
 [project.urls]
@@ -127,6 +128,7 @@ auryn-orm = { workspace = true }
 auryn-grpc = { workspace = true }
 auryn-events = { workspace = true }
 auryn-docker = { workspace = true }
+auryn-compose = { workspace = true }
 auryn-c = { workspace = true }
 auryn-cpp = { workspace = true }
 auryn-cuda = { workspace = true }
@@ -154,6 +156,7 @@ dev = [
     "auryn-grpc",
     "auryn-events",
     "auryn-docker",
+    "auryn-compose",
     "auryn-c",
     "auryn-cpp",
     "auryn-cuda",
@@ -205,6 +208,7 @@ source = [
     "packages/sql/src/auryn",
     "packages/http/src/auryn",
     "packages/docker/src/auryn",
+    "packages/compose/src/auryn",
     "packages/c/src/auryn",
     "packages/cpp/src/auryn",
     "packages/cuda/src/auryn",
