@@ -143,16 +143,16 @@ def _recompute_resolved(writer: GraphWriter) -> None:
 
 
 def _gc_orphan_endpoints(writer: GraphWriter) -> int:
-    """Delete route-keyed endpoints left with neither a caller (CALLS_API) nor a handler
-    (EXPOSES_ENDPOINT, from any node kind). These are the residue of a removed route or a removed
-    call: the `extern://http/` node lives outside any single project's id-prefix, so a project resync
-    can't reclaim it -- this does. Scoped to `extern://http/` so it never touches a project-scoped
-    endpoint another ingestor owns (e.g. pyframework's `Function`-exposed routes, which that ingestor's
-    own resync manages). An endpoint that is merely uncalled (declared, no caller) keeps its EXPOSES
-    and is NOT an orphan."""
+    """Delete route-keyed endpoints left with no referrer at all: no caller (CALLS_API), no handler
+    (EXPOSES_ENDPOINT), and no deployment exposure (SERVES, a k8s Ingress -- ADR 0007). These are the
+    residue of a removed route/call/Ingress: the `extern://http/` node lives outside any single
+    project's id-prefix, so a project resync can't reclaim it -- this does. Scoped to `extern://http/`
+    so it never touches a project-scoped endpoint another ingestor owns (e.g. pyframework's
+    `Function`-exposed routes). An endpoint that is merely uncalled (declared, or Ingress-served, with
+    no caller) keeps its EXPOSES/SERVES and is NOT an orphan."""
     orphans = writer.ro_query(
         "MATCH (e:APIEndpoint) WHERE e.id STARTS WITH 'extern://http/' "
-        "AND NOT ()-[:EXPOSES_ENDPOINT]->(e) AND NOT ()-[:CALLS_API]->(e) "
+        "AND NOT ()-[:EXPOSES_ENDPOINT]->(e) AND NOT ()-[:CALLS_API]->(e) AND NOT ()-[:SERVES]->(e) "
         "RETURN e.id"
     ).result_set
     if orphans:
