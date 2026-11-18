@@ -1,0 +1,32 @@
+[project]
+name = "auryn-docker"
+version = "0.1.0"
+description = "Dockerfile plugin for Auryn and the first producer of the deployment & infrastructure tier (ADR 0007). A dependency-free Dockerfile parser emits BuildStage nodes, the shared image-keyed `Image` hub (the FROM chain, as resolved:false placeholders), and multi-stage COPY --from edges; a companion `deploy` enrichment hook stitches build stages to the code they package (PACKAGES), recomputes image `resolved`, and GCs orphan images. The hub that Compose/k8s/Helm/Terraform producers join onto. Depends only on auryn-core."
+authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
+requires-python = ">=3.12"
+license = { text = "MIT" }
+# No parser dependency: the Dockerfile grammar is small enough to tokenize by hand (file_parser.py),
+# which keeps the plugin dependency-free and its tests hermetic. A tree-sitter-dockerfile engine
+# would slot in behind `parse_source` (ADR 0007 §7) and add its dep here then.
+dependencies = [
+    "auryn-core",
+]
+
+# Import-light lazy GitLanguage (no parser import at discovery). See core/registry.py.
+[project.entry-points."auryn.languages"]
+docker = "auryn.ingestors.docker.plugin"
+
+# The `deploy` cross-artifact stitch (ADR 0007), registered so the ingest endpoint runs it after the
+# language ingestors (full + incremental). Opt-out via `auryn hooks enable/disable deploy`.
+[project.entry-points."auryn.enrichments"]
+deploy = "auryn.ingestors.docker.enrichment"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auryn"]
+
+[tool.uv.sources]
+auryn-core = { workspace = true }

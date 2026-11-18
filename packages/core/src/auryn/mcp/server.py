@@ -95,14 +95,19 @@ def _snippet(hit: dict) -> str:
     return text[:_SNIPPET_CHARS]
 
 
-def create_server(client: FalkorDB, graph_name: str) -> MCPServer:
+def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None) -> MCPServer:
     """Builds the MCP server with a DEFAULT binding to `graph_name` on `client`.
 
     Graph selection is per-operation: every tool takes an optional `graph` argument naming the
     graph to act on, so one session can query and index across ALL graphs on the instance. `graph`
     omitted -> the session default (initially `graph_name`, changeable with `use_graph`). Graph
     handles are created lazily and cached (a Graph is a thin wrapper, so this just avoids rebuilding
-    it per call)."""
+    it per call).
+
+    `embed` overrides the post-ingest embedding mode for this server's index/ingest tools (see
+    ingest._maybe_embed). The CLI passes "inline" when the server was started against an explicit
+    `--host` -- an ad-hoc connection the background embed daemon (which reconnects via the
+    *configured* backend) couldn't reach, so those ingests must embed inline."""
     default_name = graph_name
     graphs: dict[str, Any] = {default_name: client.select_graph(default_name)}
     state = {"name": default_name}  # the session default; use_graph mutates it
@@ -247,7 +252,7 @@ def create_server(client: FalkorDB, graph_name: str) -> MCPServer:
         -> folder watcher, `manual` -> nothing), reported back under `resync`. So a repo an agent
         indexes stays fresh on later commits/saves exactly as one indexed from the CLI would."""
         g, gname = _write_graph(graph)
-        report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep)
+        report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep, embed=embed)
         # Shared with the CLI (lifecycle.wire_trigger) so the MCP can't skip the registry/hook
         # setup the CLI does -- honours the install-time [resync].trigger choice.
         resync = lifecycle.wire_trigger(str(resolve_project_root(path)), gname, project_name)
@@ -272,7 +277,7 @@ def create_server(client: FalkorDB, graph_name: str) -> MCPServer:
         has none, so `resync` will note that (clone locally to get commit/save resync)."""
         g, gname = _write_graph(graph)
         try:
-            report = ingest.ingest_repository(GraphWriter(g), repo_uri, ref=ref, project_name=project_name, deep=deep)
+            report = ingest.ingest_repository(GraphWriter(g), repo_uri, ref=ref, project_name=project_name, deep=deep, embed=embed)
         except git.GitCommandError as e:
             raise ValueError(f"couldn't access git repository {repo_uri!r}: {e}") from e
         # Parity with the CLI: wire the resync trigger onto a local checkout when the URI is one;

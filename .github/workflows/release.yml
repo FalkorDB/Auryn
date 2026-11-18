@@ -74,6 +74,13 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Releasing version $v"
 
+      - name: Stamp the version into every auryn-* pin (single source of truth = the tag)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        # Rewrites every `auryn-*==` pin (umbrella deps, core extras). The packages' own versions
+        # come from git; the build below holds them at this same version.
+        run: python .github/scripts/stamp_version.py "$VERSION"
+
       - name: Build the umbrella + every member package
         env:
           # Versions are derived from git (hatch-vcs, see the pyproject files). A release builds

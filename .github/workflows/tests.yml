@@ -71,6 +71,76 @@ jobs:
           for t in $HEAVY_TESTS; do ignores="$ignores --ignore=$t"; done
           uv run pytest $ignores -n 2 --cov=auryn --cov-report=term-missing
 
+  # Install what users install -- the umbrella, and the core with a few plugin extras -- from wheels
+  # built from THIS checkout, then run `pip check`, the CLI, and check that the expected plugins load.
+  # The packages are stamped with a version that exists only here, and every auryn-* requirement is
+  # pinned `==`, so every auryn-* package comes from the local build and third-party ones from PyPI.
+  package-install:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        spec:
+          - "falkordb-auryn"            # default: everything
+          - "falkordb-auryn[all]"       # + the live-DB drivers
+          - "auryn-core"                # core only
+          - "auryn-core[python]"        # custom: one plugin
+          - "auryn-core[http,sql]"      # custom: several plugins
+          - "auryn-core[cuda]"          # a plugin that pulls another (auryn-cpp)
+          - "auryn-core[all]"           # the same as falkordb-auryn[all]
+    env:
+      LOCAL_VERSION: "0.0.0.dev0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build every package at a local-only version
+        run: |
+          python .github/scripts/stamp_version.py "$LOCAL_VERSION"
+          mkdir -p "$RUNNER_TEMP/dist"
+          uv build --out-dir "$RUNNER_TEMP/dist" .
+          for d in packages/*/; do
+            uv build --out-dir "$RUNNER_TEMP/dist" "$d"
+          done
+
+      - name: Install ${{ matrix.spec }} and verify
+        env:
+          SPEC: ${{ matrix.spec }}
+        run: |
+          python -m venv "$RUNNER_TEMP/package-env"
+          env_bin="$RUNNER_TEMP/package-env/bin"
+          "$env_bin/python" -m pip install --find-links "$RUNNER_TEMP/dist" "${SPEC}==${LOCAL_VERSION}"
+          "$env_bin/python" -m pip check
+          "$env_bin/auryn" --help > /dev/null
+          "$env_bin/python" - <<'PY'
+          import os, pathlib, re
+          from importlib.metadata import entry_points, requires
+          # The exact plugin set: every plugin in packages/ for the umbrella and auryn-core[all];
+          # auryn-a and auryn-b for auryn-core[a,b], plus the plugins they need (auryn-cuda -> auryn-cpp).
+          name, _, extras = os.environ["SPEC"].partition("[")
+          extras = [e for e in extras.rstrip("]").split(",") if e]
+          if name == "falkordb-auryn" or "all" in extras:
+              expected = {f"auryn-{p.parent.name}" for p in pathlib.Path("packages").glob("*/pyproject.toml")}
+          else:
+              expected = {f"auryn-{e}" for e in extras}
+              needed = [r for plugin in expected for r in requires(plugin) or [] if "extra ==" not in r]
+              expected |= {re.match(r"[\w.-]+", r).group() for r in needed if r.startswith("auryn-")}
+          expected.discard("auryn-core")
+          loaded = set()
+          for group in ("auryn.languages", "auryn.ingestors", "auryn.enrichments"):
+              for ep in entry_points(group=group):
+                  ep.load()
+                  loaded.add(ep.dist.name)
+          assert loaded == expected, f"expected plugins {sorted(expected)}, loaded {sorted(loaded)}"
+          print(f"{len(loaded)} plugins loaded: {sorted(loaded)}")
+          PY
+
   # Dedicated performance-regression gate. The whole value of delta-sync is that editing one file
   # re-parses ~one file, not the repo -- a change that drags a file's whole package/module back in is
   # still node-for-node correct (the `test` job passes) but slow. `test_delta_blast_radius.py` catches
