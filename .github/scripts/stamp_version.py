@@ -13,7 +13,7 @@ import re
 import sys
 
 VERSION_LINE = re.compile(r'(?m)^version = "[^"]*"')
-AURYN_PIN = re.compile(r'"(auryn-[a-z-]+(?:\[[^\]"]*\])?)==[^"]*"')
+AURYN_PIN = re.compile(r'"(auryn-[a-z0-9-]+(?:\[[^\]"]*\])?)==[^"]*"')
 
 
 def stamp(version: str, root: pathlib.Path) -> list[pathlib.Path]:

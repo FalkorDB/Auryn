@@ -114,9 +114,14 @@ def test_stamp_version_rewrites_versions_and_pins(tmp_path):
 
     assert len(files) == len(_members()) + 1
     for f in files:
-        assert _project(f)["version"] == "9.8.7"
-        pins = re.findall(r'"auryn-[a-z-]+(?:\[[^\]"]*\])?==([^"]*)"', f.read_text())
-        assert set(pins) <= {"9.8.7"}, f
+        project = _project(f)
+        assert project["version"] == "9.8.7"
+        requirements = project.get("dependencies", []) + [
+            r for rs in project.get("optional-dependencies", {}).values() for r in rs
+        ]
+        for r in requirements:  # read with tomllib, not the stamp's own pattern (it once missed auryn-k8s)
+            if _name(r).startswith("auryn-") and "==" in r:
+                assert r.endswith("==9.8.7"), (f, r)
     umbrella = _project(tmp_path / "pyproject.toml")
     assert "auryn-python==9.8.7" in umbrella["dependencies"]
     core = _project(tmp_path / "packages/core/pyproject.toml")
