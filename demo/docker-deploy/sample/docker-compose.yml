@@ -1,0 +1,24 @@
+# The runtime topology. `api` and `worker` BUILD their Dockerfiles and publish an image; the
+# `deploy-compose` stitch links each build to the image it produces (BUILDS_IMAGE), flipping those
+# images to resolved/internal. `db` and `queue` just RUN external images (stay external pulls).
+services:
+  api:
+    build: ./api
+    image: shop/api:1.0
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+  worker:
+    build: ./worker
+    image: shop/worker:1.0
+    depends_on:
+      - db
+      - queue
+
+  db:
+    image: postgres:16
+
+  queue:
+    image: redis:7

@@ -118,12 +118,28 @@ def main() -> None:
         for a, b in rows(g, "MATCH (a:BuildStage)-[:COPIES_FROM]->(b:BuildStage) RETURN a.stage, b.stage"):
             print(f"  {a}  COPIES_FROM  {b}")
 
-        section("5. CROSS-TIER  (a function -> its module -> the image that ships it, + its base)")
-        for fn, mod, stage, base in rows(g,
-            "MATCH (fn:Function)<-[:HAS_FUNCTION|HAS_METHOD*0..2]-(m:Module)<-[:PACKAGES]-(s:BuildStage) "
-            "OPTIONAL MATCH (s)-[:BASED_ON]->(i:Image) "
-            "RETURN fn.name, m.name, s.stage, coalesce(i.ref, '(stage)') ORDER BY fn.name"):
-            print(f"  {fn}()  in {mod}  ->  shipped by stage '{stage}'  (base {base})")
+        section("5. SERVICES  (compose: what each runs + what it depends on)")
+        for svc, img in rows(g, "MATCH (s:Service)-[:RUNS_IMAGE]->(i:Image) RETURN s.name, i.ref ORDER BY s.name"):
+            print(f"  service {svc:8}  RUNS  {img}")
+        for a, b in rows(g, "MATCH (a:Service)-[:DEPENDS_ON]->(b:Service) RETURN a.name, b.name ORDER BY a.name, b.name"):
+            print(f"  service {a:8}  DEPENDS_ON  {b}")
+
+        section("6. THE BUILD->RUN LOOP  (compose closes it; images flip internal)")
+        for ref, resolved in rows(g, "MATCH (i:Image) RETURN i.ref, i.resolved ORDER BY i.resolved DESC, i.ref"):
+            kind = "built-in-graph (internal)" if resolved else "external pull"
+            print(f"  {ref:34}  [{kind}]")
+        print()
+        for stage, img, svc in rows(g,
+            "MATCH (st:BuildStage)-[:BUILDS_IMAGE]->(i:Image)<-[:RUNS_IMAGE]-(s:Service) "
+            "RETURN st.id, i.ref, s.name ORDER BY s.name"):
+            print(f"  stage {_short(stage):20}  BUILDS  {img}  <-  run by service '{svc}'")
+
+        section("7. FULL-STACK BLAST RADIUS  (a function -> ... -> the running service)")
+        for fn, img, svc in rows(g,
+            "MATCH (fn:Function)<-[:HAS_FUNCTION]-(:Module)<-[:PACKAGES]-(:BuildStage)"
+            "-[:BUILDS_IMAGE]->(i:Image)<-[:RUNS_IMAGE]-(s:Service) "
+            "RETURN fn.name, i.ref, s.name ORDER BY fn.name"):
+            print(f"  change {fn}()  ->  ships {img}  ->  run by service '{svc}'")
 
         print(f"\n{BAR}\nDone. Inspect it yourself:  uv run auryn view   (graph: {GRAPH})\n{BAR}\n")
     finally:

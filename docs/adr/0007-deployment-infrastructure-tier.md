@@ -84,9 +84,8 @@ identically).** A Dockerfile `FROM python:3.12-slim`, a Compose `image: python:3
   (Compose/CI, which knows the build args) emits the concrete id, and the raw placeholder is GC'd once
   nothing references it. Within-Dockerfile `ARG` defaults are expanded at parse time; an empty/missing
   `ARG` or a `${VAR:-default}` modifier form is left unresolved rather than half-substituted.
-- Normalization lives in **one** shared helper, imported by every producer — never re-implemented per
-  ingestor. *(Transitional: the first producer keeps it in `auryn.ingestors.docker.image_ref`; it
-  moves to `auryn.core.image_ref` when the second producer lands — §7.)*
+- Normalization lives in **one** shared helper — `auryn.core.image_ref` — imported by every producer
+  (docker, compose, …), never re-implemented, so their `image://` ids are guaranteed identical.
 
 ### 3. Edge types
 
