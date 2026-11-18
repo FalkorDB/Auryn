@@ -1,0 +1,92 @@
+"""The hand-rolled Dockerfile parser -> ParsedDockerfile. Pure, no graph."""
+
+from __future__ import annotations
+
+from auryn.ingestors.docker.file_parser import parse_source
+
+_MULTISTAGE = (
+    "# syntax=docker/dockerfile:1\n"
+    "ARG PYTHON_VERSION=3.12-slim\n"
+    "\n"
+    "FROM python:${PYTHON_VERSION} AS base\n"
+    "WORKDIR /app\n"
+    "COPY requirements.txt .\n"
+    "RUN pip install -r requirements.txt   # a trailing comment, not a line\n"
+    "\n"
+    "FROM base AS final\n"
+    "COPY ./app /app/app\n"
+    "COPY --from=base /usr/local/lib /usr/local/lib\n"
+    "EXPOSE 8080 9090/tcp\n"
+    'ENTRYPOINT ["python", "-m", "app"]\n'
+    'CMD ["--port", "8080"]\n'
+)
+
+
+def test_stage_count_and_names():
+    p = parse_source(_MULTISTAGE)
+    assert [s.name for s in p.stages] == ["base", "final"]
+    assert [s.index for s in p.stages] == [0, 1]
+
+
+def test_global_arg_parsed():
+    p = parse_source(_MULTISTAGE)
+    assert p.args["PYTHON_VERSION"] == "3.12-slim"
+
+
+def test_base_references():
+    p = parse_source(_MULTISTAGE)
+    assert p.stages[0].base == "python:${PYTHON_VERSION}"   # raw ref kept; substitution happens in build
+    assert p.stages[1].base == "base"                        # internal multi-stage reference
+
+
+def test_copy_sources_and_from():
+    p = parse_source(_MULTISTAGE)
+    base, final = p.stages
+    assert base.copies[0].sources == ("requirements.txt",) and base.copies[0].from_stage is None
+    # final has one host-context copy and one --from=base stage copy
+    host = [c for c in final.copies if c.from_stage is None]
+    staged = [c for c in final.copies if c.from_stage == "base"]
+    assert host[0].sources == ("./app",)
+    assert staged and staged[0].sources == ("/usr/local/lib",)
+
+
+def test_expose_entrypoint_cmd():
+    final = parse_source(_MULTISTAGE).stages[1]
+    assert final.exposed_ports == ("8080", "9090/tcp")
+    assert final.entrypoint == '["python", "-m", "app"]'
+    assert final.cmd == '["--port", "8080"]'
+
+
+def test_line_continuation():
+    p = parse_source(
+        "FROM alpine\n"
+        "RUN apk add --no-cache \\\n"
+        "    curl \\\n"
+        "    bash\n"
+        "COPY a \\\n"
+        "     b \\\n"
+        "     /dest/\n"
+    )
+    # the continued COPY collapses to one instruction: sources (a, b) -> dest /dest/
+    copies = p.stages[0].copies
+    assert len(copies) == 1 and copies[0].sources == ("a", "b") and copies[0].dest == "/dest/"
+
+
+def test_comments_and_blanks_ignored():
+    p = parse_source("# a comment\n\nFROM scratch\n\n# another\nWORKDIR /\n")
+    assert len(p.stages) == 1 and p.stages[0].base == "scratch"
+
+
+def test_unnamed_stage_has_no_name():
+    p = parse_source("FROM ubuntu:22.04\nRUN echo hi\n")
+    assert p.stages[0].name is None and p.stages[0].index == 0
+
+
+def test_json_array_copy_form():
+    p = parse_source('FROM alpine\nCOPY ["src/app.py", "/app/app.py"]\n')
+    c = p.stages[0].copies[0]
+    assert c.sources == ("src/app.py",) and c.dest == "/app/app.py"
+
+
+def test_empty_file_is_empty():
+    assert parse_source("") .stages == ()
