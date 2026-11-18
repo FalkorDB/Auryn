@@ -1,0 +1,30 @@
+[project]
+name = "auryn-compose"
+version = "0.1.0"
+description = "Docker Compose plugin for Auryn and the second producer of the deployment & infrastructure tier (ADR 0007). Parses docker-compose files into Service nodes (RUNS_IMAGE the shared Image hub, DEPENDS_ON other services), and a `deploy-compose` enrichment hook that closes the build->run loop: it resolves each service's `build:` to the Dockerfile's final BuildStage and links BUILDS_IMAGE, flipping that image to resolved/internal. Composes with auryn-docker onto the same image-keyed hub. Depends only on auryn-core."
+authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "auryn-core",
+    "pyyaml>=6.0",
+]
+
+# Import-light lazy GitLanguage (no PyYAML import at discovery).
+[project.entry-points."auryn.languages"]
+compose = "auryn.ingestors.compose.plugin"
+
+# The `deploy-compose` stitch (ADR 0007), run after the language ingestors. Opt-out via
+# `auryn hooks enable/disable deploy-compose`.
+[project.entry-points."auryn.enrichments"]
+deploy-compose = "auryn.ingestors.compose.enrichment"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auryn"]
+
+[tool.uv.sources]
+auryn-core = { workspace = true }

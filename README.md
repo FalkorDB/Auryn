@@ -19,9 +19,11 @@ Your agent traverses it over MCP and answers from real structure, with file and 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue?style=flat-square)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-ready-5980a6?style=flat-square)](https://modelcontextprotocol.io/)
 [![FalkorDB](https://img.shields.io/badge/graph-FalkorDB-5980a6?style=flat-square)](https://www.falkordb.com/)
+[![PyPI version](https://badge.fury.io/py/falkordb-auryn.svg)](https://badge.fury.io/py/falkordb-auryn)
+[![Forum](https://img.shields.io/badge/Forum-falkordb-blue)](https://github.com/orgs/FalkorDB/discussions)
 
 <sub>WORKS WITH</sub><br>
-**Claude Code** &nbsp;·&nbsp; **Cursor** &nbsp;·&nbsp; **Copilot** &nbsp;·&nbsp; **Codex** &nbsp;·&nbsp; **Gemini** &nbsp;·&nbsp; **Windsurf** &nbsp;·&nbsp; **VS Code** &nbsp;·&nbsp; **Aider** &nbsp;·&nbsp; any agent that reads AGENTS.md
+**Claude Code** &nbsp;·&nbsp; **Codex** &nbsp;·&nbsp; **Cursor** &nbsp;·&nbsp; **Windsurf** &nbsp;·&nbsp; **GitHub Copilot** &nbsp;·&nbsp; **VS Code Copilot Chat** &nbsp;·&nbsp; **Gemini CLI** &nbsp;·&nbsp; **Antigravity** &nbsp;·&nbsp; **Aider** &nbsp;·&nbsp; any agent that reads AGENTS.md or connects over MCP
 
 </div>
 
@@ -35,7 +37,7 @@ Claude Code on Django, hard structural questions (transitive closure and impact)
 |---|---|---|---|
 | **Accuracy** (key facts covered) | 22% | 92% | **4x** |
 | **Run time** per task | 208s | 70s | **-66%** |
-| **Cost** per task | $0.48 | $0.38 | **-21%** |
+| **Cost** per task | $0.72 | $0.38 | **-47%** |
 | **Tokens** per task | 466k | 355k | **-24%** |
 
 The agent stops reading its way through the tree. It asks the graph who calls a function, what a change reaches, or how a request gets from a button to a table, and gets an answer it can cite.
@@ -118,7 +120,7 @@ No raw Cypher, no file dumps, no guessing. One hop, id-backed. Each repo gets it
 | `auryn_status` | read | Is there a graph yet, and what's in it? **Called first.** |
 | `index_repository` / `ingest_repository` | **write** | Build or update the graph for a local dir or git repo. |
 | `locate` | read | Find symbols by name. The entry point: other tools take the `id` it returns. |
-| `search_code` | read | Semantic (vector) search by meaning when you don't know the name. Run `auryn embed` first. |
+| `search_code` | read | Semantic (vector) search by meaning when you don't know the name. On by default — the vector index builds automatically in the background. |
 | `get_context` | read | One node's properties, source, and 1-hop neighbours. |
 | `who_calls` / `callees` | read | Inbound callers / outbound callees within N hops. |
 | `find_path` | read | Shortest path between two nodes: does X reach Y, and how. |
@@ -157,7 +159,7 @@ Blast radius: the two callers on the left. Closure: everything it reaches on the
 - **Stored in a graph database.** The graph lives in [FalkorDB](https://www.falkordb.com/) and stays loaded, so caller and impact lookups are a query, not a file scan.
 - **Incremental resync.** On a commit or branch switch, Auryn re-parses only the changed files and the code they affect. On Django that is about 150x faster than a full re-ingest. See [ADR 0002](docs/adr/0002-incremental-resync.md).
 - **Two levels of analysis.** Every language gets a fast structural pass. Python (Jedi) and C# (Roslyn) also get a deep semantic pass, inline or in the background, so calls land on the code that actually runs.
-- **Search plus structure.** Semantic search finds the code. The graph returns what that code calls, imports and depends on.
+- **Search plus structure.** Semantic search is on by default — embeddings build in the background after each ingest, off the critical path, so the graph is queryable immediately while the vector index fills in. Semantic search finds the code; the graph returns what that code calls, imports and depends on.
 - **Cross-repo references.** When code points at a symbol in another repository, Auryn records it and links it once that repo is ingested. See [ADR 0004](docs/adr/0004-cross-repo-symbol-resolution.md).
 - **One vocabulary for every language.** Every ingestor writes the same node and edge types, so a single query follows a request from a TypeScript button, through a C# API, to the PL/SQL procedure and table it writes.
 
