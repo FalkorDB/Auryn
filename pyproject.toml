@@ -4,11 +4,13 @@
 # The project is a uv workspace: `auryn-core` plus one `auryn-<lang>` package
 # per language, each under packages/*, each with its own third-party dependencies so
 # a consumer only pays for the languages they install. This root is the umbrella
-# `falkordb-auryn` distribution whose extras pull the language plugins in:
+# `falkordb-auryn` distribution, which depends on every plugin:
 #
-#     pip install falkordb-auryn                 # batteries-included: every language + embedded DB + hooks
+#     pip install falkordb-auryn                 # batteries-included: every plugin
 #     pip install "falkordb-auryn[all]"          # + live-DB drivers (oracledb / postgres / mysql)
-#     pip install auryn-python                   # lean: a single language plugin (pulls auryn-core)
+#     pip install "auryn-core[python,http]"      # custom: the core + only the plugins named
+#
+# Every auryn-* requirement is pinned to this release's version (release.yml stamps the pins).
 #
 # For local development, `uv sync` installs the whole workspace editable (all members
 # are in the dev group below), so the full test suite and benchmarks run unchanged.
@@ -46,14 +48,38 @@ classifiers = [
 #     running interpreter, so it also works under `uv tool install` -- see core.plugins._install_command).
 #   * the COMPILED live-DB drivers (oracledb / postgres / mysql) -- opt-in via `[all]`/`[oracle-live]`/
 #     `[sql-all]`.
-# For a lean install, depend on a single `auryn-<lang>` plugin directly (each pulls `auryn-core`).
+# For a custom install, use `auryn-core[<plugin>,...]` (see packages/core/pyproject.toml).
 dependencies = [
-    "auryn-core",
-    "auryn-python", "auryn-csharp", "auryn-c", "auryn-cpp", "auryn-cuda",
-    "auryn-typescript", "auryn-java", "auryn-go", "auryn-rust", "auryn-php",
-    "auryn-julia", "auryn-ruby", "auryn-kotlin", "auryn-swift", "auryn-bash",
-    "auryn-oracle", "auryn-sql",
-    "auryn-http", "auryn-orm", "auryn-grpc", "auryn-events", "auryn-docker", "auryn-compose", "auryn-k8s", "auryn-terraform",
+    "auryn-core==0.1.0",
+    # languages
+    "auryn-python==0.1.0",
+    "auryn-typescript==0.1.0",
+    "auryn-java==0.1.0",
+    "auryn-go==0.1.0",
+    "auryn-rust==0.1.0",
+    "auryn-c==0.1.0",
+    "auryn-cpp==0.1.0",
+    "auryn-cuda==0.1.0",
+    "auryn-csharp==0.1.0",
+    "auryn-php==0.1.0",
+    "auryn-ruby==0.1.0",
+    "auryn-kotlin==0.1.0",
+    "auryn-swift==0.1.0",
+    "auryn-julia==0.1.0",
+    "auryn-bash==0.1.0",
+    # database schemas (file-based; the live-DB drivers are the extras below)
+    "auryn-sql==0.1.0",
+    "auryn-oracle==0.1.0",
+    # cross-language links
+    "auryn-http==0.1.0",
+    "auryn-orm==0.1.0",
+    "auryn-grpc==0.1.0",
+    "auryn-events==0.1.0",
+    # deployment
+    "auryn-docker==0.1.0",
+    "auryn-compose==0.1.0",
+    "auryn-k8s==0.1.0",
+    "auryn-terraform==0.1.0",
 ]
 
 [project.urls]
@@ -63,35 +89,14 @@ Documentation = "https://github.com/FalkorDB/Auryn/tree/main/docs"
 Issues = "https://github.com/FalkorDB/Auryn/issues"
 
 [project.optional-dependencies]
-python = ["auryn-python"]
-csharp = ["auryn-csharp"]
-oracle = ["auryn-oracle"]                 # lean: file-based `plsql` + SQL DDL parsing, no DB drivers
-oracle-live = ["auryn-oracle[live]"]      # + oracledb for the live `oracle` PL/SQL ingestor
-sql = ["auryn-sql"]                        # generic relational-DB schema ingestor (SQLAlchemy; SQLite works out of the box)
-sql-all = ["auryn-sql[all]"]              # + postgres/mysql/oracle DBAPI drivers pre-installed
-http = ["auryn-http"]                     # HTTP call<->endpoint stitch hook (ADR 0006; language-agnostic)
-orm = ["auryn-orm"]                        # ORM model<->DB-table stitch hook (SQLAlchemy; joins code to schema)
-grpc = ["auryn-grpc"]                       # gRPC/Protobuf contract stitch hook (client RPC call<->server handler, cross-language)
-events = ["auryn-events"]                   # message/event-bus stitch hook (publisher<->subscriber via topic; Kafka/Rabbit/NATS/...)
-docker = ["auryn-docker"]                   # Dockerfile plugin + `deploy` tier stitch (ADR 0007): BuildStage/Image hub + PACKAGES code seam
-compose = ["auryn-compose"]                 # docker-compose plugin + `deploy-compose` stitch: Service/RUNS_IMAGE/DEPENDS_ON + BUILDS_IMAGE build->run loop
-k8s = ["auryn-k8s"]                         # Kubernetes-manifest plugin + `deploy-k8s` stitch: workloads RUNS_IMAGE + Ingress SERVES route-keyed APIEndpoint
-terraform = ["auryn-terraform"]             # Terraform/OpenTofu (HCL) plugin: Resource graph + DEPENDS_ON + RUNS_IMAGE hub + rds/ecr PROVISIONS
-c = ["auryn-c"]
-cpp = ["auryn-cpp"]
-cuda = ["auryn-cuda"]                       # CUDA (.cu/.cuh): reuses the C++ engine + kernel-launch/exec-space signal
-typescript = ["auryn-typescript"]
-java = ["auryn-java"]
-go = ["auryn-go"]
-rust = ["auryn-rust"]
-php = ["auryn-php"]
-julia = ["auryn-julia"]
-ruby = ["auryn-ruby"]
-kotlin = ["auryn-kotlin"]
-swift = ["auryn-swift"]
-bash = ["auryn-bash"]
-embedded = ["auryn-core[embedded]"]       # serverless, in-process FalkorDB (no server/Docker); powers `auryn quickstart`
-all = ["auryn-python", "auryn-csharp", "auryn-oracle[live]", "auryn-sql[all]", "auryn-http", "auryn-orm", "auryn-grpc", "auryn-events", "auryn-docker", "auryn-compose", "auryn-k8s", "auryn-terraform", "auryn-c", "auryn-cpp", "auryn-cuda", "auryn-typescript", "auryn-java", "auryn-go", "auryn-rust", "auryn-php", "auryn-julia", "auryn-ruby", "auryn-kotlin", "auryn-swift", "auryn-bash"]
+# Only the heavy optional parts; every plugin is already a dependency above.
+embedded = ["auryn-core[embedded]==0.1.0"]      # serverless, in-process FalkorDB (no server/Docker); powers `auryn quickstart`
+oracle-live = ["auryn-oracle[live]==0.1.0"]     # + oracledb for the live `oracle` PL/SQL ingestor
+sql-all = ["auryn-sql[all]==0.1.0"]             # + postgres/mysql/oracle DBAPI drivers pre-installed
+all = [                                         # every live-DB driver
+    "auryn-oracle[live]==0.1.0",
+    "auryn-sql[all]==0.1.0",
+]
 
 # Re-declare the CLI entry point on the umbrella so `uv tool install falkordb-auryn` (or a published
 # name / a local path / `.[all]`) exposes the `auryn` executable. uv tool install only
