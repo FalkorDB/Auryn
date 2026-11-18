@@ -126,19 +126,21 @@ def install_plugin(package: str, label: str = "plugin") -> bool:
         constraints = Path(tmp, "constraints.txt")
         constraints.write_text("".join(f"{name}=={version}\n" for name, version in installed.items()))
         core = installed.get("auryn-core")
-        if core and _run_install(f"{package}=={core}", label, "-c", str(constraints)):
+        pinned = f"{package}=={core}"
+        if core and _run_install(pinned, label, "-c", str(constraints), failure_level=logging.INFO):
             return True
         if core:
-            logger.warning("%s %s is not available; installing the newest version that fits", package, core)
+            logger.warning("Could not install %r; trying the newest %s that fits", pinned, package)
         return _run_install(package, label, "-c", str(constraints))
 
 
-def _run_install(package: str, label: str, *options: str) -> bool:
+def _run_install(package: str, label: str, *options: str, failure_level: int = logging.ERROR) -> bool:
     cmd = _install_command(package, *options)
     logger.warning("Auto-installing %s %r via: %s", label, package, " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        logger.error("Could not install %r: %s", package, (result.stderr or result.stdout).strip()[:500])
+        output = (result.stderr or result.stdout).strip()[:500]
+        logger.log(failure_level, "Could not install %r: %s", package, output)
         return False
     importlib.invalidate_caches()
     logger.info("Installed %s %r", label, package)

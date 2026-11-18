@@ -7,6 +7,7 @@ re-discovers -- and is a strict no-op when auto-install is disabled or nothing i
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -171,7 +172,7 @@ def test_install_plugin_tries_the_core_version_and_holds_installed_auryn_package
     ]
 
 
-def test_install_plugin_falls_back_to_the_newest_version_that_fits(monkeypatch):
+def test_install_plugin_falls_back_to_the_newest_version_that_fits(monkeypatch, caplog):
     # The core's version of the plugin may not be on PyPI (0.8.0 has auryn-core but no auryn-python),
     # or may not fit the held packages (a core upgraded on its own, newer than auryn-cpp).
     pip = _FakePip(fail={"auryn-cuda==9.1"})
@@ -179,9 +180,11 @@ def test_install_plugin_falls_back_to_the_newest_version_that_fits(monkeypatch):
     installed = [_dist("auryn-core", "9.1"), _dist("auryn-cpp", "9.0")]
     monkeypatch.setattr(plugins.importlib.metadata, "distributions", lambda: installed)
 
-    assert plugins.install_plugin("auryn-cuda")
+    with caplog.at_level(logging.INFO, logger="auryn.plugins"):
+        assert plugins.install_plugin("auryn-cuda")
 
     assert [spec for spec, _ in pip.calls] == ["auryn-cuda==9.1", "auryn-cuda"]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]  # the fallback worked: no error
     assert pip.calls[1][1] == "auryn-core==9.1\nauryn-cpp==9.0\n"
 
 
