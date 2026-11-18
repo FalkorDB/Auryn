@@ -88,11 +88,12 @@ def _scan_pending(writer: GraphWriter, labels: tuple[str, ...]) -> list[tuple[st
         query = (
             f"MATCH (n:{label}) "
             "WHERE n.embedding IS NULL AND (coalesce(n.source, '') <> '' OR coalesce(n.doc, '') <> '') "
-            "RETURN n.id, n.name, n.qualified_name, n.doc, n.source"
+            "RETURN n.id, n.name, n.qualified_name, n.doc, n.source, n._fingerprint"
         )
-        for node_id, name, qname, doc, source in writer.ro_query(query).result_set:
+        for node_id, name, qname, doc, source, fp in writer.ro_query(query).result_set:
             pending.append(
-                (label, node_id, {"name": name, "qualified_name": qname, "doc": doc, "source": source})
+                (label, node_id,
+                 {"name": name, "qualified_name": qname, "doc": doc, "source": source, "_fingerprint": fp})
             )
     return pending
 
@@ -105,10 +106,11 @@ def _scan_pending_containers(writer: GraphWriter, labels: tuple[str, ...]) -> li
     for label in labels:
         query = (
             f"MATCH (c:{label}) WHERE c.embedding IS NULL "
-            "RETURN c.id, c.name, c.qualified_name, c.doc"
+            "RETURN c.id, c.name, c.qualified_name, c.doc, c._fingerprint"
         )
-        for node_id, name, qname, doc in writer.ro_query(query).result_set:
-            pending.append((label, node_id, {"name": name, "qualified_name": qname, "doc": doc, "source": ""}))
+        for node_id, name, qname, doc, fp in writer.ro_query(query).result_set:
+            pending.append((label, node_id,
+                            {"name": name, "qualified_name": qname, "doc": doc, "source": "", "_fingerprint": fp}))
     return pending
 
 
@@ -179,18 +181,20 @@ def embed_graph(
     members = _gather_type_members(writer, pending)
     members.update(_gather_container_members(writer, containers))
 
-    documents: list[tuple[str, str, str]] = []  # (kind_label, node_id, document text)
+    # (kind_label, node_id, document text, content fingerprint observed at scan time). The
+    # fingerprint rides along so the write can drop a vector whose node changed underneath it.
+    documents: list[tuple[str, str, str, str | None]] = []
     for kind_label, node_id, props in pending:
         document = build_document(kind_label, props, members=members.get(node_id))
         if document:
-            documents.append((kind_label, node_id, document))
+            documents.append((kind_label, node_id, document, props.get("_fingerprint")))
     for kind_label, node_id, props in containers:
         mem = members.get(node_id)
         if not mem and not (props.get("doc") or "").strip():
             continue  # bare container (no inventory, no doc) -- nothing worth embedding
         document = build_document(kind_label, props, members=mem)
         if document:
-            documents.append((kind_label, node_id, document))
+            documents.append((kind_label, node_id, document, props.get("_fingerprint")))
 
     scanned = len(pending) + len(containers)
     logger.info(
@@ -200,9 +204,10 @@ def embed_graph(
 
     embedded = 0
     for chunk in _chunked(documents, batch_size):
-        vectors = embedder.embed([doc for _, _, doc in chunk])
+        vectors = embedder.embed([doc for _, _, doc, _ in chunk])
         writer.write_embeddings(
-            [(kind_label, node_id, vec) for (kind_label, node_id, _), vec in zip(chunk, vectors)]
+            [(kind_label, node_id, vec, fp)
+             for (kind_label, node_id, _, fp), vec in zip(chunk, vectors)]
         )
         embedded += len(chunk)
         logger.debug("Embedded %d/%d", embedded, len(documents))
