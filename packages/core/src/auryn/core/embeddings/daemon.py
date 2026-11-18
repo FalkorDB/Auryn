@@ -32,6 +32,7 @@ use `embed="inline"` instead and never reach here.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -99,9 +100,10 @@ def _request_path(graph_name: str) -> Path:
     """A stable, filesystem-safe request filename per graph, so repeated requests for the same
     graph coalesce to one queue entry (the real name is stored inside the file)."""
     safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in graph_name) or "graph"
-    # A short digest disambiguates names that sanitise to the same thing (deterministic, no
-    # collisions across distinct graphs); not security-sensitive.
-    digest = format(abs(hash(graph_name)) & 0xFFFFFFFF, "08x")
+    # A short digest disambiguates names that sanitise to the same thing. hashlib (not the builtin
+    # hash(), which is per-process salted) so DIFFERENT producer processes map the same graph to the
+    # same filename -- that's what makes cross-process coalescing work.
+    digest = hashlib.blake2b(graph_name.encode("utf-8"), digest_size=4).hexdigest()
     return embed_requests_dir() / f"{safe}.{digest}.json"
 
 
@@ -122,7 +124,9 @@ def request_embed(graph_name: str, model: str | None = None) -> None:
     requests = embed_requests_dir()
     requests.mkdir(parents=True, exist_ok=True)
     target = _request_path(graph_name)
-    tmp = target.with_suffix(".json.tmp")
+    # A per-process temp name so concurrent producers (different processes, or threads) never
+    # scribble over each other's half-written file before the atomic rename publishes it.
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     payload: dict[str, str] = {"graph": graph_name}
     if model:
         payload["model"] = model
@@ -272,9 +276,15 @@ def _process_request(req: Path, embedder_for, client, attempts: dict[str, int]):
 
     try:
         data = json.loads(inflight.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("request payload is not a JSON object")
         graph_name = data["graph"]
         model = data.get("model")
-    except (OSError, ValueError, KeyError):
+        if not isinstance(graph_name, str) or not graph_name:
+            raise ValueError("request has no graph name")
+    except (OSError, ValueError, KeyError, TypeError):
+        # Any shape of corrupt entry is dropped, never propagated -- one bad file must not take the
+        # daemon down (e.g. a JSON array makes `data["graph"]` raise TypeError).
         logger.warning("Dropping malformed embed request %s", inflight.name)
         inflight.unlink(missing_ok=True)
         return client

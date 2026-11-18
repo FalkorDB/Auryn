@@ -117,12 +117,15 @@ def test_process_request_retries_then_drops(monkeypatch):
     assert "g-flaky" not in attempts
 
 
-def test_process_request_drops_malformed(monkeypatch):
+@pytest.mark.parametrize("payload", ["not json{", "[]", '{"nograph": 1}', '{"graph": 123}', '{"graph": ""}'])
+def test_process_request_drops_malformed(monkeypatch, payload):
+    """Any shape of corrupt queue entry is dropped, never crashing the daemon -- a JSON array `[]`
+    in particular used to raise an uncaught TypeError on `data["graph"]`."""
     spy = []
     monkeypatch.setattr(worker_mod, "embed_graph", lambda *a, **k: spy.append(1))
     embed_requests_dir().mkdir(parents=True, exist_ok=True)
     req = daemon._request_path("bad")
-    req.write_text("not json{")
+    req.write_text(payload)
     daemon._process_request(req, embedder_for=lambda m: object(), client=_FakeClient(), attempts={})
     assert spy == []                       # never tried to embed
     assert not req.exists() and not req.with_suffix(".inflight").exists()  # dropped
