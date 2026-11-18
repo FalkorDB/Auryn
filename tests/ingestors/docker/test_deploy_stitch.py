@@ -33,6 +33,11 @@ def _seed_module(writer, dotted, file_path):
                                 {"name": dotted, "file_path": file_path}))
 
 
+def _seed_file_proj(writer, lang, project, rel_path):
+    """A File node under an explicit project -- for multi-repo scoping tests."""
+    writer.merge_node(GraphNode("File", {"id": f"{lang}://{project}/file/{rel_path}"}, {"path": rel_path}))
+
+
 def _q(graph, cypher):
     return graph.query(cypher).result_set
 
@@ -61,6 +66,19 @@ def test_packages_scopes_to_copied_subdir(graph, tmp_path):
     stitch(writer)
     packaged = sorted(r[0] for r in _q(graph, "MATCH (:BuildStage)-[:PACKAGES]->(f:File) RETURN f.path"))
     assert packaged == ["svc/app/main.go"]
+
+
+def test_packages_does_not_cross_link_another_project(graph, tmp_path):
+    """In a shared graph holding many repos, a Dockerfile's `COPY .` packages only its OWN repo's
+    code -- never another repo's file at the same relative path (the cross-project leak, cubic P1)."""
+    writer = GraphWriter(graph)
+    _seed_file_proj(writer, "go", "alpha", "app/main.go")   # the Dockerfile's repo
+    _seed_file_proj(writer, "go", "beta", "app/main.go")    # an unrelated co-located repo, same path
+    _ingest_docker(graph, tmp_path, {"Dockerfile": "FROM scratch\nCOPY . /app\n"}, project="alpha")
+
+    stitch(writer)
+    packaged = sorted(r[0] for r in _q(graph, "MATCH (:BuildStage)-[:PACKAGES]->(f:File) RETURN f.id"))
+    assert packaged == ["go://alpha/file/app/main.go"]  # only alpha's file, beta is NOT linked
 
 
 def test_from_stage_copy_is_not_host_package(graph, tmp_path):

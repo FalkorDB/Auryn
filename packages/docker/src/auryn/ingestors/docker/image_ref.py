@@ -29,6 +29,10 @@ DEFAULT_REGISTRY = "docker.io"
 DEFAULT_TAG = "latest"
 OFFICIAL_NAMESPACE = "library"
 
+# Docker Hub answers under several host spellings; all fold onto DEFAULT_REGISTRY so the same image
+# written as `index.docker.io/x` or `docker.io/x` keys ONE Image node.
+_DOCKER_HUB_HOSTS = frozenset({"docker.io", "index.docker.io", "registry-1.docker.io"})
+
 # `FROM scratch` is the explicit empty base -- not a real image, so it never becomes an Image node.
 SCRATCH = "scratch"
 
@@ -68,7 +72,12 @@ def parse_image_ref(ref: str) -> ImageRef:
 
     first, slash, rest = body.partition("/")
     if slash and _looks_like_registry(first):
-        registry, remainder = first, rest
+        # Lowercase the host up front (registries are case-insensitive) so the DEFAULT_REGISTRY
+        # comparison below is reliable -- `DOCKER.IO/nginx` must key the same node as `docker.io/nginx`
+        # (and get the `library/` namespace) -- and fold Docker Hub's legacy hosts onto docker.io.
+        host = first.lower()
+        registry = DEFAULT_REGISTRY if host in _DOCKER_HUB_HOSTS else host
+        remainder = rest
     else:
         registry, remainder = DEFAULT_REGISTRY, body
 

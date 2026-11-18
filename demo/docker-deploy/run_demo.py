@@ -56,21 +56,24 @@ def make_client():
 
 
 def _shutdown(conn, pid) -> None:
-    """Reap the embedded server this demo started (graceful SHUTDOWN, then SIGTERM the tracked pid) so
-    no redis-server/falkordblite process is left behind. No-op for a shared local server."""
+    """Reap ONLY the embedded server this demo started -- identified by the pid captured at connect.
+    A shared localhost FalkorDB (pid is None) belongs to the user, so we must never send it Redis
+    SHUTDOWN or signal it -- just leave it running. For our own embedded server: graceful SHUTDOWN
+    first, then SIGTERM the tracked pid, so no redis-server/falkordblite process is left behind."""
+    if not (isinstance(pid, int) and pid > 0):
+        return  # shared / user-owned server -- not ours to stop
     for obj in (getattr(conn, "connection", None), conn):
         fn = getattr(obj, "shutdown", None)
         if callable(fn):
             try:
                 fn()
             except Exception:
-                pass
+                pass  # Redis SHUTDOWN closes the socket before replying -- the raised error is expected
             break
-    if isinstance(pid, int) and pid > 0:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass  # already gone (the graceful SHUTDOWN above reaped it) -- nothing left to signal
 
 
 def rows(g, cypher, params=None):
@@ -86,9 +89,9 @@ def main() -> None:
     print(f"\nFalkorDB backend: {backend}")
     try:
         try:
-            conn.select_graph(GRAPH).delete()  # fresh each run
+            conn.select_graph(GRAPH).delete()  # idempotent: start from a clean graph each run
         except Exception:
-            pass
+            pass  # no such graph yet (first run) -- nothing to delete
         g = conn.select_graph(GRAPH)
         ingest_directory(GraphWriter(g), str(SAMPLE), project_name="shop", deep="off", auto_install=False)
 

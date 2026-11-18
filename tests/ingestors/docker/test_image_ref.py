@@ -49,3 +49,12 @@ def test_same_ref_different_spelling_same_id():
     # The contract: two spellings of the same image collapse to one id (the hub-merge guarantee).
     assert image_id("nginx") == image_id("docker.io/library/nginx:latest")
     assert image_id("python:3.12-slim") == image_id("docker.io/library/python:3.12-slim")
+
+
+def test_docker_hub_host_and_case_variants_collapse():
+    # Docker Hub's legacy hosts + a shouted registry case all key the SAME node as the bare name --
+    # the library/ namespace must still be applied after the host is folded/lowercased.
+    canonical = image_id("docker.io/library/nginx:latest")
+    for ref in ("nginx", "docker.io/nginx", "DOCKER.IO/nginx",
+                "index.docker.io/nginx", "registry-1.docker.io/library/nginx"):
+        assert image_id(ref) == canonical, ref

@@ -75,21 +75,32 @@ def _clear_prior_layer(writer: GraphWriter) -> None:
 _CODE_SOURCE_NODES = (("File", "path"), ("Module", "file_path"))
 
 
+def _project_of(node_id: str) -> str:
+    """The `<project>` component of a graph id (`<scheme>://<project>/...`), or "" if unparseable.
+    A Dockerfile and the code it ships, ingested from one repo, share it (`docker://demo`,
+    `python://demo`) -- so it scopes the PACKAGES join to the stage's OWN repo and never links an
+    image to another co-located repo's files that merely share a relative path."""
+    if "://" not in node_id:
+        return ""
+    return node_id.split("://", 1)[1].split("/", 1)[0]
+
+
 def _packages_edges(writer: GraphWriter) -> list[GraphEdge]:
     """For each BuildStage, resolve its host-context `COPY` sources to the code source nodes a
     language ingestor produced (File/Module, by path) and emit `BuildStage -PACKAGES-> <code node>`.
-    Two reads per convention, matched in memory -- O(stages x copies x files), not a query per copy."""
+    Matching is scoped to the stage's own project (a shared graph holds many repos). Two reads per
+    convention, matched in memory -- O(stages x copies x files), not a query per copy."""
     stages = writer.ro_query(
         "MATCH (s:BuildStage) RETURN s.id, s.context, s.copy_sources"
     ).result_set
     # Every code source node EXCEPT the Dockerfiles this tier emits (those are keyed `docker://`).
-    code_nodes: list[tuple[str, str, str]] = []  # (id, path, label)
+    code_nodes: list[tuple[str, str, str, str]] = []  # (id, path, label, project)
     for label, prop in _CODE_SOURCE_NODES:
         rows = writer.ro_query(
             f"MATCH (n:{label}) WHERE n.{prop} IS NOT NULL AND NOT n.id STARTS WITH 'docker://' "
             f"RETURN n.id, n.{prop}"
         ).result_set
-        code_nodes.extend((str(nid), str(path), label) for nid, path in rows)
+        code_nodes.extend((str(nid), str(path), label, _project_of(str(nid))) for nid, path in rows)
     if not code_nodes:
         return []
 
@@ -97,11 +108,12 @@ def _packages_edges(writer: GraphWriter) -> list[GraphEdge]:
     for sid, context, copy_sources in stages:
         if not copy_sources:
             continue
+        stage_proj = _project_of(str(sid))  # PACKAGES only reaches THIS Dockerfile's own repo
         context = str(context or "")
         targets = [_target_path(context, str(src)) for src in copy_sources]
         matched: set[str] = set()
-        for nid, path, label in code_nodes:
-            if nid in matched:
+        for nid, path, label, proj in code_nodes:
+            if nid in matched or proj != stage_proj:
                 continue
             if any(_path_under(path, t) for t in targets):
                 matched.add(nid)

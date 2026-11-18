@@ -37,7 +37,6 @@ def _stage_key(stage: Stage) -> str:
 def build_graph(files: list[tuple[str, ParsedDockerfile]], proj_id: str) -> Iterator[GraphNode | GraphEdge]:
     for rel_path, parsed in files:
         fid = ids.file_id(proj_id, rel_path)
-        context = posixpath.dirname(rel_path)
         yield GraphNode("File", {"id": fid}, {"path": rel_path, "name": posixpath.basename(rel_path)})
         yield GraphEdge("HAS_FILE", "Project", {"id": proj_id}, "File", {"id": fid})
 
