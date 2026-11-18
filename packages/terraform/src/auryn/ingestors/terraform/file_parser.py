@@ -135,42 +135,80 @@ def _refs(attrs: dict, self_address: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+# Container-RUNTIME resources whose root carries a top-level `image` with no nested container block.
+# An explicit allow-list, NOT an `endswith("_container")` test -- `azurerm_storage_container` and the
+# like manage storage, not workloads, and must not have a `metadata.image` read as a container image.
+_CONTAINER_RESOURCE_TYPES = frozenset({"docker_container", "podman_container"})
+
+# Image-ref attributes that are container-specific wherever they appear: Lambda/ECS `image_uri`, App
+# Runner's `source_configuration.image_repository.image_identifier`.
+_IMAGE_ATTRS = frozenset({"image_uri", "image_identifier"})
+
+# Nested block keys that open a container context for a bare `image` (Cloud Run `template.containers`,
+# the k8s provider's `spec.container` / `spec.init_container`).
+_CONTAINER_BLOCK_KEYS = frozenset({"container", "containers", "init_container"})
+
+
 def _is_container_resource(rtype: str) -> bool:
-    """A resource whose TYPE denotes a container (the Docker provider's `docker_container`) carries a
-    top-level `image` with no nested `containers` block to mark the context -- so its root attributes
-    ARE a container context."""
-    return rtype.endswith("_container")
+    """Whether a resource TYPE denotes a container runtime whose root attributes ARE a container context
+    (the Docker provider's `docker_container` carries a top-level `image` with no nested block)."""
+    return rtype in _CONTAINER_RESOURCE_TYPES
 
 
 def _collect_image_keys(v, out: dict, in_container: bool = False) -> None:
-    """Find CONTAINER image refs at any nesting. `image_uri` (Lambda/App Runner) is container-specific,
-    so collected anywhere; a bare `image` is collected ONLY inside a container context -- a `container`
-    / `containers` block (Cloud Run's `template.containers.image`, the k8s provider's `spec...container`)
-    or a container-typed resource root. So a VM boot disk's `boot_disk.initialize_params.image` is NOT
-    mistaken for a container image, and a metadata map keyed `container_owner` does NOT turn the context
-    on (the key must BE `container`/`containers`, not merely contain the word). Interpolated (`${...}`)
-    values are KEPT -- `image_node` flags them unresolved -- so `image_uri = "${ecr...}:tag"` still
-    yields an Image."""
+    """Find CONTAINER image refs at any nesting. An `_IMAGE_ATTRS` key (`image_uri`/`image_identifier`)
+    is container-specific, so collected anywhere; a bare `image` is collected ONLY inside a container
+    context -- a `_CONTAINER_BLOCK_KEYS` block (Cloud Run's `template.containers.image`, the k8s
+    provider's `spec.container`/`spec.init_container`) or a container-runtime resource root. So a VM boot
+    disk's `boot_disk.initialize_params.image` is NOT mistaken for a container image, and a metadata map
+    keyed `container_owner` does NOT turn the context on (the key must BE one of the block keys, not
+    merely contain the word). Interpolated (`${...}`) values are KEPT -- `image_node` flags them
+    unresolved -- so `image_uri = "${ecr...}:tag"` still yields an Image."""
     if isinstance(v, dict):
         for k, x in v.items():
             if _meta_key(k):
                 continue
-            if (k == "image_uri" or (k == "image" and in_container)) and isinstance(x, str):
+            if (k in _IMAGE_ATTRS or (k == "image" and in_container)) and isinstance(x, str):
                 img = _unq(x)
                 if img:
                     out.setdefault(img, None)
             else:
-                child_container = in_container or (isinstance(k, str) and k.lower() in ("container", "containers"))
+                child_container = in_container or (isinstance(k, str) and k.lower() in _CONTAINER_BLOCK_KEYS)
                 _collect_image_keys(x, out, child_container)
     elif isinstance(v, list):
         for x in v:
             _collect_image_keys(x, out, in_container)
 
 
+# Attributes that carry a serialized container spec (an ECS `container_definitions = jsonencode([...])`
+# blob). The `_IMAGE` text scan runs ONLY over these -- scanning every string leaf would read an
+# `image = "..."` line inside an unrelated `user_data` script as a container image.
+_BLOB_KEYS = frozenset({"container_definitions"})
+
+
+def _blob_strings(v):
+    """String leaves under a `_BLOB_KEYS` attribute, at any nesting (the blob is usually a top-level
+    attribute, but search defensively)."""
+    if isinstance(v, dict):
+        for k, x in v.items():
+            if _meta_key(k):
+                continue
+            yield from (_strings(x) if isinstance(k, str) and k in _BLOB_KEYS else _blob_strings(x))
+    elif isinstance(v, list):
+        for x in v:
+            yield from _blob_strings(x)
+
+
 def _images(attrs: dict, rtype: str = "") -> tuple[str, ...]:
+    """CONTAINER images a resource runs. Scope boundary (best-effort, not a full HCL evaluator): an
+    image is materialized only when it has a LITERAL component -- a plain ref (`"shop/api:1.0"`) or an
+    interpolation with literal text (`"${ecr.url}:1.0"`, kept unresolved). A bare variable-only value
+    (`image = var.api_image`) is NOT materialized: it has no literal to key on and can never resolve to
+    or join a concrete hub image. Deeply nested interpolation-in-quoted-string expressions
+    (`${coalesce("${upper("}")}", ...)`) are likewise out of scope for the state-machine scanner."""
     out: dict[str, None] = {}
-    _collect_image_keys(attrs, out, _is_container_resource(rtype))  # image keys at any depth
-    for s in _strings(attrs):                       # + images inside a jsonencode/container_definitions blob
+    _collect_image_keys(attrs, out, _is_container_resource(rtype))  # structured image keys at any depth
+    for s in _blob_strings(attrs):                  # + images inside a container_definitions jsonencode blob
         for m in _IMAGE.findall(s):
             out.setdefault(m, None)
     return tuple(out)

@@ -65,7 +65,7 @@ different repos (and two different ingestors) must agree on without coordination
 | `BuildStage` | `docker://<project>/<dockerfile-path>#<stage-name-or-index>` | project |
 | `Service` (compose) | `compose://<project>/<file>/<service>` | project |
 | `Service` (k8s) | `k8s://<project>/<namespace>/<kind>/<name>` | project |
-| `Resource` (terraform) | `terraform://<project>/<module-dir>/<type>.<name>` (root module: `terraform://<project>/<type>.<name>`) | project |
+| `Resource` (terraform) | `terraform://<project>/<module-dir>/<address>` — `<address>` is the full Terraform address: `<type>.<name>` (resource), `data.<type>.<name>` (data source), or `module.<name>` (module); the root module omits `<module-dir>` | project |
 | `Resource`/`Service` (helm) | `helm://<project>/<chart>/<template>/<name>` | project |
 | `ConfigValue` / `Secret` | `<owner-id>/env/<NAME>` | owner-scoped |
 

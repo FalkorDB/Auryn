@@ -68,10 +68,42 @@ def test_nested_image_attribute_is_found():
 
 
 def test_interpolated_image_uri_is_kept():
-    # an `image_uri` built from an ECR reference must still produce an (unresolved) Image, not vanish --
-    # and the WHOLE ref is kept (dropping the `:1.0` tag or returning an extra image is a regression)
-    p = parse_source('resource "aws_apprunner_service" "s" { image_uri = "${aws_ecr_repository.r.url}:1.0" }')
+    # a Lambda container `image_uri` built from an ECR reference must still produce an (unresolved)
+    # Image -- and the WHOLE ref is kept (dropping the `:1.0` tag or an extra image is a regression)
+    p = parse_source('resource "aws_lambda_function" "fn" { image_uri = "${aws_ecr_repository.r.url}:1.0" }')
     assert p.blocks[0].images == ("${aws_ecr_repository.r.url}:1.0",)
+
+
+def test_apprunner_image_identifier_is_found():
+    # App Runner declares its image at source_configuration.image_repository.image_identifier
+    p = parse_source(
+        'resource "aws_apprunner_service" "s" {\n'
+        '  source_configuration {\n    image_repository {\n'
+        '      image_identifier = "123.dkr.ecr/app:2"\n    }\n  }\n}\n'
+    )
+    assert p.blocks[0].images == ("123.dkr.ecr/app:2",)
+
+
+def test_init_container_image_is_found():
+    # the k8s provider repeats `init_container` alongside `container` -- its image counts too
+    p = parse_source(
+        'resource "kubernetes_pod_v1" "p" {\n'
+        '  spec {\n    init_container {\n      image = "busybox:1.36"\n    }\n  }\n}\n'
+    )
+    assert p.blocks[0].images == ("busybox:1.36",)
+
+
+def test_storage_container_type_is_not_a_container_runtime():
+    # a resource type that ENDS with `_container` but manages storage (azurerm_storage_container) must
+    # NOT have a `metadata.image` read as a container image
+    p = parse_source('resource "azurerm_storage_container" "c" { metadata = { image = "example/app:1" } }')
+    assert p.blocks[0].images == ()
+
+
+def test_image_like_line_in_user_data_is_not_an_image():
+    # a stray `image = "..."` inside a non-container string (a user_data script) must not be scraped
+    p = parse_source('resource "aws_instance" "vm" { user_data = "docker pull x\\nimage = \\"evil/x:1\\"" }')
+    assert p.blocks[0].images == ()
 
 
 def test_interpolated_image_in_blob_is_kept():
