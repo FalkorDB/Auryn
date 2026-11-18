@@ -356,25 +356,42 @@ def _calls_in_body(body: list[ast.stmt]) -> list[RawCall]:
 
     A `lambda` body is NOT skipped: a lambda is anonymous and never becomes its own graph node, so
     the calls inside it (`observe(lambda: helper(x))` -> `helper`) would otherwise vanish. They're
-    attributed to the enclosing scope. A nested `def`/`class` IS skipped here -- it gets its own
-    node and its calls are collected there (see `_function`'s nested recursion)."""
+    attributed to the enclosing scope -- EXCEPT a call to one of the lambda's OWN parameters, which is
+    a local (`lambda helper: helper()` calls the arg, not a same-named function), so it's dropped.
+    A nested `def`/`class` IS skipped here -- it gets its own node and its calls are collected there
+    (see `_function`'s nested recursion)."""
     out: list[RawCall] = []
 
-    def walk(node: ast.AST) -> None:
+    def visit(node: ast.AST, bound: frozenset[str]) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return  # a nested def/class -- its own node owns its calls
+        if isinstance(node, ast.Lambda):
+            # defaults run in THIS scope (at definition time); the body runs with the lambda's params
+            # bound, so a call to one of those params is a local, not a project function.
+            for default in [*node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]:
+                visit(default, bound)
+            visit(node.body, bound | _lambda_param_names(node.args))
+            return
+        if isinstance(node, ast.Call):
+            rc = _raw_call(node.func)
+            if rc is not None and not (rc.is_simple_name and rc.name in bound):
+                out.append(rc)
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                continue  # a nested def/class -- its own node owns its calls
-            if isinstance(child, ast.Call):
-                rc = _raw_call(child.func)
-                if rc is not None:
-                    out.append(rc)
-            walk(child)  # descends into a lambda body too (anonymous -> calls belong to this scope)
+            visit(child, bound)
 
     for stmt in body:
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        walk(stmt)
+        visit(stmt, frozenset())
     return out
+
+
+def _lambda_param_names(args: ast.arguments) -> frozenset[str]:
+    """Every parameter name a lambda binds (positional, keyword-only, *args, **kwargs)."""
+    names = {a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
+    if args.vararg:
+        names.add(args.vararg.arg)
+    if args.kwarg:
+        names.add(args.kwarg.arg)
+    return frozenset(names)
 
 
 def _calls(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[RawCall]:

@@ -320,25 +320,31 @@ def test_nested_function_is_a_node_and_its_calls_resolve():
     assert "python://demo/module/m.func.helper()" not in {t for t, _ in _calls_from(items, outer_id)}
 
 
-def test_nested_calls_resolve_through_lexical_scope():
-    # ast engine: a nested def calling a SIBLING nested def, a RECURSIVE self-call, and the enclosing
-    # function calling its own nested defs all resolve via the enclosing (lexical) scope (#785 review)
+def test_ast_engine_leaves_nested_sibling_calls_unresolved():
+    # The ast FALLBACK does no enclosing-scope resolution (it would risk shadowing false edges): a
+    # nested def's call to a SIBLING nested def is left UNRESOLVED (never a WRONG edge) -- the default
+    # jedi engine resolves those by inference. A call to a MODULE-level function still resolves.
     m = _module(
+        "def helper():\n    return 1\n\n"
         "def outer():\n"
-        "    def helper():\n        return 1\n"
-        "    def run():\n        return helper()\n"
-        "    def rec(n):\n        return rec(n)\n"
-        "    return run() + rec(1)\n"
+        "    def sibling():\n        return 1\n"
+        "    def run():\n        return sibling() + helper()\n"
+        "    return run\n"
     )
     items = list(resolution.resolve([m], "python://demo"))
-    helper_id = "python://demo/module/m.func.outer().func.helper()"
-    run_id = "python://demo/module/m.func.outer().func.run()"
-    rec_id = "python://demo/module/m.func.outer().func.rec(n)"
-    outer_id = "python://demo/module/m.func.outer()"
-    assert (helper_id, "resolved") in _calls_from(items, run_id)   # sibling nested def
-    assert (rec_id, "resolved") in _calls_from(items, rec_id)      # recursion
-    outer_targets = {t for t, _ in _calls_from(items, outer_id)}
-    assert run_id in outer_targets and rec_id in outer_targets     # enclosing -> its nested defs
+    targets = {t for t, _ in _calls_from(items, "python://demo/module/m.func.outer().func.run()")}
+    assert "python://demo/module/m.func.helper()" in targets                      # module fn -> resolved
+    assert "python://demo/module/m.func.outer().func.sibling()" not in targets    # sibling -> unresolved
+
+
+def test_lambda_param_shadowing_a_module_function_is_not_an_edge():
+    # a lambda arg named like a module function: `lambda helper: helper()` calls the ARG, not the
+    # function -> no false CALLS edge (#786 review)
+    m = _module("def helper():\n    return 1\n\ndef use():\n    f = lambda helper: helper()\n    return f\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    assert "python://demo/module/m.func.helper()" not in {
+        t for t, _ in _calls_from(items, "python://demo/module/m.func.use()")
+    }
 
 
 def test_param_shadows_sibling_function_no_false_edge():
