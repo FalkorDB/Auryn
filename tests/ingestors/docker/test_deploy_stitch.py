@@ -92,13 +92,26 @@ def test_absolute_copy_source_resolves_under_context(graph, tmp_path):
 
 
 def test_copy_glob_matches_pattern_not_siblings(graph, tmp_path):
-    """`COPY src/*.py` packages only the .py files under src/, not a sibling non-match."""
+    """`COPY src/*.py` packages only the .py files directly under src/ -- not a sibling non-match, and
+    not a NESTED file (`*` doesn't cross `/`, per Docker's filepath.Match)."""
     writer = GraphWriter(graph)
-    _seed_file(writer, "py", "svc/src/app.py")      # matches src/*.py
-    _seed_file(writer, "py", "svc/src/README.md")   # same dir, does NOT match the glob
+    _seed_file(writer, "py", "svc/src/app.py")        # matches src/*.py
+    _seed_file(writer, "py", "svc/src/README.md")     # same dir, does NOT match the glob
+    _seed_file(writer, "py", "svc/src/sub/deep.py")   # nested -> * must NOT cross '/'
     _ingest_docker(graph, tmp_path, {"svc/Dockerfile": "FROM scratch\nCOPY src/*.py /app\n"})
     stitch(writer)
     assert [r[0] for r in _q(graph, "MATCH (:BuildStage)-[:PACKAGES]->(f:File) RETURN f.path")] == ["svc/src/app.py"]
+
+
+def test_copy_parent_escape_is_clamped_to_context(graph, tmp_path):
+    """`COPY /../app` can't escape the build context (BuildKit forbids it); it resolves under context,
+    not above it -- so it links `svc/app/...`, never a sibling repo at the root."""
+    writer = GraphWriter(graph)
+    _seed_file(writer, "go", "svc/app/main.go")   # under context -> packaged
+    _seed_file(writer, "go", "app/other.go")      # at repo root (would be hit if `..` escaped) -> NOT
+    _ingest_docker(graph, tmp_path, {"svc/Dockerfile": "FROM scratch\nCOPY /../app /dst\n"})
+    stitch(writer)
+    assert [r[0] for r in _q(graph, "MATCH (:BuildStage)-[:PACKAGES]->(f:File) RETURN f.path")] == ["svc/app/main.go"]
 
 
 def test_from_stage_copy_is_not_host_package(graph, tmp_path):

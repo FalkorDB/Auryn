@@ -99,18 +99,29 @@ def test_resync_changed_base_removes_stale_edge(graph, tmp_path):
     assert sorted(r[0] for r in q("MATCH (:BuildStage)-[:BASED_ON]->(i:Image) RETURN i.ref")) == ["docker.io/library/alpine:3.21"]
 
 
+def _snapshot(graph):
+    """The full deployment state: node id set, edge (type, from, to) triples, and the key props of
+    stages/images -- so a replaced-with-wrong edge or a changed stage property is caught, not just a
+    stable count. (The Project's own `commit_sha` deliberately differs sha-A->sha-B, so it's excluded.)"""
+    q = lambda c: graph.query(c).result_set
+    nodes = sorted(r[0] for r in q("MATCH (n) WHERE n.id IS NOT NULL RETURN n.id"))
+    edges = sorted((r[0], r[1], r[2]) for r in q(
+        "MATCH (a)-[r]->(b) WHERE a.id IS NOT NULL AND b.id IS NOT NULL RETURN type(r), a.id, b.id"))
+    props = sorted(tuple(r) for r in q("MATCH (s:BuildStage) RETURN s.id, s.base_ref, s.stage, s.copy_sources")) \
+        + sorted(tuple(r) for r in q("MATCH (i:Image) RETURN i.id, i.ref, i.resolved"))
+    return nodes, edges, props
+
+
 def test_resync_recompute_is_idempotent(graph, tmp_path):
     # Re-applying the SAME content under a DIFFERENT target_sha reaches the recompute+delta path (not
-    # the commit_sha short-circuit) and must leave the graph byte-identical -- no dupes, no drift.
+    # the commit_sha short-circuit) and must leave the graph identical -- same nodes, edges, and props.
     (tmp_path / "Dockerfile").write_text(_MULTISTAGE)
     src = LocalDirectorySource(str(tmp_path))
     w = GraphWriter(graph)
     sync_at(w, src, "sha-A", project_name="demo", repo_uri="test://docker", ref=None)
-    n1 = graph.query("MATCH (n) RETURN count(n)").result_set[0][0]
-    e1 = graph.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
+    before = _snapshot(graph)
     sync_at(w, src, "sha-B", project_name="demo", repo_uri="test://docker", ref=None)  # diff sha -> recompute
-    assert graph.query("MATCH (n) RETURN count(n)").result_set[0][0] == n1
-    assert graph.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0] == e1
+    assert _snapshot(graph) == before
 
 
 def test_arg_without_default_keeps_unresolved_base(graph, tmp_path):

@@ -149,11 +149,12 @@ instead of a `linkage_key`:
   (an internally-built image) — recomputed by the stitch, independent of ingest order and of which
   side wrote the node.
 - **GC.** An `image://…` node left with **no inbound reference of any kind** — no base (`BASED_ON`),
-  no stage copy (`COPIES_FROM`), no builder (`BUILDS_IMAGE`), no runner (`RUNS_IMAGE`) — is the
-  residue of a removed Dockerfile or manifest; the stitch deletes it (predicate + delete in one
-  query), scoped to the `image://` prefix so it never touches a project-owned node — the same
-  shared-node lifecycle `APIEndpoint` has (ADR 0006). An external base like `python:3.12-slim` keeps
-  its `BASED_ON` referrers, so it is **not** an orphan while any Dockerfile still builds `FROM` it.
+  no builder (`BUILDS_IMAGE`), no runner (`RUNS_IMAGE`), no provisioner (`PROVISIONS`, a Terraform
+  `Resource`) — is the residue of a removed Dockerfile or manifest; the stitch deletes it (predicate +
+  delete in one query), scoped to the `image://` prefix so it never touches a project-owned node — the
+  same shared-node lifecycle `APIEndpoint` has (ADR 0006). (`COPIES_FROM` is `BuildStage → BuildStage`
+  and never targets an `Image`, so it isn't a keep reason.) An external base like `python:3.12-slim`
+  keeps its `BASED_ON` referrers, so it is **not** an orphan while any Dockerfile still builds `FROM` it.
 
 **v1 keeps Port/Volume as edge properties**, not nodes (ingestor principle: *invent no node a query
 doesn't need*). They are promoted to first-class nodes only when a seam needs to point *at* one.

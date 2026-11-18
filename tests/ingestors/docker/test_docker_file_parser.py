@@ -118,3 +118,27 @@ def test_copy_from_with_json_form():
     p = parse_source('FROM a AS build\nFROM b\nCOPY --from=build ["/out", "/app"]\n')
     c = p.stages[1].copies[0]
     assert c.from_stage == "build" and c.sources == ("/out",)
+
+
+def test_json_copy_preserves_internal_whitespace():
+    # A path with double spaces inside the JSON string must survive (not be collapsed by tokenizing).
+    p = parse_source('FROM alpine\nCOPY ["a  b.py", "/app/a  b.py"]\n')
+    c = p.stages[0].copies[0]
+    assert c.sources == ("a  b.py",) and c.dest == "/app/a  b.py"
+
+
+def test_bracket_glob_falls_back_to_shell_form():
+    # `[ab].py` is a shell char-class glob, not JSON -> must parse as a shell COPY, not be dropped.
+    p = parse_source("FROM alpine\nCOPY --chown=1000 [ab].py /app/\n")
+    c = p.stages[0].copies[0]
+    assert c.sources == ("[ab].py",) and c.dest == "/app/"
+
+
+def test_resolve_base_leaves_modifier_form_intact():
+    from auryn.ingestors.docker.build import _resolve_base
+
+    # `${BASE:-$FALLBACK}` must stay verbatim -- the inner `$FALLBACK` must NOT be substituted.
+    assert _resolve_base("${BASE:-$FALLBACK}", {"FALLBACK": "alpine"}) == "${BASE:-$FALLBACK}"
+    # a plain `${NAME}` with a value still expands; a no-value ARG stays raw.
+    assert _resolve_base("${BASE}", {"BASE": "python:3.12"}) == "python:3.12"
+    assert _resolve_base("${BASE}", {"BASE": ""}) == "${BASE}"

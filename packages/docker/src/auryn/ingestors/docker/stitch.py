@@ -19,9 +19,9 @@ producers -- their clears are already wired here so they compose into this one p
 
 from __future__ import annotations
 
-import fnmatch
 import logging
 import posixpath
+import re
 
 from auryn.core.graph_client import GraphWriter
 from auryn.core.graph_model import GraphEdge
@@ -124,32 +124,61 @@ def _packages_edges(writer: GraphWriter) -> list[GraphEdge]:
 
 
 def _target_path(context: str, src: str) -> str:
-    """The repo-relative path a `COPY <src>` (relative to the build `context`) resolves to. `.` /`""`
-    means the whole context (returned as the context dir, `""` = repo root). A trailing glob
-    component is reduced to its containing directory (best-effort)."""
+    """The repo-relative path (or glob PATTERN) a `COPY <src>` resolves to, relative to the build
+    `context`. `.`/`""` means the whole context (returned as the context dir, `""` = repo root). A
+    glob is kept VERBATIM so `_path_under` matches the pattern per segment, not every sibling."""
     src = src.strip()
     if src.startswith("./"):
         src = src[2:]
     if src in (".", "", "/"):
         return context
     # Docker resolves COPY sources from the build-context ROOT: a leading `/` is dropped (not an
-    # absolute host path), so `COPY /app` means `<context>/app`. Without stripping it, the joined
-    # target stays absolute and never matches a repo-relative code path. A glob is kept VERBATIM (not
-    # reduced to its dir) so `_path_under` matches the pattern, not every sibling.
+    # absolute host path, so `COPY /app` means `<context>/app`), and `..` that would escape the context
+    # is removed (BuildKit forbids it) -- otherwise `COPY /../app` would normalize ABOVE the context and
+    # mis-link a sibling repo's file.
     src = src.lstrip("/").rstrip("/")
+    while src.startswith("../"):
+        src = src[3:]
+    if src in ("..", ""):
+        return context
     joined = posixpath.join(context, src) if context else src
     norm = posixpath.normpath(joined) if joined else ""
     return "" if norm == "." else norm
 
 
+def _glob_to_regex(pattern: str) -> re.Pattern:
+    """Translate a Docker COPY glob to a regex with Go `filepath.Match` semantics: `*` and `?` do NOT
+    cross `/` (unlike `fnmatch`), so `src/*.py` matches `src/app.py` but not `src/sub/app.py`. `[...]`
+    character classes pass through; every other char is literal."""
+    out, i = [], 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[":
+            j = pattern.find("]", i + 1)
+            if j == -1:
+                out.append(re.escape(c))
+            else:
+                out.append(pattern[i : j + 1])  # a literal char class, valid regex as-is
+                i = j
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("^" + "".join(out) + "$")
+
+
 def _path_under(path: str, target: str) -> bool:
     """A code file `path` is packaged by a copy resolving to `target` iff: the target is the whole
-    context root (`""`); the target is a glob and the path matches it (`COPY src/*.py` links only the
-    .py files, not `src/README`); or the path IS that file or lives under that directory."""
+    context root (`""`); the target is a glob and the path matches it per segment (`COPY src/*.py`
+    links `src/app.py`, not `src/README` nor nested `src/sub/app.py`); or the path IS that file or
+    lives under that directory."""
     if target == "":
         return True
     if any(ch in target for ch in _GLOB_CHARS):
-        return fnmatch.fnmatchcase(path, target)
+        return _glob_to_regex(target).match(path) is not None
     return path == target or path.startswith(target + "/")
 
 
@@ -165,16 +194,17 @@ def _recompute_image_resolved(writer: GraphWriter) -> None:
 
 
 def _gc_orphan_images(writer: GraphWriter) -> int:
-    """Delete `Image` nodes left with no inbound reference at all -- neither a base (`BASED_ON`), a
-    builder (`BUILDS_IMAGE`), a runner (`RUNS_IMAGE`), nor a stage copy (`COPIES_FROM`). These are the
-    residue of a removed Dockerfile/manifest; the `image://` node lives outside any project prefix, so
-    a project resync can't reclaim it -- this does (the shared-node lifecycle, ADR 0007 §6)."""
+    """Delete `Image` nodes left with no inbound reference at all -- no base (`BASED_ON`), builder
+    (`BUILDS_IMAGE`), runner (`RUNS_IMAGE`), nor provisioner (`PROVISIONS`, a Terraform `Resource`).
+    (`COPIES_FROM` is `BuildStage -> BuildStage` and can never target an `Image`, so it's not a keep
+    reason.) These are the residue of a removed Dockerfile/manifest; the `image://` node lives outside
+    any project prefix, so a project resync can't reclaim it -- this does (shared-node lifecycle, §6)."""
     # Predicate test AND delete in ONE write query: a separate check-then-delete could DETACH DELETE
     # an image a concurrent ingest referenced in between (the delete rechecked only ids, not the
     # orphan predicate). One query closes that TOCTOU -- same pattern as the http stitch's orphan GC.
     res = writer.query(
         "MATCH (i:Image) WHERE NOT ()-[:BASED_ON]->(i) AND NOT ()-[:BUILDS_IMAGE]->(i) "
-        "AND NOT ()-[:RUNS_IMAGE]->(i) AND NOT ()-[:COPIES_FROM]->(i) "
+        "AND NOT ()-[:RUNS_IMAGE]->(i) AND NOT ()-[:PROVISIONS]->(i) "
         "WITH i, i.id AS gone DETACH DELETE i RETURN count(gone)"
     )
     rows = res.result_set

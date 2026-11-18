@@ -51,6 +51,12 @@ class ImageRef:
 
     @property
     def normalized(self) -> str:
+        # An unexpanded `${VAR}`/`$VAR` ref: its RAW text is its identity. Applying registry/`library`/
+        # tag defaults would collapse distinct refs (`$BASE` vs `docker.io/library/$BASE`, which expand
+        # to different repos) onto one id. Keep it verbatim so nothing false-merges and the placeholder
+        # round-trips to the text a later substitution expands.
+        if self.unresolved:
+            return self.raw
         base = f"{self.registry}/{self.repository}"
         if self.digest:
             return f"{base}@{self.digest}"

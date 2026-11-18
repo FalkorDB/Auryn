@@ -18,24 +18,33 @@ from auryn.ingestors.docker import ids
 from auryn.ingestors.docker.image_ref import SCRATCH, image_id, parse_image_ref
 from auryn.ingestors.docker.model import ParsedDockerfile, Stage
 
-# `${NAME}` or `$NAME` only -- a `${NAME:-default}` / `${NAME-x}` / `${NAME+x}` / `${NAME?x}` modifier
-# form (anything but a bare identifier inside the braces) is intentionally NOT matched, so it is left
-# verbatim and flagged unresolved rather than half-substituted into a corrupt ref.
-_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+# A whole `${...}` brace expression OR a bare `$NAME`. The brace form is matched as ONE unit so a
+# modifier expression (`${BASE:-$FALLBACK}`, `${NAME-x}`, `${NAME+x}`, `${NAME?x}`) is consumed whole
+# and left verbatim -- never partially substituted via its inner `$FALLBACK`.
+_VAR = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
+_PLAIN_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _resolve_base(base: str, args: dict[str, str]) -> str:
     """Best-effort `${ARG}`/`$ARG` substitution from the file's global ARGs so `FROM ${BASE}:${TAG}`
     normalizes when those ARGs have NON-EMPTY defaults. A missing ARG, an empty-valued ARG (`ARG BASE`
-    with no default), or a modifier form is left as the raw `${...}` text -- so the base stays flagged
-    `unresolved` (and keeps a real Image placeholder) instead of collapsing to an empty/garbage ref."""
+    with no default), or a modifier form (`${BASE:-default}`) is left as the raw `${...}`/`$NAME` text
+    -- so the base stays flagged `unresolved` (keeping a real Image placeholder) instead of collapsing
+    to an empty/garbage ref or being half-substituted."""
     if "$" not in base:
         return base
 
     def _sub(m: re.Match) -> str:
-        name = m.group(1) if m.group(1) is not None else m.group(2)
+        tok = m.group(0)
+        if tok.startswith("${"):
+            inner = tok[2:-1]
+            if not _PLAIN_NAME.fullmatch(inner):
+                return tok  # a modifier/default form -> leave the WHOLE `${...}` verbatim
+            name = inner
+        else:
+            name = tok[1:]
         val = args.get(name)
-        return val if val else m.group(0)  # missing or empty -> keep the raw ${...}/$NAME
+        return val if val else tok  # missing or empty -> keep the raw text
 
     return _VAR.sub(_sub, base)
 

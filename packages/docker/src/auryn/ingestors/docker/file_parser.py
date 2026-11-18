@@ -13,10 +13,12 @@ ENV, LABEL, USER, ...) are recognized and skipped; ENV->ConfigValue is a later a
 from __future__ import annotations
 
 import json
+import re
 
 from auryn.ingestors.docker.model import Copy, ParsedDockerfile, Stage
 
 _CONTINUATION = "\\"
+_LEADING_FLAGS = re.compile(r"(?:--\S+\s+)*")  # `--from=x --chown=y ` before the operands
 
 
 def _logical_lines(text: str) -> list[str]:
@@ -66,32 +68,34 @@ def _parse_from(rest: str) -> tuple[str, str | None]:
 
 
 def _parse_copy(rest: str) -> Copy | None:
-    """`[--from=X] [--chown=...] src... dest`. Leading `--` flags are stripped FIRST, so both forms
-    accept them -- the shell form (whitespace-separated) and the JSON exec form (`["src", "dest"]`,
-    which Docker also allows flags before, e.g. `COPY --chown=x ["a", "b"]`)."""
-    toks = _tokens(rest)
+    """`[--from=X] [--chown=...] src... dest`. Leading `--` flags are peeled off the ORIGINAL string
+    first (so both forms accept them), then the remainder is parsed as either the JSON exec form
+    (`["src", "dest"]` — decoded from the untouched substring so whitespace inside a path survives) or
+    the shell form (whitespace-separated). A `[`-prefixed operand that is NOT valid JSON (a shell-form
+    `[ab].py` char-class glob) falls through to shell parsing rather than dropping the copy."""
+    flags = _LEADING_FLAGS.match(rest)
+    operands_str = rest[flags.end():].strip()
     from_stage = None
-    i = 0
-    while i < len(toks) and toks[i].startswith("--"):
-        if toks[i].startswith("--from="):
-            from_stage = toks[i].split("=", 1)[1]
-        i += 1
-    operands = toks[i:]
-    if not operands:
+    for f in flags.group(0).split():
+        if f.startswith("--from="):
+            from_stage = f.split("=", 1)[1]
+    if not operands_str:
         return None
 
-    if operands[0].startswith("["):  # JSON exec form, now that any flags are removed
+    if operands_str.startswith("["):
         try:
-            arr = json.loads(" ".join(operands))
+            arr = json.loads(operands_str)
         except ValueError:
-            return None
+            arr = None  # not JSON (e.g. a `[ab]` char class) -> fall through to shell parsing
         if isinstance(arr, list) and len(arr) >= 2:
             return Copy(sources=tuple(str(x) for x in arr[:-1]), dest=str(arr[-1]), from_stage=from_stage)
-        return None
+        if arr is not None:
+            return None  # valid JSON but not a 2+ element array -> malformed, not a copy
 
-    if len(operands) < 2:
+    paths = operands_str.split()
+    if len(paths) < 2:
         return None
-    return Copy(sources=tuple(operands[:-1]), dest=operands[-1], from_stage=from_stage)
+    return Copy(sources=tuple(paths[:-1]), dest=paths[-1], from_stage=from_stage)
 
 
 def parse_source(data: str | bytes) -> ParsedDockerfile:

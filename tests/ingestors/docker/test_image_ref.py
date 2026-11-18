@@ -52,6 +52,14 @@ def test_unresolved_variable_name_case_preserved():
     assert "base_image" not in image_id("${BASE_IMAGE}")
 
 
+def test_unresolved_refs_keep_raw_identity_and_dont_merge():
+    # `$BASE` and `docker.io/library/$BASE` expand to different repos, so they must NOT collapse to one
+    # id -- an unresolved ref is keyed by its RAW text, not a normalized form.
+    assert image_id("$BASE") == "image://$BASE"
+    assert image_id("docker.io/library/$BASE") == "image://docker.io/library/$BASE"
+    assert image_id("$BASE") != image_id("docker.io/library/$BASE")
+
+
 def test_file_id_preserves_leading_dot_dir():
     from auryn.ingestors.docker.ids import file_id, project_id
 
