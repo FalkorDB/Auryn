@@ -90,3 +90,31 @@ def test_json_array_copy_form():
 
 def test_empty_file_is_empty():
     assert parse_source("") .stages == ()
+
+
+def test_tab_between_keyword_and_args():
+    # Docker allows a tab after the instruction keyword -- it must NOT drop the instruction.
+    p = parse_source("FROM\talpine:3.20\nCOPY\tapp.py /app/\n")
+    assert len(p.stages) == 1 and p.stages[0].base == "alpine:3.20"
+    assert p.stages[0].copies[0].sources == ("app.py",)
+
+
+def test_comment_line_inside_continuation_is_dropped():
+    # A whole-line comment between continued lines must be discarded, not folded into the instruction.
+    p = parse_source("FROM alpine\nCOPY a.py \\\n# a comment mid-continuation\n     b.py /app/\n")
+    c = p.stages[0].copies[0]
+    assert c.sources == ("a.py", "b.py") and c.dest == "/app/"
+
+
+def test_json_copy_with_flags():
+    # Docker permits flags before the JSON exec form: `COPY --chown=x ["a", "b"]`.
+    p = parse_source('FROM alpine\nCOPY --chown=1000:1000 ["app.py", "/app/app.py"]\n')
+    c = p.stages[0].copies[0]
+    assert c.sources == ("app.py",) and c.dest == "/app/app.py"
+
+
+def test_copy_from_with_json_form():
+    # `--from` is honored even with the JSON exec form (flags are stripped before JSON detection).
+    p = parse_source('FROM a AS build\nFROM b\nCOPY --from=build ["/out", "/app"]\n')
+    c = p.stages[1].copies[0]
+    assert c.from_stage == "build" and c.sources == ("/out",)

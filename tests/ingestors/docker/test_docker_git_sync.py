@@ -90,10 +90,32 @@ def test_resync_removes_deleted_stage(graph, tmp_path):
     assert q("MATCH (:BuildStage)-[:COPIES_FROM]->() RETURN count(*)") == [[0]]
 
 
-def test_resync_is_idempotent(graph, tmp_path):
-    _ingest(graph, tmp_path, {"Dockerfile": _MULTISTAGE})
-    before = graph.query("MATCH (n) RETURN count(n)").result_set[0][0]
-    be = graph.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
-    _ingest(graph, tmp_path, {"Dockerfile": _MULTISTAGE})  # same content -> no-op
-    assert graph.query("MATCH (n) RETURN count(n)").result_set[0][0] == before
-    assert graph.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0] == be
+def test_resync_changed_base_removes_stale_edge(graph, tmp_path):
+    # Changing `FROM alpine:3.20` -> `3.21` must drop the old BASED_ON edge, not keep both. Exercises
+    # that edges to the shared `image://` hub are diffed on recompute (graph_client edge fingerprints).
+    q = _ingest(graph, tmp_path, {"Dockerfile": "FROM alpine:3.20\nCOPY . /app\n"})
+    assert sorted(r[0] for r in q("MATCH (:BuildStage)-[:BASED_ON]->(i:Image) RETURN i.ref")) == ["docker.io/library/alpine:3.20"]
+    q = _ingest(graph, tmp_path, {"Dockerfile": "FROM alpine:3.21\nCOPY . /app\n"})
+    assert sorted(r[0] for r in q("MATCH (:BuildStage)-[:BASED_ON]->(i:Image) RETURN i.ref")) == ["docker.io/library/alpine:3.21"]
+
+
+def test_resync_recompute_is_idempotent(graph, tmp_path):
+    # Re-applying the SAME content under a DIFFERENT target_sha reaches the recompute+delta path (not
+    # the commit_sha short-circuit) and must leave the graph byte-identical -- no dupes, no drift.
+    (tmp_path / "Dockerfile").write_text(_MULTISTAGE)
+    src = LocalDirectorySource(str(tmp_path))
+    w = GraphWriter(graph)
+    sync_at(w, src, "sha-A", project_name="demo", repo_uri="test://docker", ref=None)
+    n1 = graph.query("MATCH (n) RETURN count(n)").result_set[0][0]
+    e1 = graph.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
+    sync_at(w, src, "sha-B", project_name="demo", repo_uri="test://docker", ref=None)  # diff sha -> recompute
+    assert graph.query("MATCH (n) RETURN count(n)").result_set[0][0] == n1
+    assert graph.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0] == e1
+
+
+def test_arg_without_default_keeps_unresolved_base(graph, tmp_path):
+    # `ARG BASE` (no default) + `FROM ${BASE}` must NOT drop the base to an empty ref -- it stays an
+    # unresolved Image placeholder, not silently omitted.
+    q = _ingest(graph, tmp_path, {"Dockerfile": "ARG BASE\nFROM ${BASE}\nCOPY . /app\n"})
+    assert q("MATCH (:BuildStage)-[:BASED_ON]->(i:Image) RETURN count(i)") == [[1]]
+    assert q("MATCH (:BuildStage)-[:BASED_ON]->(i:Image) RETURN i.resolved") == [[False]]

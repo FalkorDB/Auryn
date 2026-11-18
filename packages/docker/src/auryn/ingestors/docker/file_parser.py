@@ -12,6 +12,8 @@ ENV, LABEL, USER, ...) are recognized and skipped; ENV->ConfigValue is a later a
 
 from __future__ import annotations
 
+import json
+
 from auryn.ingestors.docker.model import Copy, ParsedDockerfile, Stage
 
 _CONTINUATION = "\\"
@@ -24,8 +26,8 @@ def _logical_lines(text: str) -> list[str]:
     buf = ""
     for raw in text.splitlines():
         stripped = raw.strip()
-        if not buf and (not stripped or stripped.startswith("#")):
-            continue  # blank or a (whole-line) comment / parser directive -- never mid-continuation
+        if not stripped or stripped.startswith("#"):
+            continue  # blank line or whole-line comment / parser directive -- dropped even mid-continuation
         line = raw.rstrip()
         if line.endswith(_CONTINUATION):
             buf += line[: -len(_CONTINUATION)] + " "
@@ -39,9 +41,10 @@ def _logical_lines(text: str) -> list[str]:
 
 def _split_instruction(line: str) -> tuple[str, str]:
     """`COPY --from=build /a /b` -> ("COPY", "--from=build /a /b"). Instruction keyword is
-    case-insensitive; the remainder is returned verbatim for the per-instruction parsers."""
-    head, _, rest = line.partition(" ")
-    return head.upper(), rest.strip()
+    case-insensitive; splits on the first whitespace RUN so a tab after the keyword (`FROM\\talpine`)
+    is accepted, not silently dropped."""
+    parts = line.split(None, 1)
+    return parts[0].upper(), (parts[1].strip() if len(parts) > 1 else "")
 
 
 def _tokens(rest: str) -> list[str]:
@@ -63,31 +66,32 @@ def _parse_from(rest: str) -> tuple[str, str | None]:
 
 
 def _parse_copy(rest: str) -> Copy | None:
-    """`[--from=X] [--chown=...] src... dest`. Supports the shell form (whitespace-separated) and the
-    JSON-array exec form (`["src", "dest"]`); the exec form takes no flags, so `--from` is shell-only."""
-    if rest.lstrip().startswith("["):
-        import json
+    """`[--from=X] [--chown=...] src... dest`. Leading `--` flags are stripped FIRST, so both forms
+    accept them -- the shell form (whitespace-separated) and the JSON exec form (`["src", "dest"]`,
+    which Docker also allows flags before, e.g. `COPY --chown=x ["a", "b"]`)."""
+    toks = _tokens(rest)
+    from_stage = None
+    i = 0
+    while i < len(toks) and toks[i].startswith("--"):
+        if toks[i].startswith("--from="):
+            from_stage = toks[i].split("=", 1)[1]
+        i += 1
+    operands = toks[i:]
+    if not operands:
+        return None
 
+    if operands[0].startswith("["):  # JSON exec form, now that any flags are removed
         try:
-            arr = json.loads(rest)
+            arr = json.loads(" ".join(operands))
         except ValueError:
             return None
         if isinstance(arr, list) and len(arr) >= 2:
-            return Copy(sources=tuple(str(x) for x in arr[:-1]), dest=str(arr[-1]), from_stage=None)
+            return Copy(sources=tuple(str(x) for x in arr[:-1]), dest=str(arr[-1]), from_stage=from_stage)
         return None
 
-    from_stage = None
-    paths: list[str] = []
-    for t in _tokens(rest):
-        if t.startswith("--from="):
-            from_stage = t.split("=", 1)[1]
-        elif t.startswith("--"):
-            continue  # --chown / --chmod / --link ...
-        else:
-            paths.append(t)
-    if len(paths) < 2:
+    if len(operands) < 2:
         return None
-    return Copy(sources=tuple(paths[:-1]), dest=paths[-1], from_stage=from_stage)
+    return Copy(sources=tuple(operands[:-1]), dest=operands[-1], from_stage=from_stage)
 
 
 def parse_source(data: str | bytes) -> ParsedDockerfile:

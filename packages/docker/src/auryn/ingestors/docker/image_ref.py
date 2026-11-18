@@ -99,7 +99,10 @@ def parse_image_ref(ref: str) -> ImageRef:
 
     return ImageRef(
         registry=registry.lower(),
-        repository=repository.lower(),
+        # A resolved repository is case-folded (registries are case-insensitive); an UNRESOLVED ref
+        # keeps its case so a `${BASE_IMAGE}` variable name isn't mangled to `${base_image}` -- the
+        # placeholder's identity must round-trip to the raw text a later substitution will expand.
+        repository=repository if unresolved else repository.lower(),
         tag=tag,  # case-sensitive -- NOT lowered
         digest=digest,
         raw=raw,

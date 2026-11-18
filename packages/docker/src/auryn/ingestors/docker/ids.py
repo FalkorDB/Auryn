@@ -21,7 +21,12 @@ def project_id(project_name: str) -> str:
 
 
 def file_id(proj_id: str, rel_path: str) -> str:
-    return f"{proj_id}/file/{rel_path.replace(chr(92), '/').lstrip('./')}"
+    # Only an exact leading `./` is stripped -- NOT every leading dot/slash (`.lstrip('./')` would turn
+    # `.github/Dockerfile` into `github/Dockerfile`, colliding ids and breaking the derived context).
+    rel = rel_path.replace(chr(92), "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    return f"{proj_id}/file/{rel}"
 
 
 def stage_id(file_id_: str, stage_key: str) -> str:

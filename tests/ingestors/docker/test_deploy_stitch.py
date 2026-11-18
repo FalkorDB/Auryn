@@ -81,6 +81,16 @@ def test_packages_does_not_cross_link_another_project(graph, tmp_path):
     assert packaged == ["go://alpha/file/app/main.go"]  # only alpha's file, beta is NOT linked
 
 
+def test_absolute_copy_source_resolves_under_context(graph, tmp_path):
+    """`COPY /app /dst` resolves from the build-context ROOT (leading slash dropped), so it packages
+    `<context>/app`, not an unmatchable absolute path."""
+    writer = GraphWriter(graph)
+    _seed_file(writer, "go", "svc/app/main.go")
+    _ingest_docker(graph, tmp_path, {"svc/Dockerfile": "FROM scratch\nCOPY /app /dst\n"})
+    stitch(writer)
+    assert [r[0] for r in _q(graph, "MATCH (:BuildStage)-[:PACKAGES]->(f:File) RETURN f.path")] == ["svc/app/main.go"]
+
+
 def test_from_stage_copy_is_not_host_package(graph, tmp_path):
     """A `COPY --from=<stage>` pulls from another stage, not the host context -- it must NOT create a
     PACKAGES edge to host files (only a COPIES_FROM stage edge, asserted in the producer tests)."""

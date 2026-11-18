@@ -45,6 +45,21 @@ def test_unresolved_variable_flagged():
     assert r.raw == "${BASE_IMAGE}:${TAG}"
 
 
+def test_unresolved_variable_name_case_preserved():
+    # An unresolved ref must NOT case-fold the variable name (`${BASE_IMAGE}` != `${base_image}`), or
+    # the placeholder can't round-trip to the raw text a later substitution expands.
+    assert "BASE_IMAGE" in image_id("${BASE_IMAGE}")
+    assert "base_image" not in image_id("${BASE_IMAGE}")
+
+
+def test_file_id_preserves_leading_dot_dir():
+    from auryn.ingestors.docker.ids import file_id, project_id
+
+    proj = project_id("demo")
+    assert file_id(proj, ".github/Dockerfile") == f"{proj}/file/.github/Dockerfile"   # dot kept
+    assert file_id(proj, "./app/Dockerfile") == f"{proj}/file/app/Dockerfile"          # only ./ stripped
+
+
 def test_same_ref_different_spelling_same_id():
     # The contract: two spellings of the same image collapse to one id (the hub-merge guarantee).
     assert image_id("nginx") == image_id("docker.io/library/nginx:latest")

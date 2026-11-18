@@ -131,11 +131,15 @@ def _target_path(context: str, src: str) -> str:
         src = src[2:]
     if src in (".", "", "/"):
         return context
-    src = src.rstrip("/")
+    # Docker resolves COPY sources from the build-context ROOT: a leading `/` is dropped (not an
+    # absolute host path), so `COPY /app` means `<context>/app`. Without stripping it, the joined
+    # target stays absolute and never matches a repo-relative code path.
+    src = src.lstrip("/").rstrip("/")
     if any(ch in src for ch in _GLOB_CHARS):
         src = posixpath.dirname(src)
     joined = posixpath.join(context, src) if context else src
-    return posixpath.normpath(joined) if joined else ""
+    norm = posixpath.normpath(joined) if joined else ""
+    return "" if norm == "." else norm
 
 
 def _path_under(path: str, target: str) -> bool:

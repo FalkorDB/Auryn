@@ -18,16 +18,26 @@ from auryn.ingestors.docker import ids
 from auryn.ingestors.docker.image_ref import SCRATCH, image_id, parse_image_ref
 from auryn.ingestors.docker.model import ParsedDockerfile, Stage
 
-_VAR = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+# `${NAME}` or `$NAME` only -- a `${NAME:-default}` / `${NAME-x}` / `${NAME+x}` / `${NAME?x}` modifier
+# form (anything but a bare identifier inside the braces) is intentionally NOT matched, so it is left
+# verbatim and flagged unresolved rather than half-substituted into a corrupt ref.
+_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def _resolve_base(base: str, args: dict[str, str]) -> str:
     """Best-effort `${ARG}`/`$ARG` substitution from the file's global ARGs so `FROM ${BASE}:${TAG}`
-    normalizes when those ARGs have defaults; an unsubstituted `$` is left for `parse_image_ref` to
-    flag `unresolved`."""
+    normalizes when those ARGs have NON-EMPTY defaults. A missing ARG, an empty-valued ARG (`ARG BASE`
+    with no default), or a modifier form is left as the raw `${...}` text -- so the base stays flagged
+    `unresolved` (and keeps a real Image placeholder) instead of collapsing to an empty/garbage ref."""
     if "$" not in base:
         return base
-    return _VAR.sub(lambda m: args.get(m.group(1), m.group(0)), base)
+
+    def _sub(m: re.Match) -> str:
+        name = m.group(1) if m.group(1) is not None else m.group(2)
+        val = args.get(name)
+        return val if val else m.group(0)  # missing or empty -> keep the raw ${...}/$NAME
+
+    return _VAR.sub(_sub, base)
 
 
 def _stage_key(stage: Stage) -> str:

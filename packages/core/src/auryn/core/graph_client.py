@@ -200,12 +200,14 @@ def _edge_fingerprint_query(from_label: str) -> str:
     system labels (semantic_label) so the edge fingerprint key matches the semantic to_label the
     target items carry -- otherwise every edge would look changed.
 
-    The target filter admits two id spaces: this project's own prefix (its internal edges) AND the
-    `extern://<lang>/` call placeholders (ADR 0004 -- libc/BCL/framework/cross-repo). A placeholder lives
-    OUTSIDE every project prefix, yet a `CALLS -> extern://` edge is AUTHORED by this project (its source
-    is in-prefix) and so must be diffed here -- otherwise a caller that drops an unresolved call leaves a
-    stale placeholder edge the full-recompute diff never removes (incremental != full; the authored
-    engine's read_authored_fingerprints already reads any target, so this keeps the two paths consistent).
+    The target filter admits three id spaces: this project's own prefix (its internal edges), the
+    `extern://<lang>/` call placeholders (ADR 0004 -- libc/BCL/framework/cross-repo), and the
+    `image://` deployment-tier hub (ADR 0007). A placeholder/hub node lives OUTSIDE every project
+    prefix, yet a `CALLS -> extern://` or `BASED_ON -> image://` edge is AUTHORED by this project (its
+    source is in-prefix) and fully re-emitted each recompute, so it must be diffed here -- otherwise a
+    caller that drops an unresolved call (or a Dockerfile that changes its `FROM`) leaves a stale edge
+    the full-recompute diff never removes. Both the `extern://` and `image://` target NODES are shared
+    and GC'd elsewhere (the linkage reconciler / the deploy stitch), not by this per-project diff.
 
     Two id spaces are deliberately still EXCLUDED: (1) a reconciled cross-repo edge (source here, target a
     DIFFERENT real project), owned by the linkage reconciler not this per-project diff; (2) `extern://http/`
@@ -217,6 +219,7 @@ def _edge_fingerprint_query(from_label: str) -> str:
         f"MATCH (a:{from_label}) WHERE a.id >= $lo AND a.id < $hi "
         "MATCH (a)-[r]->(b) WHERE b.id STARTS WITH $prefix "
         "   OR (b.id STARTS WITH 'extern://' AND NOT b.id STARTS WITH 'extern://http/') "
+        "   OR b.id STARTS WITH 'image://' "
         f"RETURN type(r), {semantic_label('b')}, a.id, b.id, r._fingerprint"
     )
 
