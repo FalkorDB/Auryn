@@ -41,7 +41,12 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
     proj_id = project_id(project_name)
 
     writer.setup_schema(NODE_SCHEMAS)
-    if writer.get_property("Project", {"id": proj_id}, "commit_sha") == target_sha:
+    prior_sha = writer.get_property("Project", {"id": proj_id}, "commit_sha")
+    # KNOWN LIMITATION (tier-wide, tracked): the commit_sha short-circuit ignores the source's
+    # include/exclude selection, so re-ingesting the same SHA with a different file filter is skipped;
+    # and because stream_apply writes nodes before edges/deletes, a mid-write failure can leave the SHA
+    # stamped on a partial graph. Both are shared with the other file-based ingestors.
+    if prior_sha == target_sha:
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
     seen: dict[str, str] = {}
@@ -52,12 +57,24 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
     files = []
     for path, blob_sha in sorted(seen.items()):
         try:
-            parsed = parse_source(source.read_blob(blob_sha))
+            blob = source.read_blob(blob_sha)
         except Exception:
-            logger.warning("failed to read manifest %s", path, exc_info=True)
+            # KNOWN LIMITATION (tier-wide): a failed read drops the file from the target, so the
+            # recompute REMOVES its prior nodes -- no keep-last-good like the tree-sitter ingestors.
+            logger.warning("failed to read manifest %s (its nodes are removed this sync)", path, exc_info=True)
             continue
-        if parsed.workloads or parsed.ingresses:  # only keep files that are actually k8s manifests
+        # Cheap byte pre-check: a k8s manifest has both `apiVersion` and `kind`. Skips the YAML parse
+        # for the many non-manifest `*.yaml` files in a repo (CI configs, OpenAPI specs, ...).
+        if b"apiVersion" not in blob or b"kind" not in blob:
+            continue
+        parsed = parse_source(blob)
+        if parsed.workloads or parsed.ingresses or parsed.services:  # a real manifest (services feed resolution)
             files.append((path, parsed))
+
+    # Don't stamp a phantom `k8s://<project>` on a repo that has no manifests at all. Still proceed when
+    # a prior k8s subgraph exists, so removing the last manifest cleans it (recompute-to-empty).
+    if not files and prior_sha is None:
+        return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
     project_node = GraphNode(
         "Project", {"id": proj_id},

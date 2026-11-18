@@ -1,17 +1,19 @@
 """The `deploy-k8s` stitch -- joins cluster routing to the HTTP seam (ADR 0007 §4 + ADR 0006).
 
-An Ingress declares an external route and the k8s Service it routes to. This pass keys each route to a
-route-keyed `APIEndpoint` -- the SAME node a code route handler `EXPOSES_ENDPOINT` (via
-`core.http_seam`) -- and links the backing workload to it with `SERVES`:
+An Ingress declares an external route and resolves (in the producer, via the k8s Service selector) to
+the workload that serves it. This pass keys each route to a route-keyed `APIEndpoint` -- the SAME node
+a code route handler `EXPOSES_ENDPOINT` -- and writes two edges:
 
-    GET /api  ->  Ingress  -SERVES->  APIEndpoint  <-EXPOSES_ENDPOINT-  handler()
+    Service (workload) -SERVES-> APIEndpoint        (the workload serving the route; `host` on the edge)
+    Ingress            -ROUTES-> APIEndpoint        (the host-specific routing object -> the route)
 
-so the chain reaches from an external URL to the function that serves it. The backing workload is
-matched by the Ingress backend's Service name within the same namespace+project (k8s Services and their
-Deployments conventionally share a name). Also runs the shared `core.deploy` image lifecycle, so a
-k8s-only repo still gets image `resolved`/GC.
+so a traversal from the external URL's Ingress reaches the endpoint and, via SERVES, the backing
+workload (and through EXPOSES_ENDPOINT, the handler function). The APIEndpoint stays route-keyed so it
+converges with code handlers; the HOST distinction lives on the Ingress node + the SERVES edge, not on
+the shared endpoint. Also runs the shared `core.deploy` image lifecycle.
 
-Graph-only + idempotent + per-project: it owns the `k8s-stitch` SERVES layer, rebuilt each run."""
+Idempotent: it owns the `k8s-stitch` SERVES/ROUTES layer, computed fresh then swapped in (prior edges
+are cleared only AFTER the new set is built, so a mid-run failure can't drop live edges)."""
 
 from __future__ import annotations
 
@@ -29,12 +31,6 @@ def run(writer: GraphWriter, repo, target_sha: str) -> dict | None:
     return stitch(writer)
 
 
-def _project_of(node_id: str) -> str:
-    if "://" not in node_id:
-        return ""
-    return node_id.split("://", 1)[1].split("/", 1)[0]
-
-
 def _is_empty_graph(exc: Exception) -> bool:
     return "empty key" in str(exc).lower()
 
@@ -42,35 +38,32 @@ def _is_empty_graph(exc: Exception) -> bool:
 def stitch(writer: GraphWriter) -> dict | None:
     try:
         ingresses = writer.ro_query(
-            "MATCH (ing:Ingress) RETURN ing.id, ing.namespace, ing.route, ing.backend_service"
+            "MATCH (ing:Ingress) RETURN ing.id, ing.route, ing.host, ing.backend_workload"
         ).result_set
     except Exception as e:
         if _is_empty_graph(e):
             return None
         raise
 
-    _clear_prior_layer(writer)
-
+    # Build the full new layer FIRST (all reads), then clear + write -- so a failure here never leaves
+    # the prior SERVES/ROUTES deleted with no replacement.
     endpoints: dict[str, GraphNode] = {}
     edges: list[GraphEdge] = []
-    for iid, ns, route, backend in ingresses:
-        proj = _project_of(str(iid))
-        ep_id = endpoint_placeholder_key("ANY", str(route))
-        # MERGE the shared route-keyed APIEndpoint WITHOUT `resolved` -- never clobber a handler's
-        # resolved flag; a fresh one is left for the http-endpoints hook to resolve.
+    for iid, route, host, backend in ingresses:
+        route = str(route)
+        ep_id = endpoint_placeholder_key("ANY", route)
+        # MERGE the shared route-keyed APIEndpoint WITHOUT `resolved` -- never clobber a handler's flag.
         endpoints.setdefault(ep_id, GraphNode(
             "APIEndpoint", {"id": ep_id},
-            {"route": str(route), "http_method": "ANY", "provenance": "http-derived"},
+            {"route": route, "http_method": "ANY", "provenance": "http-derived"},
         ))
+        edges.append(GraphEdge("ROUTES", "Ingress", {"id": str(iid)}, "APIEndpoint", {"id": ep_id},
+                               {"provenance": "k8s-stitch", "host": host}))
         if backend:
-            rows = writer.ro_query(
-                "MATCH (s:Service) WHERE s.name = $n AND s.id STARTS WITH $pfx RETURN s.id LIMIT 1",
-                {"n": str(backend), "pfx": f"k8s://{proj}/{ns}/"},
-            ).result_set
-            if rows:
-                edges.append(GraphEdge("SERVES", "Service", {"id": str(rows[0][0])},
-                                       "APIEndpoint", {"id": ep_id}, {"provenance": "k8s-stitch"}))
+            edges.append(GraphEdge("SERVES", "Service", {"id": str(backend)}, "APIEndpoint", {"id": ep_id},
+                                   {"provenance": "k8s-stitch", "host": host}))
 
+    _clear_prior_layer(writer)
     if endpoints:
         writer.merge_nodes(list(endpoints.values()))
     if edges:
@@ -78,15 +71,17 @@ def stitch(writer: GraphWriter) -> dict | None:
     deploy.recompute_image_resolved(writer)
     orphans = deploy.gc_orphan_images(writer)
 
+    serves = sum(1 for e in edges if e.rel_type == "SERVES")
     if not edges and not orphans:
         return None
-    report = {"serves_edges": len(edges), "endpoints": len(endpoints), "orphans_removed": orphans}
-    logger.info("deploy-k8s: %d SERVES edge(s) -> %d route endpoint(s), %d orphan image(s) GC'd",
-                len(edges), len(endpoints), orphans)
+    report = {"serves_edges": serves, "route_endpoints": len(endpoints), "orphans_removed": orphans}
+    logger.info("deploy-k8s: %d SERVES + %d ROUTES -> %d endpoint(s), %d orphan image(s) GC'd",
+                serves, len(edges) - serves, len(endpoints), orphans)
     return report
 
 
 def _clear_prior_layer(writer: GraphWriter) -> None:
-    """Drop this hook's own SERVES edges so a re-run rebuilds its layer (idempotent). Only
+    """Drop this hook's own SERVES/ROUTES edges so a re-run rebuilds its layer (idempotent). Only
     `k8s-stitch`-provenanced edges are touched."""
     writer.query("MATCH ()-[r:SERVES]->() WHERE r.provenance = 'k8s-stitch' DELETE r")
+    writer.query("MATCH ()-[r:ROUTES]->() WHERE r.provenance = 'k8s-stitch' DELETE r")

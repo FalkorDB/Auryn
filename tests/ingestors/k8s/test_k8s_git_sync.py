@@ -52,6 +52,17 @@ def test_non_manifest_yaml_is_ignored(graph, tmp_path):
     assert sorted(r[0] for r in q("MATCH (f:File) RETURN f.path")) == ["k8s/deploy.yaml"]
 
 
+def test_case_sensitive_ingress_paths_stay_distinct(graph, tmp_path):
+    # k8s paths are case-sensitive: `/API` and `/api` can route to different backends, so they must be
+    # TWO Ingress nodes (not collapsed by lowercasing).
+    q = _ingest(graph, tmp_path, {"k8s/ing.yaml":
+        "apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata: {name: ing, namespace: shop}\n"
+        "spec:\n  rules:\n    - host: h\n      http:\n        paths:\n"
+        "          - {path: /API, backend: {service: {name: a}}}\n"
+        "          - {path: /api, backend: {service: {name: b}}}\n"})
+    assert sorted(r[0] for r in q("MATCH (i:Ingress) RETURN i.path")) == ["/API", "/api"]
+
+
 def test_resync_removes_deleted_workload(graph, tmp_path):
     q = _ingest(graph, tmp_path, {"k8s/deploy.yaml": _MANIFEST})
     assert q("MATCH (s:Service) RETURN count(s)") == [[1]]

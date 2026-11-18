@@ -25,5 +25,8 @@ def workload_id(proj_id: str, namespace: str, kind: str, name: str) -> str:
     return f"{proj_id}/{namespace}/{kind.lower()}/{name}"
 
 
-def ingress_id(proj_id: str, namespace: str, host: str | None, route: str) -> str:
-    return f"{proj_id}/{namespace}/ingress/{host or '_'}{route}"
+def ingress_id(proj_id: str, namespace: str, ingress_name: str, host: str | None, path: str) -> str:
+    # Keyed on the Ingress OBJECT name + host + the RAW (case-sensitive) path, so two rules that differ
+    # only by object, host, or path case stay distinct nodes (k8s paths are case-sensitive; `/API` and
+    # `/api` can route to different backends).
+    return f"{proj_id}/{namespace}/ingress/{ingress_name}/{host or '_'}{path}"

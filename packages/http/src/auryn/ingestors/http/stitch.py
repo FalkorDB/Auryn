@@ -36,8 +36,9 @@ def stitch(writer: GraphWriter) -> dict | None:
     # to the SAME route-keyed APIEndpoint (core.http_seam), so they arrive already merged -- one node,
     # no duplicate. This pass only has to (a) reach the endpoints that DON'T converge by id: MVC
     # `/Controller/Action` conventions and `/api/x/5` -> `api/x/{id}` templates; (b) set every
-    # endpoint's `resolved` from whether a handler exposes it; (c) GC endpoints left with neither a
-    # caller nor a handler (e.g. a route deleted from the code).
+    # endpoint's `resolved` from whether a handler exposes it; (c) GC endpoints left with no caller, no
+    # handler, AND no deployment exposure (SERVES, a k8s Ingress -- ADR 0007) -- e.g. a route deleted
+    # from the code and from every manifest.
     if not writer.ro_query("MATCH (e:APIEndpoint) RETURN e.id LIMIT 1").result_set:
         # No endpoints remain -- but if the LAST route was just removed from the code, this layer's
         # EXPOSES_ENDPOINT/INVOKES edges are now stale. Returning here without clearing would leave

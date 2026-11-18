@@ -72,3 +72,43 @@ def test_non_k8s_yaml_ignored():
 def test_malformed_yaml_is_empty():
     m = parse_source("apiVersion: v1\nkind: : bad")
     assert m.workloads == () and m.ingresses == ()
+
+
+def test_non_mapping_nested_values_dont_crash_and_siblings_survive():
+    # a manifest with a non-mapping where a mapping is expected must be skipped, NOT raise -- and a
+    # valid sibling doc in the same file is still parsed.
+    src = (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata: web\nspec:\n  template: nope\n"  # all junk
+        "---\n"
+        "apiVersion: v1\nkind: Pod\nmetadata: {name: ok}\nspec:\n  containers: 7\n"        # containers not a list
+        "---\n"
+        "apiVersion: v1\nkind: Pod\nmetadata: {name: good}\nspec:\n  containers:\n    - {name: c, image: x}\n"
+    )
+    m = parse_source(src)  # must not raise
+    names = sorted(w.name for w in m.workloads)
+    assert "good" in names  # the valid sibling survived
+    good = next(w for w in m.workloads if w.name == "good")
+    assert good.images == ("x",)
+
+
+def test_kind_list_is_unwrapped():
+    src = (
+        "apiVersion: v1\nkind: List\nitems:\n"
+        "  - apiVersion: apps/v1\n    kind: Deployment\n    metadata: {name: a}\n"
+        "    spec: {template: {spec: {containers: [{name: c, image: i1}]}}}\n"
+        "  - apiVersion: v1\n    kind: Pod\n    metadata: {name: b}\n    spec: {containers: [{name: c, image: i2}]}\n"
+    )
+    m = parse_source(src)
+    assert sorted(w.name for w in m.workloads) == ["a", "b"]
+
+
+def test_service_selector_and_pod_labels():
+    m = parse_source(
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: api}\n"
+        "spec:\n  template:\n    metadata:\n      labels: {app: api, tier: web}\n"
+        "    spec:\n      containers:\n        - {name: c, image: x}\n"
+        "---\n"
+        "apiVersion: v1\nkind: Service\nmetadata: {name: api-svc}\nspec:\n  selector: {app: api}\n"
+    )
+    assert m.workloads[0].labels == (("app", "api"), ("tier", "web"))
+    assert m.services[0].name == "api-svc" and m.services[0].selector == (("app", "api"),)

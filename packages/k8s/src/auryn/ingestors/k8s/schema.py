@@ -11,7 +11,7 @@ NODE_SCHEMAS = [
     NodeSchema(label="Project", indexed_properties=("name",)),
     NodeSchema(label="File", indexed_properties=("path",)),
     NodeSchema(label="Service", indexed_properties=("name",)),       # a workload (Deployment/StatefulSet/...)
-    NodeSchema(label="Ingress", indexed_properties=("backend_service",)),
+    NodeSchema(label="Ingress"),                                     # scanned whole by the stitch -- no filter index
     NodeSchema(label="Image", indexed_properties=("ref",)),          # the shared hub
     NodeSchema(label="APIEndpoint", indexed_properties=("route",)),  # shared with the HTTP seam (ADR 0006)
 ]
@@ -25,4 +25,5 @@ EDGE_SCHEMAS = [
     EdgeSchema(rel_type="HAS_SERVICE"),   # File -> Service (workload)
     EdgeSchema(rel_type="HAS_INGRESS"),   # File -> Ingress
     EdgeSchema(rel_type="RUNS_IMAGE"),    # Service -> Image
+    # SERVES (Service -> APIEndpoint) + ROUTES (Ingress -> APIEndpoint) are the deploy-k8s stitch's.
 ]

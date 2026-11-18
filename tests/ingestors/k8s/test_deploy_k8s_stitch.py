@@ -42,6 +42,32 @@ def test_serves_links_backend_workload_to_route_endpoint(graph, tmp_path):
     assert _q(graph, "MATCH (e:APIEndpoint) RETURN e.route") == [["/api"]]
 
 
+_SELECTOR_MANIFEST = (
+    "apiVersion: apps/v1\nkind: Deployment\nmetadata: {name: api-deploy, namespace: shop}\n"
+    "spec:\n  template:\n    metadata:\n      labels: {app: api}\n"
+    "    spec:\n      containers:\n        - {name: c, image: shop/api:1.0}\n"
+    "---\n"
+    "apiVersion: v1\nkind: Service\nmetadata: {name: api-svc, namespace: shop}\nspec:\n  selector: {app: api}\n"
+    "---\n"
+    "apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata: {name: ing, namespace: shop}\n"
+    "spec:\n  rules:\n    - host: shop.example.com\n      http:\n        paths:\n"
+    "          - path: /api\n            backend: {service: {name: api-svc}}\n"
+)
+
+
+def test_serves_resolves_backend_through_service_selector(graph, tmp_path):
+    # Ingress backend `api-svc` (a Service) selects Deployment `api-deploy` by label -- the names DON'T
+    # match, so this exercises selector resolution, not the name fallback.
+    writer = GraphWriter(graph)
+    (tmp_path / "deploy.yaml").write_text(_SELECTOR_MANIFEST)
+    src = LocalDirectorySource(str(tmp_path))
+    sync_at(GraphWriter(graph), src, src.tree_sha(), project_name="shop", repo_uri="t", ref=None)
+    stitch(writer)
+    assert _q(graph, "MATCH (s:Service {name:'api-deploy'})-[:SERVES]->(:APIEndpoint {route:'/api'}) RETURN count(*)") == [[1]]
+    # the host-specific Ingress ROUTES to the same endpoint, carrying the host on the edge
+    assert _q(graph, "MATCH (:Ingress)-[r:ROUTES]->(:APIEndpoint {route:'/api'}) RETURN r.host") == [["shop.example.com"]]
+
+
 def test_no_serves_when_backend_has_no_workload(graph, tmp_path):
     writer = GraphWriter(graph)
     _ingest_k8s(graph, tmp_path, backend="does-not-exist")
