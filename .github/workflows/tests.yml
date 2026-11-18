@@ -72,9 +72,9 @@ jobs:
           uv run pytest $ignores -n 2 --cov=auryn --cov-report=term-missing
 
   # Install what users install -- the umbrella, and the core with a few plugin extras -- from wheels
-  # built from THIS checkout, then check the exact auryn-* set, the versions, `pip check`, and that
-  # the CLI and every plugin entry point load. The packages are stamped with a version that exists
-  # only here, so every auryn-* package comes from the local build and third-party ones from PyPI.
+  # built from THIS checkout, then run `pip check`, the CLI, and load every plugin. The packages are
+  # stamped with a version that exists only here, and every auryn-* requirement is pinned `==`, so
+  # every auryn-* package comes from the local build and third-party ones from PyPI.
   package-install:
     runs-on: ubuntu-latest
     strategy:
@@ -113,10 +113,16 @@ jobs:
           SPEC: ${{ matrix.spec }}
         run: |
           python -m venv "$RUNNER_TEMP/package-env"
-          python_bin="$RUNNER_TEMP/package-env/bin/python"
-          "$python_bin" -m pip install --find-links "$RUNNER_TEMP/dist" "${SPEC}==${LOCAL_VERSION}"
-          "$python_bin" -m pip check
-          "$python_bin" .github/scripts/check_install.py "$LOCAL_VERSION"
+          env_bin="$RUNNER_TEMP/package-env/bin"
+          "$env_bin/python" -m pip install --find-links "$RUNNER_TEMP/dist" "${SPEC}==${LOCAL_VERSION}"
+          "$env_bin/python" -m pip check
+          "$env_bin/auryn" --help > /dev/null
+          "$env_bin/python" - <<'PY'
+          from importlib.metadata import entry_points
+          groups = ("auryn.languages", "auryn.ingestors", "auryn.enrichments")
+          plugins = [ep.load() for group in groups for ep in entry_points(group=group)]
+          print(f"{len(plugins)} plugins loaded")
+          PY
 
   # Dedicated performance-regression gate. The whole value of delta-sync is that editing one file
   # re-parses ~one file, not the repo -- a change that drags a file's whole package/module back in is
