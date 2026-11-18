@@ -57,8 +57,9 @@ def load_values(data: str | bytes) -> dict:
 
 def _documents(text: str):
     """Split a template file into its `---`-separated YAML documents (textually -- the content is
-    templated, so we never YAML-parse it)."""
-    for doc in re.split(r"(?m)^---\s*$", text):
+    templated, so we never YAML-parse it). A separator line may carry trailing spaces or a `# comment`
+    (`--- # Source: ...`), which Helm emits, so later documents aren't swallowed into the previous one."""
+    for doc in re.split(r"(?m)^---[ \t]*(?:#.*)?$", text):
         if doc.strip():
             yield doc
 
@@ -75,7 +76,10 @@ def _workload_name(doc: str, template_stem: str) -> str:
     if meta:
         nm = re.search(r"(?m)^\s+name:\s*(.+?)\s*$", doc[meta.end():])
         if nm:
-            val = nm.group(1).strip().strip("\"'")
+            raw = nm.group(1).strip()
+            if not raw.startswith(('"', "'")):  # a '#' inside a quoted scalar is literal, not a comment
+                raw = _strip_inline_comment(raw)
+            val = raw.strip("\"'").strip()
             if val and "{{" not in val:
                 return val
     return template_stem

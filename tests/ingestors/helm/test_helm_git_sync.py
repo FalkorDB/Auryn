@@ -121,3 +121,15 @@ def test_nameless_chart_resource_is_unresolved(graph, tmp_path):
     # a Chart.yaml without a name isn't valid chart metadata -> its fallback Resource is resolved:false
     q = _ingest(graph, tmp_path, {"charts/x/Chart.yaml": "apiVersion: v2\nversion: 1.0.0\n"})
     assert q("MATCH (r:Resource {kind:'chart'}) RETURN r.resolved") == [[False]]
+
+
+def test_ambiguous_dependency_name_stays_a_placeholder(graph, tmp_path):
+    # two in-repo charts share the name 'dup'; a dependency on 'dup' is ambiguous, so it must NOT resolve
+    # arbitrarily to one of them -- it stays an unresolved placeholder
+    files = {
+        "charts/a/Chart.yaml": "apiVersion: v2\nname: dup\nversion: 1.0.0\n",
+        "charts/b/Chart.yaml": "apiVersion: v2\nname: dup\nversion: 2.0.0\n",
+        "charts/main/Chart.yaml": "apiVersion: v2\nname: main\nversion: 1.0.0\ndependencies:\n  - name: dup\n",
+    }
+    q = _ingest(graph, tmp_path, files)
+    assert q("MATCH (:Resource {name:'main'})-[:DEPENDS_ON]->(d:Resource {name:'dup'}) RETURN d.resolved") == [[False]]

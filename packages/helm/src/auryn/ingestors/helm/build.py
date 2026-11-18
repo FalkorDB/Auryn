@@ -27,11 +27,14 @@ def _chart_file(chart_dir: str) -> str:
 
 def build_graph(charts: list[ParsedChart], proj_id: str) -> Iterator[GraphNode | GraphEdge]:
     # Index chart NAME -> its Resource id, so a `dependencies:` entry naming an in-repo chart resolves
-    # to a real DEPENDS_ON (an external dependency falls back to a project-scoped placeholder).
-    by_name: dict[str, str] = {}
+    # to a real DEPENDS_ON (an external dependency falls back to a project-scoped placeholder). Only an
+    # UNAMBIGUOUS name (exactly one in-repo chart) resolves: a name shared by several charts (vendored
+    # subcharts, multiple versions) stays a placeholder rather than resolving arbitrarily to one of them.
+    name_ids: dict[str, list[str]] = {}
     for pc in charts:
         if pc.chart:
-            by_name[pc.chart.name] = ids.chart_id(proj_id, _scope(pc))
+            name_ids.setdefault(pc.chart.name, []).append(ids.chart_id(proj_id, _scope(pc)))
+    by_name: dict[str, str] = {n: v[0] for n, v in name_ids.items() if len(v) == 1}
 
     for pc in charts:
         scope = _scope(pc)

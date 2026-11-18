@@ -182,3 +182,21 @@ def test_template_path_is_chart_relative_from_repo_path():
     # given a full repo path, Workload.template is the path RELATIVE to the chart dir (part of the id)
     pc = parse_chart("charts/shop", _CHART, _VALUES, [("charts/shop/templates/nested/deploy.yaml", _DEPLOYMENT)])
     assert pc.workloads[0].template == "templates/nested/deploy.yaml"
+
+
+def test_document_separator_with_trailing_comment_is_not_swallowed():
+    doc = (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: a\nspec:\n  template:\n    spec:\n"
+        "      containers:\n        - image: a:1\n"
+    )
+    multi = doc + "--- # Source: shop/templates/b.yaml\n" + doc.replace("name: a", "name: b")
+    pc = _chart([("templates/all.yaml", multi)])
+    assert sorted(w.name for w in pc.workloads) == ["a", "b"]  # `--- # ...` still splits the documents
+
+
+def test_metadata_name_inline_comment_stripped():
+    tmpl = (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api  # prod\nspec:\n  template:\n"
+        "    spec:\n      containers:\n        - image: a:1\n"
+    )
+    assert _chart([("templates/d.yaml", tmpl)]).workloads[0].name == "api"

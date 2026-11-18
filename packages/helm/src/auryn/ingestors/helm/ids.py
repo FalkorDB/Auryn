@@ -23,10 +23,10 @@ def file_id(proj_id: str, rel_path: str) -> str:
 
 def chart_scope(chart_dir: str) -> str:
     """The chart's id segment: its DIRECTORY (relative, slash-normalized) -- unique per chart, since one
-    `Chart.yaml` anchors exactly one directory. The repo-ROOT chart (empty dir) uses the reserved `_root`
-    segment, so its `Resource` id can't collide with the `Project` id nor with a sibling subchart's
-    directory. Keying on the directory (never the Chart.yaml `name`) is what prevents a root chart whose
-    name equals a sibling subdir from merging with that subchart."""
+    `Chart.yaml` anchors exactly one directory. Keying on the directory (never the Chart.yaml `name`) is
+    what prevents a root chart whose name equals a sibling subdir from merging with that subchart. The
+    repo-ROOT chart (empty dir) uses the `_root` segment, reserved by convention: a subchart whose
+    directory is literally `_root` would collide, which is not enforced but vanishingly unlikely."""
     d = chart_dir.replace(chr(92), "/").strip("/")
     return d or "_root"
 
