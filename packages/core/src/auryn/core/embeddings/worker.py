@@ -223,7 +223,9 @@ def embed_graph(
         # The lexical half of hybrid retrieval: a full-text index over name+doc on the same
         # shared label, so `search_code` can fuse keyword + semantic ranking (see embeddings/search).
         writer.create_fulltext_index(writer.SHARED_EMBEDDING_LABEL, *writer.FULLTEXT_PROPERTIES)
-        index_ready = True
+        # CREATE INDEX returns before the index is built, and a search against one still under
+        # construction comes back empty -- so "ready" waits until FalkorDB says it is.
+        index_ready = writer.await_indexes(writer.SHARED_EMBEDDING_LABEL)
 
     stats = EmbedStats(
         scanned=scanned,
