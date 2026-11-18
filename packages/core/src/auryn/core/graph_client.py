@@ -371,7 +371,9 @@ class GraphWriter:
         try:
             self._graph.create_node_vector_index(label, prop, dim=dim, similarity_function=similarity)
             logger.debug("Created vector index on :%s(%s) dim=%d %s", label, prop, dim, similarity)
-        except ResponseError:
+        except ResponseError as e:
+            if "already" not in str(e).lower():  # a real failure, not the idempotent "already indexed"
+                raise  # don't swallow it -- a missing index must not be reported as ready (await_indexes)
             logger.debug("Vector index on :%s(%s) already exists", label, prop)
 
     def drop_vector_index(self, label: str, prop: str) -> None:
@@ -391,7 +393,9 @@ class GraphWriter:
         try:
             self._graph.create_node_fulltext_index(label, *props)
             logger.debug("Created full-text index on :%s(%s)", label, ", ".join(props))
-        except ResponseError:
+        except ResponseError as e:
+            if "already" not in str(e).lower():  # a real failure, not the idempotent "already indexed"
+                raise  # don't swallow it -- a missing index must not be reported as ready (await_indexes)
             logger.debug("Full-text index on :%s already exists", label)
 
     def await_indexes(self, label: str, timeout: float = _INDEX_BUILD_TIMEOUT_S) -> bool:

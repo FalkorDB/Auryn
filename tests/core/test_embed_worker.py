@@ -80,6 +80,16 @@ def test_embed_graph_returns_only_once_the_indexes_are_searchable(writer):
     assert len(writer.fulltext_search("database connection", 5)) == 5
 
 
+def test_embed_graph_reports_not_ready_when_the_build_isnt_confirmed(writer, monkeypatch):
+    # worker-to-stats wiring: embed_graph must carry await_indexes()'s verdict into
+    # EmbedStats.index_ready -- when the build can't be confirmed, index_ready is False, not silently
+    # True (#761 review: setting index_ready by hand doesn't exercise this path).
+    _seed(writer)
+    monkeypatch.setattr(type(writer), "await_indexes", lambda self, label, timeout=None: False)
+    stats = embed_graph(writer, FakeEmbedder())
+    assert stats.embedded == 2 and stats.index_ready is False
+
+
 @pytest.mark.parametrize("embedded, index_ready, said", [
     (0, False, "vector index unchanged."),
     (3, True, "vector index ready."),
@@ -104,6 +114,25 @@ def test_embed_command_says_when_the_index_is_not_ready(monkeypatch, embedded, i
 
     assert res.exit_code == 0, res.output
     assert said in res.output
+
+
+def test_embed_reembed_with_zero_nodes_is_not_reported_unchanged(monkeypatch):
+    # --reembed DROPS the index up front, so with zero embeds it is reset, not "unchanged" (#761 review).
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+    from auryn.core.embeddings.worker import EmbedStats
+
+    stats = EmbedStats(scanned=0, embedded=0, model_id="fake", dim=8, index_ready=False)
+    monkeypatch.setattr("auryn.cli._resolve_connection", lambda *conn: None)
+    monkeypatch.setattr("auryn.cli.connect_client", lambda config: SimpleNamespace(select_graph=lambda name: None))
+    monkeypatch.setattr("auryn.core.embeddings.get_embedder", lambda model: None)
+    monkeypatch.setattr("auryn.core.embeddings.worker.reembed_all", lambda writer, embedder: stats)
+
+    res = CliRunner().invoke(cli, ["embed", "--reembed", "--graph-name", "g"])
+
+    assert res.exit_code == 0, res.output
+    assert "unchanged" not in res.output and "reset" in res.output
 
 
 class _IndexStatuses:
