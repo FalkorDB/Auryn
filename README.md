@@ -81,7 +81,7 @@ Find a path between any two symbols and the viewer shows every hop, with the edg
 
 The codegraph persists at `<path>/.auryn/graph.db`, so re-running reuses it.
 
-> **Requirements:** Python ≥ 3.12. `falkordb-auryn` includes every language plugin out of the box. The in-process database is fetched automatically on first `auryn quickstart` on macOS and Linux (recent glibc). On native Windows or older-glibc Linux, point at a remote FalkorDB with `auryn install --backend remote`. Add live-DB drivers with `"falkordb-auryn[all]"`. For an isolated tool install, include the DB up front: `uv tool install "falkordb-auryn[embedded]"`. From a clone: `uv sync`, then `uv run auryn quickstart`.
+> **Requirements:** Python ≥ 3.12. `falkordb-auryn` includes every plugin out of the box; for a custom install, see [Choose your plugins](#choose-your-plugins). The in-process database is fetched automatically on first `auryn quickstart` on macOS and Linux (recent glibc). On native Windows or older-glibc Linux, point at a remote FalkorDB with `auryn install --backend remote`. Add live-DB drivers with `"falkordb-auryn[all]"`. For an isolated tool install, include the DB up front: `uv tool install "falkordb-auryn[embedded]"`. From a clone: `uv sync`, then `uv run auryn quickstart`.
 
 ## Connect your agent
 
@@ -170,28 +170,41 @@ Blast radius: the two callers on the left. Closure: everything it reaches on the
 
 ## What it can read
 
-Sixteen languages plus live SQL and Oracle schemas, all **auto-detected** by `auryn ingest` in a single pass. Live databases are read with `auryn run <name>`. `pip install falkordb-auryn` includes every language. For a lean, single-language install, use `pip install auryn-python` (each plugin pulls `auryn-core`).
+Sixteen languages plus live SQL and Oracle schemas, all **auto-detected** by `auryn ingest` in a single pass. Live databases are read with `auryn run <name>`. With a custom install (see [Choose your plugins](#choose-your-plugins)), only the installed plugins run. A missing plugin for one of the 15 programming languages is installed the first time its files are found (unless `AURYN_AUTO_INSTALL=0`). The others are never installed automatically: name them on the core, e.g. `auryn-core[oracle]` for PL/SQL files (`.pks`, `.pkb`, `.sql`, …), `auryn-core[sql]` for live SQL databases, and `auryn-core[http,orm,grpc,events]` for the cross-language links.
 
 <details>
 <summary><b>All sources and engines</b></summary>
 
 <br>
 
-| Source | Extra | Engine |
+| Source | Plugin | Engine |
 |---|---|---|
-| Python | `[python]` | tree-sitter → Jedi (deep) |
-| TypeScript / JavaScript | `[typescript]` | tree-sitter |
-| C# | `[csharp]` | Roslyn (deep), tree-sitter fallback |
-| Java · C · C++ · CUDA | `[java]` `[c]` `[cpp]` `[cuda]` | tree-sitter |
-| Go · Rust · PHP · Julia | `[go]` `[rust]` `[php]` `[julia]` | tree-sitter |
-| Ruby · Kotlin · Swift · Bash | `[ruby]` `[kotlin]` `[swift]` `[bash]` | tree-sitter |
-| PL/SQL files | `[oracle]` | vendored ANTLR |
-| Oracle (live DB) | `[oracle-live]` | oracledb + ANTLR |
-| SQL schema (live DB) | `[sql]` `[sql-all]` | SQLAlchemy, any dialect |
+| Python | `python` | tree-sitter → Jedi (deep) |
+| TypeScript / JavaScript | `typescript` | tree-sitter |
+| C# | `csharp` | Roslyn (deep), tree-sitter fallback |
+| Java · C · C++ · CUDA | `java` `c` `cpp` `cuda` | tree-sitter |
+| Go · Rust · PHP · Julia | `go` `rust` `php` `julia` | tree-sitter |
+| Ruby · Kotlin · Swift · Bash | `ruby` `kotlin` `swift` `bash` | tree-sitter |
+| PL/SQL files | `oracle` | vendored ANTLR |
+| Oracle (live DB) | `oracle-live` | oracledb + ANTLR |
+| SQL schema (live DB) | `sql` `sql-all` | SQLAlchemy, any dialect |
+| Cross-language links | `http` `orm` `grpc` `events` | HTTP call → endpoint, ORM model → table, gRPC call → handler, publisher → subscriber |
 
 The deep C# engine needs the [.NET SDK](https://dotnet.microsoft.com/) on `PATH`. Without it, C# falls back to tree-sitter automatically.
 
 </details>
+
+### Choose your plugins
+
+`pip install falkordb-auryn` installs every plugin above. For a custom install, name the plugins on the core instead:
+
+```bash
+pip install falkordb-auryn                    # everything
+pip install "auryn-core[python,http]"         # core + only the plugins you name
+pip install auryn-core my-auryn-plugin        # core + your own plugin
+```
+
+Optional extras on either package: `[embedded]` (the in-process FalkorDB), `[oracle-live]` and `[sql-all]` (live-DB drivers); `[all]` adds both drivers (`auryn-core[all]` also adds every plugin, the same as `falkordb-auryn[all]`).
 
 ## CLI
 
