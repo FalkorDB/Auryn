@@ -62,6 +62,7 @@ events = ["auryn-events==0.1.0"]               # message publisher <-> subscribe
 docker = ["auryn-docker==0.1.0"]               # Dockerfiles + the `deploy` stitch (ADR 0007)
 compose = ["auryn-compose==0.1.0"]             # docker-compose files + the `deploy-compose` stitch
 k8s = ["auryn-k8s==0.1.0"]                     # Kubernetes manifests + the `deploy-k8s` stitch
+terraform = ["auryn-terraform==0.1.0"]         # Terraform/OpenTofu (HCL) + the `deploy-terraform` stitch
 # every plugin + both live-DB drivers: the same as `pip install "falkordb-auryn[all]"`
 all = [
     "auryn-python==0.1.0",
@@ -88,6 +89,7 @@ all = [
     "auryn-docker==0.1.0",
     "auryn-compose==0.1.0",
     "auryn-k8s==0.1.0",
+    "auryn-terraform==0.1.0",
 ]
 
 [project.scripts]
