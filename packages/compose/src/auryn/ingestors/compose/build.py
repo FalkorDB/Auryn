@@ -13,7 +13,7 @@ import posixpath
 from collections.abc import Iterator
 
 from auryn.core.graph_model import GraphEdge, GraphNode
-from auryn.core.image_ref import image_id, parse_image_ref
+from auryn.core.image_ref import image_id, image_node
 from auryn.ingestors.compose import ids
 from auryn.ingestors.compose.model import ParsedCompose, Service
 
@@ -56,27 +56,10 @@ def build_graph(files: list[tuple[str, ParsedCompose]], proj_id: str) -> Iterato
             yield GraphEdge("HAS_SERVICE", "File", {"id": fid}, "Service", {"id": sid})
 
             if svc.image:
-                yield from _emit_image(svc.image)
+                yield image_node(svc.image)
                 yield GraphEdge("RUNS_IMAGE", "Service", {"id": sid}, "Image", {"id": image_id(svc.image)})
 
             for dep in svc.depends_on:
                 if dep in svc_ids and svc_ids[dep] != sid:
                     yield GraphEdge("DEPENDS_ON", "Service", {"id": sid}, "Service", {"id": svc_ids[dep]})
 
-
-def _emit_image(ref: str) -> Iterator[GraphNode]:
-    r = parse_image_ref(ref)
-    yield GraphNode(
-        "Image",
-        {"id": image_id(ref)},
-        {
-            "ref": r.normalized,
-            "registry": r.registry,
-            "repository": r.repository,
-            "tag": r.tag,
-            "digest": r.digest,
-            "resolved": False,  # the deploy-compose stitch flips this true once a BUILDS_IMAGE appears
-            "origin": "registry",
-            **({"raw": r.raw} if r.unresolved else {}),
-        },
-    )

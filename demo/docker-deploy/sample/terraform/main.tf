@@ -6,8 +6,10 @@ resource "aws_ecr_repository" "api" {
 }
 
 resource "aws_db_instance" "db" {
-  engine     = "postgres"
-  identifier = "shop-db"
+  engine            = "postgres"
+  identifier        = "shop-db"
+  instance_class    = "db.t3.micro"
+  allocated_storage = 20
 }
 
 resource "aws_ecs_task_definition" "api" {

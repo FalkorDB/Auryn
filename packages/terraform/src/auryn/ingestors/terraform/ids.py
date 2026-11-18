@@ -20,13 +20,19 @@ def file_id(proj_id: str, rel_path: str) -> str:
     return f"{proj_id}/file/{rel}"
 
 
-def resource_id(proj_id: str, address: str) -> str:
-    return f"{proj_id}/{address}"
+def _module_prefix(proj_id: str, module_dir: str) -> str:
+    # A Terraform MODULE is a directory: resources in `env/dev` and `env/prod` are distinct configs, so
+    # the module dir is part of the id -- otherwise same-named resources across modules collide.
+    return f"{proj_id}/{module_dir}" if module_dir else proj_id
 
 
-def database_id(proj_id: str, address: str) -> str:
-    return f"{proj_id}/database/{address}"
+def resource_id(proj_id: str, module_dir: str, address: str) -> str:
+    return f"{_module_prefix(proj_id, module_dir)}/{address}"
 
 
-def registry_id(proj_id: str, address: str) -> str:
-    return f"{proj_id}/registry/{address}"
+def database_id(proj_id: str, module_dir: str, address: str) -> str:
+    return f"{_module_prefix(proj_id, module_dir)}/database/{address}"
+
+
+def registry_id(proj_id: str, module_dir: str, address: str) -> str:
+    return f"{_module_prefix(proj_id, module_dir)}/registry/{address}"

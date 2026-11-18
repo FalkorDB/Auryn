@@ -52,5 +52,20 @@ def test_var_and_local_are_not_refs():
     assert p.blocks[0].refs == ()
 
 
+def test_literal_string_is_not_a_reference():
+    # a plain string literal that merely LOOKS like an address must not fabricate a DEPENDS_ON -- only
+    # a `${...}` interpolation is a real reference.
+    p = parse_source('resource "aws_x" "y" { description = "see aws_iam_role.exec for details" }')
+    assert p.blocks[0].refs == ()
+
+
+def test_nested_image_attribute_is_found():
+    p = parse_source(
+        'resource "google_cloud_run_v2_service" "s" {\n'
+        '  template {\n    containers {\n      image = "gcr.io/app:1"\n    }\n  }\n}\n'
+    )
+    assert p.blocks[0].images == ("gcr.io/app:1",)
+
+
 def test_malformed_hcl_is_empty():
     assert parse_source('resource "aws_x" "y" { = = =').blocks == ()

@@ -52,6 +52,29 @@ def test_provisions_database_and_registry(graph, tmp_path):
     assert q("MATCH (r:Resource {rtype:'aws_db_instance'}) RETURN r.category") == [["database"]]
 
 
+def test_module_scoped_resources_stay_distinct(graph, tmp_path):
+    # the SAME resource address in two module directories must be TWO nodes (env/dev vs env/prod)
+    q = _ingest(graph, tmp_path, {
+        "env/dev/main.tf": 'resource "aws_s3_bucket" "b" { bucket = "dev" }\n',
+        "env/prod/main.tf": 'resource "aws_s3_bucket" "b" { bucket = "prod" }\n',
+    })
+    assert q("MATCH (r:Resource {address:'aws_s3_bucket.b'}) RETURN count(r)") == [[2]]
+    assert sorted(r[0] for r in q("MATCH (r:Resource {address:'aws_s3_bucket.b'}) RETURN r.module")) == ["env/dev", "env/prod"]
+
+
+def test_data_source_does_not_provision(graph, tmp_path):
+    # a `data` lookup of an existing db is a READ, not a provision
+    q = _ingest(graph, tmp_path, {"main.tf": 'data "aws_db_instance" "existing" { db_instance_identifier = "x" }\n'})
+    assert q("MATCH (:Resource)-[:PROVISIONS]->() RETURN count(*)") == [[0]]
+    assert q("MATCH (d:Database) RETURN count(d)") == [[0]]
+    assert q("MATCH (r:Resource) RETURN r.category") == [["data"]]
+
+
+def test_ordinary_resource_is_compute(graph, tmp_path):
+    q = _ingest(graph, tmp_path, {"main.tf": 'resource "aws_ecs_task_definition" "api" { family = "x" }\n'})
+    assert q("MATCH (r:Resource {rtype:'aws_ecs_task_definition'}) RETURN r.category") == [["compute"]]
+
+
 def test_resync_removes_deleted_resource(graph, tmp_path):
     q = _ingest(graph, tmp_path, {"main.tf": _TF})
     assert q("MATCH (r:Resource) RETURN count(r)") == [[4]]
@@ -59,3 +82,4 @@ def test_resync_removes_deleted_resource(graph, tmp_path):
     assert sorted(r[0] for r in q("MATCH (r:Resource) RETURN r.address")) == ["aws_s3_bucket.b"]
     assert q("MATCH (:Resource)-[:DEPENDS_ON]->() RETURN count(*)") == [[0]]
     assert q("MATCH (d:Database) RETURN count(d)") == [[0]]
+    assert q("MATCH (r:Registry) RETURN count(r)") == [[0]]  # the ecr Registry node was removed too

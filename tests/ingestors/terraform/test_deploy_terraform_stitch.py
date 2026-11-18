@@ -29,9 +29,11 @@ def _q(graph, c):
 def test_tf_run_image_is_external_until_built(graph, tmp_path):
     writer = GraphWriter(graph)
     _ingest_tf(graph, tmp_path)
+    # force a stale resolved:true, so the assertion verifies the STITCH recomputed it (not just the
+    # producer's initial write)
+    writer.query("MATCH (i:Image {ref:'docker.io/shop/api:1.0'}) SET i.resolved = true, i.origin = 'internal'")
     stitch(writer)
-    # a tf-run image with no builder in graph stays an external pull
-    assert _q(graph, "MATCH (i:Image {ref:'docker.io/shop/api:1.0'}) RETURN i.resolved") == [[False]]
+    assert _q(graph, "MATCH (i:Image {ref:'docker.io/shop/api:1.0'}) RETURN i.resolved, i.origin") == [[False, "registry"]]
 
 
 def test_tf_run_image_flips_internal_when_built(graph, tmp_path):

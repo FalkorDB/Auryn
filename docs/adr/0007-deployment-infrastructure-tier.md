@@ -95,8 +95,8 @@ identically).** A Dockerfile `FROM python:3.12-slim`, a Compose `image: python:3
 | `BASED_ON` | `BuildStage`/`Image` → base `Image` | the `FROM` chain; carries `resolution` |
 | `COPIES_FROM` | `BuildStage` → `BuildStage` | multi-stage `COPY --from=` |
 | **`BUILDS_IMAGE`** | `BuildStage` → `Image` | the published image a build emits (written by the stitch once a tag is assigned) |
-| **`RUNS_IMAGE`** | `Service` → `Image` | the image a workload runs |
-| `DEPENDS_ON` | `Service` → `Service` | **reuse the contract edge**; compose `depends_on`, k8s/tf refs, Helm chart deps |
+| **`RUNS_IMAGE`** | `Service`/`Resource` → `Image` | the image a workload (or a Terraform resource — ECS task, Cloud Run) runs |
+| `DEPENDS_ON` | `Service`/`Resource` → `Service`/`Resource` | **reuse the contract edge**; compose `depends_on`, Terraform interpolation refs (scoped to the module dir), Helm chart deps |
 | `PROVISIONS` | `Resource` → `Service`/`Image`/`Registry`/`Database` | a Terraform resource creates a runtime thing |
 | `DEPLOYS` | `Resource`(release)/ci-job → `Service`/`Resource` | Helm release / CI deploy step |
 | `STORED_IN` | `Image` → `Registry` | where an image is pushed/pulled |

@@ -14,28 +14,35 @@ import hcl2
 
 from auryn.ingestors.terraform.model import Block, ParsedTf
 
-# A Terraform reference inside `${...}`: a resource (`type.name`, type has an underscore), a module
-# (`module.name`), or a data source (`data.type.name`). `var.`/`local.` are intentionally NOT blocks.
+# A Terraform reference: a resource (`type.name`, type has an underscore), a module (`module.name`),
+# or a data source (`data.type.name`). `var.`/`local.` are intentionally NOT blocks.
 _REF = re.compile(
     r"(?<![\w.])(module\.[A-Za-z_][\w-]*|data\.[A-Za-z_]\w*\.[A-Za-z_][\w-]*|[A-Za-z_]\w*_[A-Za-z_]\w*\.[A-Za-z_][\w-]*)"
 )
+# The CONTENT of each `${...}` interpolation (where references actually live -- a quoted string
+# literal like `"aws_x.y"` is NOT an interpolation and must not fabricate a reference).
+_INTERP = re.compile(r"\$\{([^}]*)\}")
 # `image = "x"` / `"image": "x"` inside an attribute (e.g. a container_definitions jsonencode blob).
 _IMAGE = re.compile(r'"?image(?:_uri)?"?\s*[:=]\s*"([^"${}\s]+)"')
-
-_SKIP = "__is_block__"
 
 
 def _unq(s):
     return s[1:-1] if isinstance(s, str) and len(s) >= 2 and s[0] == '"' and s[-1] == '"' else s
 
 
+def _meta_key(k) -> bool:
+    """hcl2 v4 injects bookkeeping keys (`__is_block__`, `__start_line__`, comments, ...) -- skip any
+    `__`-prefixed key so metadata is never scanned as Terraform data."""
+    return isinstance(k, str) and k.startswith("__")
+
+
 def _strings(v):
-    """Every string leaf under an attribute value (dicts/lists walked)."""
+    """Every string leaf under an attribute value (dicts/lists walked; hcl2 metadata keys skipped)."""
     if isinstance(v, str):
         yield v
     elif isinstance(v, dict):
         for k, x in v.items():
-            if k != _SKIP:
+            if not _meta_key(k):
                 yield from _strings(x)
     elif isinstance(v, list):
         for x in v:
@@ -54,23 +61,36 @@ def _address(ref: str) -> str:
 def _refs(attrs: dict, self_address: str) -> tuple[str, ...]:
     out: dict[str, None] = {}
     for s in _strings(attrs):
-        if "." not in s:
-            continue
-        for m in _REF.findall(s):
-            addr = _address(m)
-            if addr != self_address:
-                out.setdefault(addr, None)
+        for interp in _INTERP.findall(s):  # only the ${...} content, not plain string literals
+            for m in _REF.findall(interp):
+                addr = _address(m)
+                if addr != self_address:
+                    out.setdefault(addr, None)
     return tuple(out)
+
+
+def _collect_image_keys(v, out: dict) -> None:
+    """Find every `image`/`image_uri` attribute at ANY nesting (Cloud Run's `template.containers.image`,
+    not just top-level)."""
+    if isinstance(v, dict):
+        for k, x in v.items():
+            if _meta_key(k):
+                continue
+            if k in ("image", "image_uri") and isinstance(x, str):
+                img = _unq(x)
+                if img and "${" not in img:
+                    out.setdefault(img, None)
+            else:
+                _collect_image_keys(x, out)
+    elif isinstance(v, list):
+        for x in v:
+            _collect_image_keys(x, out)
 
 
 def _images(attrs: dict) -> tuple[str, ...]:
     out: dict[str, None] = {}
-    for k, v in attrs.items():
-        if k in ("image", "image_uri") and isinstance(v, str):
-            img = _unq(v)
-            if img:
-                out.setdefault(img, None)
-    for s in _strings(attrs):
+    _collect_image_keys(attrs, out)                 # image keys at any depth
+    for s in _strings(attrs):                       # + images inside a jsonencode/container_definitions blob
         for m in _IMAGE.findall(s):
             out.setdefault(m, None)
     return tuple(out)
