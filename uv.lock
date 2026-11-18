@@ -22,6 +22,7 @@ members = [
     "auryn-http",
     "auryn-java",
     "auryn-julia",
+    "auryn-k8s",
     "auryn-kotlin",
     "auryn-oracle",
     "auryn-orm",
@@ -170,6 +171,7 @@ all = [
     { name = "auryn-http" },
     { name = "auryn-java" },
     { name = "auryn-julia" },
+    { name = "auryn-k8s" },
     { name = "auryn-kotlin" },
     { name = "auryn-oracle", extra = ["live"] },
     { name = "auryn-orm" },
@@ -222,6 +224,9 @@ java = [
 ]
 julia = [
     { name = "auryn-julia" },
+]
+k8s = [
+    { name = "auryn-k8s" },
 ]
 kotlin = [
     { name = "auryn-kotlin" },
@@ -292,6 +297,8 @@ requires-dist = [
     { name = "auryn-java", marker = "extra == 'java'", editable = "packages/java" },
     { name = "auryn-julia", marker = "extra == 'all'", editable = "packages/julia" },
     { name = "auryn-julia", marker = "extra == 'julia'", editable = "packages/julia" },
+    { name = "auryn-k8s", marker = "extra == 'all'", editable = "packages/k8s" },
+    { name = "auryn-k8s", marker = "extra == 'k8s'", editable = "packages/k8s" },
     { name = "auryn-kotlin", marker = "extra == 'all'", editable = "packages/kotlin" },
     { name = "auryn-kotlin", marker = "extra == 'kotlin'", editable = "packages/kotlin" },
     { name = "auryn-oracle", marker = "extra == 'oracle'", editable = "packages/oracle" },
@@ -322,7 +329,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.2,<2.1" },
     { name = "tomli-w", specifier = ">=1.0" },
 ]
-provides-extras = ["llm", "embedded", "python", "typescript", "java", "go", "rust", "c", "cpp", "cuda", "csharp", "php", "ruby", "kotlin", "swift", "julia", "bash", "sql", "sql-all", "oracle", "oracle-live", "http", "orm", "grpc", "events", "docker", "compose", "all"]
+provides-extras = ["llm", "embedded", "python", "typescript", "java", "go", "rust", "c", "cpp", "cuda", "csharp", "php", "ruby", "kotlin", "swift", "julia", "bash", "sql", "sql-all", "oracle", "oracle-live", "http", "orm", "grpc", "events", "docker", "compose", "k8s", "all"]
 
 [[package]]
 name = "auryn-cpp"
@@ -472,6 +479,21 @@ requires-dist = [
     { name = "auryn-core", editable = "packages/core" },
     { name = "tree-sitter", specifier = ">=0.26.0" },
     { name = "tree-sitter-julia", specifier = ">=0.23.1" },
+]
+
+[[package]]
+name = "auryn-k8s"
+version = "0.1.0"
+source = { editable = "packages/k8s" }
+dependencies = [
+    { name = "auryn-core" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "auryn-core", editable = "packages/core" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]
@@ -1135,6 +1157,7 @@ dependencies = [
     { name = "auryn-http" },
     { name = "auryn-java" },
     { name = "auryn-julia" },
+    { name = "auryn-k8s" },
     { name = "auryn-kotlin" },
     { name = "auryn-oracle" },
     { name = "auryn-orm" },
@@ -1178,6 +1201,7 @@ dev = [
     { name = "auryn-http" },
     { name = "auryn-java" },
     { name = "auryn-julia" },
+    { name = "auryn-k8s" },
     { name = "auryn-kotlin" },
     { name = "auryn-oracle", extra = ["live"] },
     { name = "auryn-orm" },
@@ -1213,6 +1237,7 @@ requires-dist = [
     { name = "auryn-http", editable = "packages/http" },
     { name = "auryn-java", editable = "packages/java" },
     { name = "auryn-julia", editable = "packages/julia" },
+    { name = "auryn-k8s", editable = "packages/k8s" },
     { name = "auryn-kotlin", editable = "packages/kotlin" },
     { name = "auryn-oracle", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'all'", editable = "packages/oracle" },
@@ -1246,6 +1271,7 @@ dev = [
     { name = "auryn-http", editable = "packages/http" },
     { name = "auryn-java", editable = "packages/java" },
     { name = "auryn-julia", editable = "packages/julia" },
+    { name = "auryn-k8s", editable = "packages/k8s" },
     { name = "auryn-kotlin", editable = "packages/kotlin" },
     { name = "auryn-oracle", extras = ["live"], editable = "packages/oracle" },
     { name = "auryn-orm", editable = "packages/orm" },
