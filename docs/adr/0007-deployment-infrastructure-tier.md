@@ -66,6 +66,8 @@ different repos (and two different ingestors) must agree on without coordination
 | `Service` (compose) | `compose://<project>/<file>/<service>` | project |
 | `Service` (k8s) | `k8s://<project>/<namespace>/<kind>/<name>` | project |
 | `Resource` (terraform) | `terraform://<project>/<module-dir>/<address>` — `<address>` is the full Terraform address: `<type>.<name>` (resource), `data.<type>.<name>` (data source), or `module.<name>` (module); the root module omits `<module-dir>` | project |
+| `Database` (terraform) | `<resource-id>#database` — the provisioning resource's id plus a `#database` suffix (a Terraform address never contains `#`, so it can't collide with a `Resource`) | project |
+| `Registry` (terraform) | `<resource-id>#registry` — the provisioning resource's id plus a `#registry` suffix | project |
 | `Resource`/`Service` (helm) | `helm://<project>/<chart>/<template>/<name>` | project |
 | `ConfigValue` / `Secret` | `<owner-id>/env/<NAME>` | owner-scoped |
 

@@ -155,6 +155,44 @@ def _is_container_resource(rtype: str) -> bool:
     return rtype in _CONTAINER_RESOURCE_TYPES
 
 
+def _literal_only(value: str) -> str:
+    """`value` with every `${...}` interpolation removed (brace-balanced, quote-aware, skipping an
+    escaped `$${`). Non-empty iff the value has a concrete LITERAL part: `"${ecr.url}:1.0"` -> `:1.0`,
+    but a pure `"${var.x}"` or a regex-truncated `"${format("` -> ``."""
+    out, i, n = [], 0, len(value)
+    while i < n:
+        if value[i] == "$" and i + 1 < n and value[i + 1] == "{" and not (i > 0 and value[i - 1] == "$"):
+            depth, j, in_str, esc = 1, i + 2, False, False
+            while j < n and depth:
+                c = value[j]
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif in_str:
+                    in_str = c != '"'
+                elif c == '"':
+                    in_str = True
+                elif c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                j += 1
+            i = j
+        else:
+            out.append(value[i])
+            i += 1
+    return "".join(out)
+
+
+def _is_materializable_image(img: str) -> bool:
+    """Materialize an image only if it has a concrete LITERAL component. A pure interpolation
+    (`${var.api_image}`, `${format(...)}`) can never resolve to -- or join -- a concrete hub image, so
+    it is dropped (and a regex-truncated blob value like `${format(` is dropped with it); an
+    interpolation with literal text (`${ecr.url}:1.0`, tag `:1.0`) IS materialized, flagged unresolved."""
+    return bool(_literal_only(img).strip())
+
+
 def _collect_image_keys(v, out: dict, in_container: bool = False) -> None:
     """Find CONTAINER image refs at any nesting. An `_IMAGE_ATTRS` key (`image_uri`/`image_identifier`)
     is container-specific, so collected anywhere; a bare `image` is collected ONLY inside a container
@@ -170,7 +208,7 @@ def _collect_image_keys(v, out: dict, in_container: bool = False) -> None:
                 continue
             if (k in _IMAGE_ATTRS or (k == "image" and in_container)) and isinstance(x, str):
                 img = _unq(x)
-                if img:
+                if img and _is_materializable_image(img):
                     out.setdefault(img, None)
             else:
                 child_container = in_container or (isinstance(k, str) and k.lower() in _CONTAINER_BLOCK_KEYS)
@@ -210,7 +248,8 @@ def _images(attrs: dict, rtype: str = "") -> tuple[str, ...]:
     _collect_image_keys(attrs, out, _is_container_resource(rtype))  # structured image keys at any depth
     for s in _blob_strings(attrs):                  # + images inside a container_definitions jsonencode blob
         for m in _IMAGE.findall(s):
-            out.setdefault(m, None)
+            if _is_materializable_image(m):
+                out.setdefault(m, None)
     return tuple(out)
 
 

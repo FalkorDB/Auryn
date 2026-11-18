@@ -106,6 +106,23 @@ def test_image_like_line_in_user_data_is_not_an_image():
     assert p.blocks[0].images == ()
 
 
+def test_variable_only_image_is_not_materialized():
+    # hcl2 renders `image = var.api_image` as `${var.api_image}` -- a pure interpolation with NO literal
+    # part can never resolve to or join a concrete hub image, so it is not materialized
+    p = parse_source('resource "docker_container" "c" { image = var.api_image }')
+    assert p.blocks[0].images == ()
+
+
+def test_complex_interpolation_image_in_blob_is_not_garbled():
+    # a container_definitions image built from a format() call (quoted args) must NOT be truncated at the
+    # first inner quote into a garbage `${format(` image -- it has no literal part, so it is dropped
+    p = parse_source(
+        'resource "aws_ecs_task_definition" "t" {\n'
+        '  container_definitions = jsonencode([{ name = "a", image = "${format("%s:%s", var.r, var.t)}" }])\n}\n'
+    )
+    assert p.blocks[0].images == ()
+
+
 def test_interpolated_image_in_blob_is_kept():
     # an interpolated image inside a container_definitions jsonencode blob must survive too (the blob
     # extractor used to reject any `${...}` value)
