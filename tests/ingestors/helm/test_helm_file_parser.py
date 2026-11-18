@@ -56,6 +56,12 @@ def test_chart_yaml_without_name_is_none():
     assert parse_chart_yaml("apiVersion: v2\nversion: 1.0\n") is None
 
 
+def test_non_list_dependencies_is_ignored_not_fatal():
+    # a malformed `dependencies: true` must not raise -- the chart metadata is still parsed, deps empty
+    c = parse_chart_yaml("apiVersion: v2\nname: x\nversion: 1.0\ndependencies: true\n")
+    assert c is not None and c.name == "x" and c.dependencies == ()
+
+
 # ── values resolution ─────────────────────────────────────────────────────────
 def test_lookup_dotted_path():
     assert lookup({"image": {"repository": "shop/api"}}, "image.repository") == "shop/api"

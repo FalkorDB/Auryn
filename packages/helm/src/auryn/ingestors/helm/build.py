@@ -45,7 +45,7 @@ def build_graph(charts: list[ParsedChart], proj_id: str) -> Iterator[GraphNode |
             "name": name, "kind": "chart", "chart_dir": pc.chart_dir,
             "version": pc.chart.version if pc.chart else "",
             "app_version": pc.chart.app_version if pc.chart else "",
-            "resolved": True,
+            "resolved": pc.chart is not None,  # an unreadable/nameless Chart.yaml isn't a valid chart
         })
         yield GraphEdge("HAS_RESOURCE", "File", {"id": fid}, "Resource", {"id": cid})
 

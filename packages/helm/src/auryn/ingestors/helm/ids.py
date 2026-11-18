@@ -46,5 +46,7 @@ def workload_id(proj_id: str, scope: str, template: str, kind: str, name: str) -
 def dep_id(proj_id: str, dep_name: str) -> str:
     # A dependency that resolves to an in-repo chart uses that chart's id; an EXTERNAL dependency (not
     # in the repo) gets a project-scoped placeholder keyed by name, so two charts depending on the same
-    # external chart converge on one node. `_dep/` can't collide with a chart dir (it's reserved).
+    # external chart converge on one node. `_dep/` is reserved by convention: it is NOT enforced, but a
+    # collision needs a real chart whose directory is literally `_dep/<external-dep-name>` -- vanishingly
+    # unlikely, and chart discovery never creates such a path.
     return f"{proj_id}/_dep/{dep_name}"

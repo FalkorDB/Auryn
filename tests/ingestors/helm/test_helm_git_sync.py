@@ -115,3 +115,9 @@ def test_root_chart_and_sibling_dir_do_not_merge(graph, tmp_path):
     assert q("MATCH (r:Resource {kind:'chart'}) RETURN count(r)") == [[2]]
     assert q("MATCH (r:Resource {kind:'chart', name:'shop'}) RETURN count(r)") == [[1]]
     assert q("MATCH (r:Resource {kind:'chart', name:'other'}) RETURN count(r)") == [[1]]
+
+
+def test_nameless_chart_resource_is_unresolved(graph, tmp_path):
+    # a Chart.yaml without a name isn't valid chart metadata -> its fallback Resource is resolved:false
+    q = _ingest(graph, tmp_path, {"charts/x/Chart.yaml": "apiVersion: v2\nversion: 1.0.0\n"})
+    assert q("MATCH (r:Resource {kind:'chart'}) RETURN r.resolved") == [[False]]

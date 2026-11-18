@@ -38,9 +38,11 @@ def parse_chart_yaml(data: str | bytes) -> Chart | None:
     if not isinstance(name, str) or not name:
         return None
     deps: list[str] = []
-    for d in doc.get("dependencies", []) or []:
-        if isinstance(d, dict) and isinstance(d.get("name"), str):
-            deps.append(d["name"])
+    deps_raw = doc.get("dependencies")
+    if isinstance(deps_raw, list):  # a non-list `dependencies:` (e.g. `true`) is ignored, never fatal
+        for d in deps_raw:
+            if isinstance(d, dict) and isinstance(d.get("name"), str):
+                deps.append(d["name"])
     return Chart(
         name=name,
         version=str(doc.get("version", "")),
