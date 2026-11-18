@@ -72,9 +72,9 @@ jobs:
           uv run pytest $ignores -n 2 --cov=auryn --cov-report=term-missing
 
   # Install what users install -- the umbrella, and the core with a few plugin extras -- from wheels
-  # built from THIS checkout, then run `pip check`, the CLI, and load every plugin. The packages are
-  # stamped with a version that exists only here, and every auryn-* requirement is pinned `==`, so
-  # every auryn-* package comes from the local build and third-party ones from PyPI.
+  # built from THIS checkout, then run `pip check`, the CLI, and check that the expected plugins load.
+  # The packages are stamped with a version that exists only here, and every auryn-* requirement is
+  # pinned `==`, so every auryn-* package comes from the local build and third-party ones from PyPI.
   package-install:
     runs-on: ubuntu-latest
     strategy:
@@ -118,10 +118,22 @@ jobs:
           "$env_bin/python" -m pip check
           "$env_bin/auryn" --help > /dev/null
           "$env_bin/python" - <<'PY'
+          import os, pathlib
           from importlib.metadata import entry_points
-          groups = ("auryn.languages", "auryn.ingestors", "auryn.enrichments")
-          plugins = [ep.load() for group in groups for ep in entry_points(group=group)]
-          print(f"{len(plugins)} plugins loaded")
+          # The umbrella installs every plugin in packages/; auryn-core[a,b] installs auryn-a and auryn-b.
+          name, _, extras = os.environ["SPEC"].partition("[")
+          if name == "falkordb-auryn":
+              expected = {f"auryn-{p.parent.name}" for p in pathlib.Path("packages").glob("*/pyproject.toml")}
+              expected.discard("auryn-core")
+          else:
+              expected = {f"auryn-{e}" for e in extras.rstrip("]").split(",") if e}
+          loaded = set()
+          for group in ("auryn.languages", "auryn.ingestors", "auryn.enrichments"):
+              for ep in entry_points(group=group):
+                  ep.load()
+                  loaded.add(ep.dist.name)
+          assert expected <= loaded, f"plugins not installed or not loaded: {sorted(expected - loaded)}"
+          print(f"{len(loaded)} plugins loaded: {sorted(loaded)}")
           PY
 
   # Dedicated performance-regression gate. The whole value of delta-sync is that editing one file

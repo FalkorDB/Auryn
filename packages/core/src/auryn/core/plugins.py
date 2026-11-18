@@ -21,6 +21,7 @@ plugin versions rather than float.
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import logging
 import os
 import shutil
@@ -106,7 +107,11 @@ def install_plugin(package: str, label: str = "plugin") -> bool:
     ingestor plugin, or an optional runtime dependency) is importable this process. Returns
     True on success. See the module docstring for the security posture -- callers must have
     opted in before calling this, and `package` must be a vetted/hardcoded name, never
-    user-supplied."""
+    user-supplied. A catalog plugin is pinned to the running core's version: every release ships
+    all plugins at that version, and the newest plugin's own pins (auryn-cuda -> auryn-cpp) could
+    otherwise upgrade a plugin this process has already imported."""
+    if package in PLUGIN_PACKAGES.values():
+        package = f"{package}=={importlib.metadata.version('auryn-core')}"
     cmd = _install_command(package)
     logger.warning("Auto-installing %s %r via: %s", label, package, " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)

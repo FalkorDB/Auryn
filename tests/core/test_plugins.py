@@ -137,6 +137,23 @@ def test_install_command_pip_fallback_targets_sys_executable(monkeypatch):
     assert cmd == [plugins.sys.executable, "-m", "pip", "install", "pkg"]
 
 
+def test_install_plugin_pins_a_catalog_plugin_to_the_running_core(monkeypatch):
+    # Unpinned, `pip install auryn-cuda` pulls the newest cuda, whose `auryn-cpp==` pin would
+    # upgrade an auryn-cpp this process has already imported. Other dependencies are left as given.
+    commands: list[list[str]] = []
+    monkeypatch.setattr(plugins.subprocess, "run", lambda cmd, **kw: commands.append(cmd) or _Done())
+    core_version = plugins.importlib.metadata.version("auryn-core")
+
+    assert plugins.install_plugin("auryn-cuda")
+    assert plugins.install_plugin("watchdog>=4", label="dependency")
+
+    assert [cmd[-1] for cmd in commands] == [f"auryn-cuda=={core_version}", "watchdog>=4"]
+
+
+class _Done:
+    returncode = 0
+
+
 # -- ensure_importable: on-demand optional-dependency install --------------------------
 
 def test_ensure_importable_returns_already_present_module():
