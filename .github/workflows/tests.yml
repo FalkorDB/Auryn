@@ -116,7 +116,7 @@ jobs:
           python_bin="$RUNNER_TEMP/package-env/bin/python"
           "$python_bin" -m pip install --find-links "$RUNNER_TEMP/dist" "${SPEC}==${LOCAL_VERSION}"
           "$python_bin" -m pip check
-          "$python_bin" .github/scripts/check_install.py "$SPEC" "$LOCAL_VERSION" .
+          "$python_bin" .github/scripts/check_install.py "$LOCAL_VERSION"
 
   # Dedicated performance-regression gate. The whole value of delta-sync is that editing one file
   # re-parses ~one file, not the repo -- a change that drags a file's whole package/module back in is

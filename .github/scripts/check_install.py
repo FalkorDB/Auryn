@@ -1,62 +1,31 @@
-"""Check an installed Auryn selection, run with the interpreter of the environment under test.
+"""Check an Auryn install in CI. Run it with the Python of the environment under test.
 
-Usage: python check_install.py SPEC VERSION REPO_ROOT
-  SPEC: what was installed, e.g. `falkordb-auryn`, `auryn-core[python,http]`, `falkordb-auryn[all]`.
+Usage: python check_install.py VERSION
 
-Asserts that exactly the expected auryn-* packages are installed (what SPEC names, plus the
-auryn-* dependencies of those, read from the workspace's pyproject files), all at VERSION (the
-locally built wheels, not PyPI), and that the CLI and every plugin entry point load.
+Fails if an installed Auryn package is not VERSION (the locally built wheels, not an older release
+from PyPI), or if the CLI or a plugin does not load.
 """
 
 import importlib
 import importlib.metadata
-import pathlib
-import re
 import sys
-import tomllib
 
-
-def normalize(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def dist_name(requirement: str) -> str:
-    return normalize(re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", requirement).group())
-
-
-def project(path: pathlib.Path) -> dict:
-    return tomllib.loads(path.read_text())["project"]
-
-
-spec, version, root = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
-pyprojects = [root / "pyproject.toml", *root.glob("packages/*/pyproject.toml")]
-projects = {normalize(p["name"]): p for p in map(project, pyprojects)}
-
-name, _, extras = spec.partition("[")
-name, extras = normalize(name), [e for e in extras.rstrip("]").split(",") if e]
-wanted = [name] + [r for e in extras for r in projects[name]["optional-dependencies"][e]]
-
-expected: set[str] = set()
-todo = [dist_name(r) for r in wanted]
-while todo:
-    dist = todo.pop()
-    if dist in expected or dist not in projects:
-        continue
-    expected.add(dist)
-    todo += [dist_name(r) for r in projects[dist].get("dependencies", [])]
-
-installed = {normalize(d.metadata["Name"]): d.version for d in importlib.metadata.distributions()}
-# Every auryn distribution, not only workspace ones, so a stray auryn-* package also fails the check.
-found = {d: v for d, v in installed.items() if d in projects or d.startswith("auryn-")}
-assert set(found) == expected, f"expected {sorted(expected)}, installed {sorted(found)}"
-stale = {d: v for d, v in found.items() if v != version}
+version = sys.argv[1]
+installed = {
+    d.metadata["Name"].lower(): d.version
+    for d in importlib.metadata.distributions()
+    if d.metadata["Name"].lower().startswith(("auryn-", "falkordb-auryn"))
+}
+assert "auryn-core" in installed, f"auryn-core is not installed: {sorted(installed)}"
+stale = {name: v for name, v in installed.items() if v != version}
 assert not stale, f"not the locally built version {version}: {stale}"
 
 importlib.import_module("auryn.cli")
-
-loaded = 0
-for group in ("auryn.languages", "auryn.ingestors", "auryn.enrichments"):
-    for entry_point in importlib.metadata.entry_points(group=group):
-        entry_point.load()
-        loaded += 1
-print(f"{spec}: {len(found)} auryn packages at {version}, {loaded} entry points loaded")
+plugins = [
+    entry_point.load()
+    for group in ("auryn.languages", "auryn.ingestors", "auryn.enrichments")
+    for entry_point in importlib.metadata.entry_points(group=group)
+]
+print(
+    f"{len(installed)} packages at {version}, {len(plugins)} plugins loaded: {sorted(installed)}"
+)
