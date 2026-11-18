@@ -151,7 +151,18 @@ def main() -> None:
             "RETURN ing.host, e.route, s.name ORDER BY e.route"):
             print(f"  https://{host}{route}  -SERVES->  APIEndpoint  (by workload '{svc}')")
 
-        print(f"\n{BAR}\nDone. Inspect it yourself:  uv run auryn view   (graph: {GRAPH})\n{BAR}\n")
+        section("9. CLOUD  (terraform: resources, the dependency graph, and the SAME hub image)")
+        for rtype, name, img in rows(g,
+            "MATCH (r:Resource)-[:RUNS_IMAGE]->(i:Image) RETURN r.rtype, r.name, i.ref ORDER BY r.name"):
+            print(f"  {rtype} {name:6}  RUNS  {img}")
+        for a, b in rows(g, "MATCH (a:Resource)-[:DEPENDS_ON]->(b:Resource) RETURN a.address, b.address"):
+            print(f"  {a}  DEPENDS_ON  {b}")
+        for rtype, name, kind in rows(g,
+            "MATCH (r:Resource)-[:PROVISIONS]->(n) "
+            "RETURN r.rtype, r.name, head([l IN labels(n) WHERE l <> 'Entity']) ORDER BY r.name"):
+            print(f"  {rtype} {name:6}  PROVISIONS  a {kind}")
+
+        print(f"\n{BAR}\nFour producers on one hub image.  Inspect it:  uv run auryn view   (graph: {GRAPH})\n{BAR}\n")
     finally:
         _shutdown(conn, pid)
 
