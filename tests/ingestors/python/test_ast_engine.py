@@ -341,6 +341,39 @@ def test_nested_calls_resolve_through_lexical_scope():
     assert run_id in outer_targets and rec_id in outer_targets     # enclosing -> its nested defs
 
 
+def test_param_shadows_sibling_function_no_false_edge():
+    # `run`'s parameter `helper` shadows the sibling nested `helper` -- the call is the local param, so
+    # no false CALLS edge to outer.helper (#786 review)
+    m = _module(
+        "def outer():\n"
+        "    def helper():\n        return 1\n"
+        "    def run(helper):\n        return helper()\n"
+        "    return run\n"
+    )
+    items = list(resolution.resolve([m], "python://demo"))
+    run_id = "python://demo/module/m.func.outer().func.run(helper)"
+    helper_id = "python://demo/module/m.func.outer().func.helper()"
+    assert helper_id not in {t for t, _ in _calls_from(items, run_id)}
+
+
+def test_param_shadows_module_function_no_false_edge():
+    # a module-level param shadowing a module function: `f(helper)` calling `helper()` is the param
+    m = _module("def helper():\n    return 1\n\ndef f(helper):\n    return helper()\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    assert "python://demo/module/m.func.helper()" not in {
+        t for t, _ in _calls_from(items, "python://demo/module/m.func.f(helper)")
+    }
+
+
+def test_nested_function_carries_file_path_for_impact():
+    # nested Function nodes carry file_path so impact's single-containment-hop symbols_in_ranges can
+    # reach them directly (#786 review)
+    m = _module("def outer():\n    def tool():\n        return 1\n    return tool\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    tool = _node(items, "python://demo/module/m.func.outer().func.tool()")
+    assert tool.properties["file_path"] == "m.py"
+
+
 def test_import_bound_instantiation_resolves_to_constructor():
     svc = parse_module(b"class Service:\n    def __init__(self, x):\n        self.x = x\n", "svc.py")
     main = parse_module(b"from svc import Service\n\nService(1)\n", "main.py")
