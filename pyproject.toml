@@ -53,7 +53,7 @@ dependencies = [
     "auryn-typescript", "auryn-java", "auryn-go", "auryn-rust", "auryn-php",
     "auryn-julia", "auryn-ruby", "auryn-kotlin", "auryn-swift", "auryn-bash",
     "auryn-oracle", "auryn-sql",
-    "auryn-http", "auryn-orm", "auryn-grpc", "auryn-events", "auryn-docker",
+    "auryn-http", "auryn-orm", "auryn-grpc", "auryn-events", "auryn-docker", "auryn-compose",
 ]
 
 [project.urls]
@@ -74,6 +74,7 @@ orm = ["auryn-orm"]                        # ORM model<->DB-table stitch hook (S
 grpc = ["auryn-grpc"]                       # gRPC/Protobuf contract stitch hook (client RPC call<->server handler, cross-language)
 events = ["auryn-events"]                   # message/event-bus stitch hook (publisher<->subscriber via topic; Kafka/Rabbit/NATS/...)
 docker = ["auryn-docker"]                   # Dockerfile plugin + `deploy` tier stitch (ADR 0007): BuildStage/Image hub + PACKAGES code seam
+compose = ["auryn-compose"]                 # docker-compose plugin + `deploy-compose` stitch: Service/RUNS_IMAGE/DEPENDS_ON + BUILDS_IMAGE build->run loop
 c = ["auryn-c"]
 cpp = ["auryn-cpp"]
 cuda = ["auryn-cuda"]                       # CUDA (.cu/.cuh): reuses the C++ engine + kernel-launch/exec-space signal
@@ -88,7 +89,7 @@ kotlin = ["auryn-kotlin"]
 swift = ["auryn-swift"]
 bash = ["auryn-bash"]
 embedded = ["auryn-core[embedded]"]       # serverless, in-process FalkorDB (no server/Docker); powers `auryn quickstart`
-all = ["auryn-python", "auryn-csharp", "auryn-oracle[live]", "auryn-sql[all]", "auryn-http", "auryn-orm", "auryn-grpc", "auryn-events", "auryn-docker", "auryn-c", "auryn-cpp", "auryn-cuda", "auryn-typescript", "auryn-java", "auryn-go", "auryn-rust", "auryn-php", "auryn-julia", "auryn-ruby", "auryn-kotlin", "auryn-swift", "auryn-bash"]
+all = ["auryn-python", "auryn-csharp", "auryn-oracle[live]", "auryn-sql[all]", "auryn-http", "auryn-orm", "auryn-grpc", "auryn-events", "auryn-docker", "auryn-compose", "auryn-c", "auryn-cpp", "auryn-cuda", "auryn-typescript", "auryn-java", "auryn-go", "auryn-rust", "auryn-php", "auryn-julia", "auryn-ruby", "auryn-kotlin", "auryn-swift", "auryn-bash"]
 
 # Re-declare the CLI entry point on the umbrella so `uv tool install falkordb-auryn` (or a published
 # name / a local path / `.[all]`) exposes the `auryn` executable. uv tool install only
@@ -122,6 +123,7 @@ auryn-orm = { workspace = true }
 auryn-grpc = { workspace = true }
 auryn-events = { workspace = true }
 auryn-docker = { workspace = true }
+auryn-compose = { workspace = true }
 auryn-c = { workspace = true }
 auryn-cpp = { workspace = true }
 auryn-cuda = { workspace = true }
@@ -149,6 +151,7 @@ dev = [
     "auryn-grpc",
     "auryn-events",
     "auryn-docker",
+    "auryn-compose",
     "auryn-c",
     "auryn-cpp",
     "auryn-cuda",
@@ -200,6 +203,7 @@ source = [
     "packages/sql/src/auryn",
     "packages/http/src/auryn",
     "packages/docker/src/auryn",
+    "packages/compose/src/auryn",
     "packages/c/src/auryn",
     "packages/cpp/src/auryn",
     "packages/cuda/src/auryn",
