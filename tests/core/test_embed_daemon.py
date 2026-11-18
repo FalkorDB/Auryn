@@ -64,6 +64,7 @@ def test_is_daemon_running_false_without_pidfile():
     assert daemon.is_daemon_running() is False
 
 
+@pytest.mark.skipif(fcntl is None, reason="os.kill liveness check is POSIX-only (Windows raises OSError)")
 def test_is_daemon_running_reaps_stale_pid():
     embed_pid_path().parent.mkdir(parents=True, exist_ok=True)
     embed_pid_path().write_text("999999999")  # a pid that isn't alive
@@ -87,7 +88,7 @@ def test_process_request_embeds_and_clears_claim(monkeypatch):
     )
     req = _enqueue_raw("g1")
     client = _FakeClient()
-    out = daemon._process_request(req, embedder=object(), client=client, attempts={})
+    out = daemon._process_request(req, embedder_for=lambda m: object(), client=client, attempts={})
 
     assert len(calls) == 1              # embed_graph ran for the graph
     assert out is client               # the client is cached + returned for reuse
@@ -104,13 +105,13 @@ def test_process_request_retries_then_drops(monkeypatch):
 
     # First _MAX_ATTEMPTS-1 failures re-queue the request for a later pass.
     for n in range(1, daemon._MAX_ATTEMPTS):
-        daemon._process_request(req, embedder=object(), client=None, attempts=attempts)
+        daemon._process_request(req, embedder_for=lambda m: object(), client=None, attempts=attempts)
         assert attempts["g-flaky"] == n
         assert req.exists()                               # re-queued
         assert not req.with_suffix(".inflight").exists()
 
     # The final failure drops it (nodes stay pending; a future ingest re-requests them).
-    daemon._process_request(req, embedder=object(), client=None, attempts=attempts)
+    daemon._process_request(req, embedder_for=lambda m: object(), client=None, attempts=attempts)
     assert not req.exists()
     assert not req.with_suffix(".inflight").exists()
     assert "g-flaky" not in attempts
@@ -122,9 +123,45 @@ def test_process_request_drops_malformed(monkeypatch):
     embed_requests_dir().mkdir(parents=True, exist_ok=True)
     req = daemon._request_path("bad")
     req.write_text("not json{")
-    daemon._process_request(req, embedder=object(), client=_FakeClient(), attempts={})
+    daemon._process_request(req, embedder_for=lambda m: object(), client=_FakeClient(), attempts={})
     assert spy == []                       # never tried to embed
     assert not req.exists() and not req.with_suffix(".inflight").exists()  # dropped
+
+
+def test_recover_inflight_requeues_crashed_claim():
+    """A request a prior daemon claimed (`<g>.inflight`) but crashed before finishing is renamed
+    back to `<g>.json` so the drain loop (which scans only `*.json`) picks it up again."""
+    embed_requests_dir().mkdir(parents=True, exist_ok=True)
+    req = daemon._request_path("g-crashed")
+    inflight = req.with_suffix(".inflight")
+    inflight.write_text(json.dumps({"graph": "g-crashed"}))
+    daemon._recover_inflight()
+    assert req.exists() and not inflight.exists()
+    assert json.loads(req.read_text())["graph"] == "g-crashed"
+
+
+def test_request_embed_records_model():
+    daemon.request_embed("g-model", model="jinaai/custom-code")
+    files = list(embed_requests_dir().glob("*.json"))
+    assert len(files) == 1
+    assert json.loads(files[0].read_text()) == {"graph": "g-model", "model": "jinaai/custom-code"}
+
+
+def test_process_request_uses_request_model(monkeypatch):
+    """The daemon embeds each graph with the model its request carried, not the daemon's ambient one."""
+    seen = {}
+    monkeypatch.setattr(worker_mod, "embed_graph",
+                        lambda w, e: EmbedStats(scanned=1, embedded=1, model_id="x", dim=3))
+    embed_requests_dir().mkdir(parents=True, exist_ok=True)
+    req = daemon._request_path("g-m")
+    req.write_text(json.dumps({"graph": "g-m", "model": "custom-model"}))
+
+    def _embedder_for(m):
+        seen["model"] = m
+        return object()
+
+    daemon._process_request(req, embedder_for=_embedder_for, client=_FakeClient(), attempts={})
+    assert seen["model"] == "custom-model"
 
 
 # ── idle self-termination ─────────────────────────────────────────────────────────────────────
@@ -201,7 +238,7 @@ def test_drain_request_actually_embeds_and_indexes(tmp_path):
     )
     req = _enqueue_raw("g-e2e")
 
-    out = daemon._process_request(req, embedder=_FakeEmbedder(), client=client, attempts={})
+    out = daemon._process_request(req, embedder_for=lambda m: _FakeEmbedder(), client=client, attempts={})
 
     assert out is client
     assert not req.exists() and not req.with_suffix(".inflight").exists()  # claim cleared

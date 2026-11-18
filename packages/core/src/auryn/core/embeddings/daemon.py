@@ -105,15 +105,28 @@ def _request_path(graph_name: str) -> Path:
     return embed_requests_dir() / f"{safe}.{digest}.json"
 
 
-def request_embed(graph_name: str) -> None:
+def daemon_supported() -> bool:
+    """Whether the background embed daemon can run on this platform -- it needs POSIX ``fcntl`` for
+    the single-flight run-lock. On native Windows it can't, so callers must embed inline instead of
+    queueing a request nothing would ever drain."""
+    return fcntl is not None
+
+
+def request_embed(graph_name: str, model: str | None = None) -> None:
     """Enqueue a background embed for `graph_name` and make sure a daemon is running to drain it.
-    Returns immediately -- the heavy work happens in the daemon. Coalescing: a second request for
-    the same graph overwrites the first, so a burst of resyncs doesn't pile up queue entries."""
+    Returns immediately -- the heavy work happens in the daemon. `model` records the embedding model
+    this ingest intended, so the daemon embeds the graph with it rather than whatever model the
+    daemon's own environment resolves to (a graph's vector index is fixed-dimension -- mixing models
+    in one graph is incoherent). Coalescing: a second request for the same graph overwrites the
+    first, so a burst of resyncs doesn't pile up queue entries."""
     requests = embed_requests_dir()
     requests.mkdir(parents=True, exist_ok=True)
     target = _request_path(graph_name)
     tmp = target.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({"graph": graph_name}))
+    payload: dict[str, str] = {"graph": graph_name}
+    if model:
+        payload["model"] = model
+    tmp.write_text(json.dumps(payload))
     os.replace(tmp, target)  # atomic publish: the daemon never reads a half-written request
     ensure_embed_daemon()
 
@@ -198,10 +211,30 @@ def _install_signal_handlers() -> dict:
     return stop
 
 
-def _drain_loop(stop: dict) -> None:
-    from auryn.core.embeddings import configured_model, get_embedder
+def _recover_inflight() -> None:
+    """Reclaim requests a previous daemon crashed mid-embed on. `_process_request` claims a request
+    by renaming `<g>.json` -> `<g>.inflight`; if the daemon then dies, the drain loop (which scans
+    only `*.json`) would never see it again and that graph's vectors would be stranded. Renaming
+    every stray `*.inflight` back to `*.json` at startup re-queues it (embedding is idempotent, so a
+    half-done one simply finishes)."""
+    for inflight in embed_requests_dir().glob("*.inflight"):
+        with contextlib.suppress(OSError):
+            os.replace(inflight, inflight.with_suffix(".json"))
 
-    embedder = get_embedder(configured_model())
+
+def _drain_loop(stop: dict) -> None:
+    from auryn.core.embeddings import get_embedder
+
+    _recover_inflight()  # re-queue anything a prior daemon crashed on before we start draining
+    # One embedder per model id, loaded on first use and reused -- requests carry their model so a
+    # custom-model graph is embedded with its own model, not the daemon's ambient one.
+    embedders: dict[str | None, object] = {}
+
+    def embedder_for(model: str | None):
+        if model not in embedders:
+            embedders[model] = get_embedder(model)
+        return embedders[model]
+
     attempts: dict[str, int] = {}
     client = None  # resolved lazily; cached across requests, dropped on a connection error
     idle_since: float | None = None
@@ -221,16 +254,16 @@ def _drain_loop(stop: dict) -> None:
         for req in requests:
             if stop["flag"]:
                 return
-            client = _process_request(req, embedder, client, attempts)
+            client = _process_request(req, embedder_for, client, attempts)
         time.sleep(_POLL_SECONDS)  # breathe between passes so a failing+requeued request can't hot-spin
 
 
-def _process_request(req: Path, embedder, client, attempts: dict[str, int]):
+def _process_request(req: Path, embedder_for, client, attempts: dict[str, int]):
     """Embed one queued graph. Claims the request by renaming it to `.inflight` (so a second pass
     -- or another daemon mid-handover -- won't double-take it), embeds, then deletes the claim on
     success. On failure it re-queues with a bounded retry; after `_MAX_ATTEMPTS` it drops the
-    request (the nodes stay pending and a future ingest re-requests them). Returns the (possibly
-    refreshed) cached client."""
+    request (the nodes stay pending and a future ingest re-requests them). `embedder_for` maps a
+    request's model id to the (cached) embedder to use. Returns the (possibly refreshed) client."""
     inflight = req.with_suffix(".inflight")
     try:
         os.replace(req, inflight)
@@ -238,7 +271,9 @@ def _process_request(req: Path, embedder, client, attempts: dict[str, int]):
         return client  # already claimed/removed this cycle -- nothing to do
 
     try:
-        graph_name = json.loads(inflight.read_text())["graph"]
+        data = json.loads(inflight.read_text())
+        graph_name = data["graph"]
+        model = data.get("model")
     except (OSError, ValueError, KeyError):
         logger.warning("Dropping malformed embed request %s", inflight.name)
         inflight.unlink(missing_ok=True)
@@ -250,7 +285,7 @@ def _process_request(req: Path, embedder, client, attempts: dict[str, int]):
         from auryn.core.graph_client import GraphWriter
 
         writer = GraphWriter(client.select_graph(graph_name))
-        stats = embed_graph(writer, embedder)
+        stats = embed_graph(writer, embedder_for(model))
         logger.info("Embedded graph %r: %d embedded, %d scanned", graph_name, stats.embedded, stats.scanned)
         inflight.unlink(missing_ok=True)
         attempts.pop(graph_name, None)

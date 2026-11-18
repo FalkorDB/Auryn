@@ -111,7 +111,7 @@ def test_hybrid_degrades_to_vector_without_fulltext_index(writer):
     # Build only the vector index (no full-text) -> hybrid must still work off the vector ranker.
     _seed(writer)
     emb = FakeEmbedder()
-    docs = [("Function", "connect", emb.embed(["connect database"])[0])]
+    docs = [("Function", "connect", emb.embed(["connect database"])[0], None)]
     writer.write_embeddings(docs)
     writer.create_vector_index(writer.SHARED_EMBEDDING_LABEL, writer.EMBEDDING_PROPERTY, emb.dim)
     assert writer.fulltext_search("database", 5) == []  # confirm no full-text index

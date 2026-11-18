@@ -559,10 +559,15 @@ def _maybe_embed(writer: GraphWriter, deep: str, embed: str | None = None) -> No
         return
 
     graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
-    # Background needs a graph name the daemon can reconnect to; without one, fall back to inline
-    # rather than silently drop the embed.
-    if mode == "background" and graph_name:
-        _embed_in_background(graph_name, deep)
+    from auryn.core.embeddings import configured_model, get_embedder
+    from auryn.core.embeddings.daemon import daemon_supported
+
+    # Background needs (a) a graph name the daemon can reconnect to and (b) a platform that can run
+    # the daemon (POSIX fcntl). Without either, fall back to inline rather than queueing a request
+    # nothing will ever drain -- native Windows has no daemon, so a background request would sit
+    # forever and semantic search would never come up (cubic review).
+    if mode == "background" and graph_name and daemon_supported():
+        _embed_in_background(graph_name, deep, configured_model())
         return
 
     # Inline. A background deep pass is still mutating nodes, so embedding now would race it (and
@@ -571,7 +576,6 @@ def _maybe_embed(writer: GraphWriter, deep: str, embed: str | None = None) -> No
         logger.info("Embedding deferred: deep pass still running (run `auryn embed` once it settles)")
         return
     try:
-        from auryn.core.embeddings import configured_model, get_embedder
         from auryn.core.embeddings.worker import embed_graph
 
         stats = embed_graph(writer, get_embedder(configured_model()))
@@ -580,7 +584,7 @@ def _maybe_embed(writer: GraphWriter, deep: str, embed: str | None = None) -> No
         logger.exception("Embedding pass failed (ingest itself succeeded; run `auryn embed` to retry)")
 
 
-def _embed_in_background(graph_name: str, deep: str) -> None:
+def _embed_in_background(graph_name: str, deep: str, model: str | None = None) -> None:
     """Hand `graph_name` to the detached embed daemon. When a background deep pass is still in
     flight, wait for it first (on a daemon thread, so the caller still returns now) so the daemon
     embeds settled nodes rather than racing deep's updates -- which also means an auto-embed finally
@@ -592,13 +596,13 @@ def _embed_in_background(graph_name: str, deep: str) -> None:
             def _after_deep() -> None:
                 try:
                     join_deep_phase()
-                    request_embed(graph_name)
+                    request_embed(graph_name, model)
                 except Exception:
                     logger.exception("Background embed (after deep) failed to enqueue for %r", graph_name)
 
             threading.Thread(target=_after_deep, name="embed-after-deep", daemon=True).start()
         else:
-            request_embed(graph_name)
+            request_embed(graph_name, model)
         logger.info("Embedding %r in the background (graph is already queryable)", graph_name)
     except Exception:
         logger.exception("Failed to enqueue background embed for %r (run `auryn embed` to build it)", graph_name)

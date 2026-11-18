@@ -149,7 +149,10 @@ def mcp_serve(
     from auryn.mcp.server import create_server
 
     config = _resolve_connection(host, port, username, password, ssl)
-    server = create_server(connect_client(config), graph_name or default_graph_name())
+    # An explicit --host is an ad-hoc connection the background embed daemon (which reconnects via
+    # the configured backend) might not match, so force inline embedding for this server's ingests.
+    server = create_server(connect_client(config), graph_name or default_graph_name(),
+                           embed=("inline" if host else None))
     server.run("stdio")
 
 

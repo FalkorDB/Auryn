@@ -50,7 +50,7 @@ def _spies(monkeypatch):
         worker_mod, "embed_graph",
         lambda *a, **k: inline.append((a, k)) or EmbedStats(scanned=0, embedded=0, model_id="x", dim=3),
     )
-    monkeypatch.setattr(daemon_mod, "request_embed", lambda graph: enqueued.append(graph))
+    monkeypatch.setattr(daemon_mod, "request_embed", lambda graph, model=None: enqueued.append(graph))
     return inline, enqueued
 
 
@@ -79,6 +79,18 @@ def test_background_mode_enqueues_and_does_not_block(monkeypatch):
     ingest_mod._maybe_embed(_FakeWriter("my_graph"), "inline")
     assert enqueued == ["my_graph"]  # handed to the daemon, keyed by graph name
     assert inline == []              # no synchronous compute on the ingest path
+
+
+def test_default_routes_to_background(tmp_path, monkeypatch):
+    """The DEFAULT (nothing set) goes through _maybe_embed to the background daemon -- not just
+    `embeddings_enabled()` returning True. Exercised with AURYN_EMBED unset and no config."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))  # empty config -> pure defaults
+    monkeypatch.delenv("AURYN_EMBED", raising=False)          # override conftest's AURYN_EMBED=0
+    monkeypatch.delenv("AURYN_EMBED_MODE", raising=False)
+    inline, enqueued = _spies(monkeypatch)
+    ingest_mod._maybe_embed(_FakeWriter("def_graph"), "inline")
+    assert enqueued == ["def_graph"]  # background is the default route
+    assert inline == []
 
 
 def test_off_mode_skips_everything(monkeypatch):
