@@ -24,9 +24,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from auryn.core.graph_model import GraphNode
+
 __all__ = [
     "DEFAULT_REGISTRY", "DEFAULT_TAG", "OFFICIAL_NAMESPACE", "SCRATCH",
-    "ImageRef", "parse_image_ref", "normalize_image_ref", "image_id",
+    "ImageRef", "parse_image_ref", "normalize_image_ref", "image_id", "image_node",
 ]
 
 DEFAULT_REGISTRY = "docker.io"
@@ -129,3 +131,20 @@ def image_id(ref: str) -> str:
     """The graph id of an Image node: `image://<normalized-ref>` (ADR 0007 §2). Project-independent
     on purpose -- it is the key two repos / two ingestors agree on without coordination."""
     return f"image://{normalize_image_ref(ref)}"
+
+
+def image_node(ref: str) -> GraphNode:
+    """The shared `Image` hub node every deployment-tier producer (docker/compose/k8s/terraform)
+    emits for a base/run/published image reference -- so the node SHAPE is identical and can't drift.
+    Emitted `resolved:false`/`origin:registry`; a deploy arm flips it once a `BUILDS_IMAGE` proves it
+    internal. An unresolved `${VAR}` ref keeps its raw text (see `normalized`)."""
+    r = parse_image_ref(ref)
+    return GraphNode(
+        "Image",
+        {"id": image_id(ref)},
+        {
+            "ref": r.normalized, "registry": r.registry, "repository": r.repository,
+            "tag": r.tag, "digest": r.digest, "resolved": False, "origin": "registry",
+            **({"raw": r.raw} if r.unresolved else {}),
+        },
+    )
