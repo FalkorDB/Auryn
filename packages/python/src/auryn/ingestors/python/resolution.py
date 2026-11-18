@@ -315,7 +315,7 @@ def _emit_module(m: RawModule, idx: _Index, oracle: SemanticOracle | None) -> It
     # CALLS source for a script's driver code -- the only place a non-callable node originates a
     # CALLS edge. Resolved exactly like a function body (same helper), so a top-level `main()`
     # binds to the project function and a top-level `print()` becomes a builtin placeholder.
-    mod_call_edges, mod_externals, _ = _resolve_scope_calls(m.calls, scope_label, scope_id, ctx)
+    mod_call_edges, mod_externals, _ = _resolve_scope_calls(m.calls, scope_label, scope_id, ctx, m.dotted)
     yield from mod_externals
     yield from mod_call_edges
 
@@ -431,7 +431,7 @@ def _emit_attribute(attr: RawAttribute, cls_id: str, ctx: _ModCtx) -> Iterator[G
 
 
 def _resolve_scope_calls(
-    calls: list[RawCall], caller_label: str, caller_id: str, ctx: _ModCtx
+    calls: list[RawCall], caller_label: str, caller_id: str, ctx: _ModCtx, scope_qname: str
 ) -> tuple[list[GraphEdge], list[GraphNode], list[str]]:
     """Resolve the calls made from one scope -- a function/method body OR a module's top-level
     code -- into CALLS edges originating at `caller_id`, the external placeholder nodes those
@@ -443,7 +443,7 @@ def _resolve_scope_calls(
     external_nodes: list[GraphNode] = []
     unresolved_calls: list[str] = []
     for call in calls:
-        res = _resolve_call(call, ctx)
+        res = _resolve_call(call, ctx, scope_qname)
         if res is None:
             if ctx.oracle is not None and call.is_simple_name:
                 unresolved_calls.append(_call_text(call))
@@ -479,7 +479,7 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
     # Resolve calls first so `unresolved_calls` can ride on the node we're about to emit.
     # A resolved call edges to the project callable; an _External call edges to a placeholder
     # (ADR 0004) -- surfacing stdlib/builtin/third-party and not-yet-ingested sibling symbols.
-    call_edges, external_nodes, unresolved_calls = _resolve_scope_calls(fn.calls, label, fn_id, ctx)
+    call_edges, external_nodes, unresolved_calls = _resolve_scope_calls(fn.calls, label, fn_id, ctx, f"{qual_prefix}.{fn.name}")
 
     props: dict[str, object] = {
         "name": fn.name,
@@ -581,6 +581,20 @@ def _split_qualifier(full_name: str) -> tuple[str, str]:
     return qualifier, name
 
 
+def _enclosing_scopes(scope_qname: str, module_dotted: str) -> list[str]:
+    """The enclosing-function qname prefixes to try for a lexical (simple-name) lookup, innermost
+    first, DOWN TO BUT EXCLUDING the module scope (which the caller checks separately). For a call in
+    `m.outer.tool` this yields `["m.outer.tool", "m.outer"]`, so `tool`'s own nested defs, then its
+    siblings / the enclosing `outer` / a recursive self-call, resolve before module/import fallbacks.
+    A module-scope caller (`scope_qname == module_dotted`) yields no inner scopes."""
+    scopes: list[str] = []
+    cur = scope_qname
+    while cur and cur != module_dotted and "." in cur:
+        scopes.append(cur)
+        cur = cur.rsplit(".", 1)[0]
+    return scopes
+
+
 def _external_or_none(qualifier: str, name: str, ctx: _ModCtx) -> _External | None:
     """A placeholder is made only for a symbol whose *container* is outside this project (stdlib/
     third-party/another repo). A missing symbol inside a project module/class is an intra-project
@@ -611,9 +625,11 @@ def _constructor_call(class_qname: str, ctx: _ModCtx) -> _Call | None:
     return _Call(cls_id, "Class", "constructor", simple)
 
 
-def _resolve_call(call: RawCall, ctx: _ModCtx) -> _Call | _External | None:
+def _resolve_call(call: RawCall, ctx: _ModCtx, scope_qname: str) -> _Call | _External | None:
     """Resolve a call. Returns a _Call (bound to a project callable), an _External (nameable but
-    not defined in this ingest -> a placeholder node, ADR 0004), or None (dynamic / unnameable)."""
+    not defined in this ingest -> a placeholder node, ADR 0004), or None (dynamic / unnameable).
+    `scope_qname` is the calling scope's qname (the function's own qname, or the module dotted for
+    module-scope code) -- used by the ast path for lexical (enclosing-scope) name resolution."""
     if ctx.oracle is not None:
         full_name = ctx.oracle.resolve_call(ctx.module_path, call.line, call.col)
         if not full_name:
@@ -638,6 +654,13 @@ def _resolve_call(call: RawCall, ctx: _ModCtx) -> _Call | _External | None:
 
     # ast path: import-bound or same-module direct name calls -> project functions first.
     if call.is_simple_name:
+        # Lexical (enclosing-function) scopes first: a nested def shadows a module/imported name, and a
+        # call to a sibling nested function / the enclosing function / a recursive self-call resolves
+        # here. (The jedi path gets this from inference; the ast path must walk the scope chain.)
+        for prefix in _enclosing_scopes(scope_qname, ctx.module_dotted):
+            hit = ctx.idx.callable_by_qname.get(f"{prefix}.{call.name}")
+            if hit and hit[1] == "Function":
+                return _Call(hit[0], "Function", "resolved", None)
         if call.name in ctx.import_map:
             hit = ctx.idx.callable_by_qname.get(ctx.import_map[call.name].target)
             if hit and hit[1] == "Function":

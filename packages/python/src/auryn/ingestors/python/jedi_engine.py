@@ -124,6 +124,8 @@ def _collect_queries(module: RawModule) -> tuple[list[tuple[int, int]], list[tup
         do_func(fn)
     for cls in module.classes:
         do_class(cls)
+    for c in module.calls:  # module-scope (top-level) calls -- resolved like a function body (#785)
+        call_positions.append((c.line, c.col))
     return type_positions, call_positions
 
 

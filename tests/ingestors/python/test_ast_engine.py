@@ -320,6 +320,27 @@ def test_nested_function_is_a_node_and_its_calls_resolve():
     assert "python://demo/module/m.func.helper()" not in {t for t, _ in _calls_from(items, outer_id)}
 
 
+def test_nested_calls_resolve_through_lexical_scope():
+    # ast engine: a nested def calling a SIBLING nested def, a RECURSIVE self-call, and the enclosing
+    # function calling its own nested defs all resolve via the enclosing (lexical) scope (#785 review)
+    m = _module(
+        "def outer():\n"
+        "    def helper():\n        return 1\n"
+        "    def run():\n        return helper()\n"
+        "    def rec(n):\n        return rec(n)\n"
+        "    return run() + rec(1)\n"
+    )
+    items = list(resolution.resolve([m], "python://demo"))
+    helper_id = "python://demo/module/m.func.outer().func.helper()"
+    run_id = "python://demo/module/m.func.outer().func.run()"
+    rec_id = "python://demo/module/m.func.outer().func.rec(n)"
+    outer_id = "python://demo/module/m.func.outer()"
+    assert (helper_id, "resolved") in _calls_from(items, run_id)   # sibling nested def
+    assert (rec_id, "resolved") in _calls_from(items, rec_id)      # recursion
+    outer_targets = {t for t, _ in _calls_from(items, outer_id)}
+    assert run_id in outer_targets and rec_id in outer_targets     # enclosing -> its nested defs
+
+
 def test_import_bound_instantiation_resolves_to_constructor():
     svc = parse_module(b"class Service:\n    def __init__(self, x):\n        self.x = x\n", "svc.py")
     main = parse_module(b"from svc import Service\n\nService(1)\n", "main.py")

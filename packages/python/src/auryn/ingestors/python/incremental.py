@@ -150,10 +150,15 @@ def read_graph_index(writer: GraphWriter, proj_id: str, exclude_keys: set[str], 
             if _module_dotted_from_id(cid) not in exclude_keys:
                 index.class_by_qname[qname] = cid
         for label in ("Function", "Method"):
+            # For Methods also seed every __init__: a constructor call collects only the CLASS name,
+            # not "__init__", so without this the no-local-__init__ class-node fallback would wrongly
+            # fire on an incremental resync for a class that DOES define __init__ -- diverging from a
+            # full recompute (which targets the __init__ Method). See _constructor_call.
+            q_names = name_list + ["__init__"] if label == "Method" else name_list
             for qname, nid in writer.ro_query(
                 f"MATCH (f:{label}) WHERE f.id >= $lo AND f.id < $hi AND f.name IN $names "
                 "RETURN f.qualified_name, f.id",
-                {"lo": lo, "hi": hi, "names": name_list},
+                {"lo": lo, "hi": hi, "names": q_names},
             ).result_set:
                 if _module_dotted_from_id(nid) not in exclude_keys:
                     index.callable_by_qname[qname] = (nid, label)
