@@ -77,19 +77,8 @@ jobs:
       - name: Stamp the version into every package (single source of truth = the tag)
         env:
           VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          python - <<'PY'
-          import os, re, pathlib
-          version = os.environ["VERSION"]
-          files = [pathlib.Path("pyproject.toml"), *sorted(pathlib.Path("packages").glob("*/pyproject.toml"))]
-          for f in files:
-              text = f.read_text()
-              new, n = re.subn(r'(?m)^version = "[^"]*"', f'version = "{version}"', text, count=1)
-              assert n == 1, f"no [project] version line found in {f}"
-              f.write_text(new)
-              print(f"{f} -> {version}")
-          print(f"stamped {len(files)} packages")
-          PY
+        # Rewrites each `version = ...` line and every `auryn-*==` pin (umbrella deps, core extras).
+        run: python .github/scripts/stamp_version.py "$VERSION"
 
       - name: Build the umbrella + every member package
         run: |
