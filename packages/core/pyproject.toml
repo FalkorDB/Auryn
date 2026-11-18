@@ -57,6 +57,8 @@ http = ["auryn-http==0.1.0"]                   # HTTP client call <-> server end
 orm = ["auryn-orm==0.1.0"]                     # ORM model <-> DB table
 grpc = ["auryn-grpc==0.1.0"]                   # gRPC client call <-> server handler
 events = ["auryn-events==0.1.0"]               # message publisher <-> subscriber (Kafka/Rabbit/NATS/...)
+# deployment
+docker = ["auryn-docker==0.1.0"]               # Dockerfiles + the `deploy` stitch (ADR 0007)
 
 [project.scripts]
 auryn = "auryn.cli:cli"

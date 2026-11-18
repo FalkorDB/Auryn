@@ -14,6 +14,7 @@ members = [
     "auryn-cpp",
     "auryn-csharp",
     "auryn-cuda",
+    "auryn-docker",
     "auryn-events",
     "auryn-go",
     "auryn-grpc",
@@ -154,6 +155,9 @@ csharp = [
 cuda = [
     { name = "auryn-cuda" },
 ]
+docker = [
+    { name = "auryn-docker" },
+]
 embedded = [
     { name = "falkordblite" },
 ]
@@ -223,6 +227,7 @@ requires-dist = [
     { name = "auryn-cpp", marker = "extra == 'cpp'", editable = "packages/cpp" },
     { name = "auryn-csharp", marker = "extra == 'csharp'", editable = "packages/csharp" },
     { name = "auryn-cuda", marker = "extra == 'cuda'", editable = "packages/cuda" },
+    { name = "auryn-docker", marker = "extra == 'docker'", editable = "packages/docker" },
     { name = "auryn-events", marker = "extra == 'events'", editable = "packages/events" },
     { name = "auryn-go", marker = "extra == 'go'", editable = "packages/go" },
     { name = "auryn-grpc", marker = "extra == 'grpc'", editable = "packages/grpc" },
@@ -249,7 +254,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.2,<2.1" },
     { name = "tomli-w", specifier = ">=1.0" },
 ]
-provides-extras = ["llm", "embedded", "python", "typescript", "java", "go", "rust", "c", "cpp", "cuda", "csharp", "php", "ruby", "kotlin", "swift", "julia", "bash", "sql", "sql-all", "oracle", "oracle-live", "http", "orm", "grpc", "events"]
+provides-extras = ["llm", "embedded", "python", "typescript", "java", "go", "rust", "c", "cpp", "cuda", "csharp", "php", "ruby", "kotlin", "swift", "julia", "bash", "sql", "sql-all", "oracle", "oracle-live", "http", "orm", "grpc", "events", "docker"]
 
 [[package]]
 name = "auryn-cpp"
@@ -305,6 +310,17 @@ requires-dist = [
     { name = "tree-sitter", specifier = ">=0.26.0" },
     { name = "tree-sitter-cuda", specifier = ">=0.21.2" },
 ]
+
+[[package]]
+name = "auryn-docker"
+version = "0.1.0"
+source = { editable = "packages/docker" }
+dependencies = [
+    { name = "auryn-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "auryn-core", editable = "packages/core" }]
 
 [[package]]
 name = "auryn-events"
@@ -1043,6 +1059,7 @@ dependencies = [
     { name = "auryn-cpp" },
     { name = "auryn-csharp" },
     { name = "auryn-cuda" },
+    { name = "auryn-docker" },
     { name = "auryn-events" },
     { name = "auryn-go" },
     { name = "auryn-grpc" },
@@ -1084,6 +1101,7 @@ dev = [
     { name = "auryn-cpp" },
     { name = "auryn-csharp" },
     { name = "auryn-cuda" },
+    { name = "auryn-docker" },
     { name = "auryn-events" },
     { name = "auryn-go" },
     { name = "auryn-grpc" },
@@ -1117,6 +1135,7 @@ requires-dist = [
     { name = "auryn-cpp", editable = "packages/cpp" },
     { name = "auryn-csharp", editable = "packages/csharp" },
     { name = "auryn-cuda", editable = "packages/cuda" },
+    { name = "auryn-docker", editable = "packages/docker" },
     { name = "auryn-events", editable = "packages/events" },
     { name = "auryn-go", editable = "packages/go" },
     { name = "auryn-grpc", editable = "packages/grpc" },
@@ -1148,6 +1167,7 @@ dev = [
     { name = "auryn-cpp", editable = "packages/cpp" },
     { name = "auryn-csharp", editable = "packages/csharp" },
     { name = "auryn-cuda", editable = "packages/cuda" },
+    { name = "auryn-docker", editable = "packages/docker" },
     { name = "auryn-events", editable = "packages/events" },
     { name = "auryn-go", editable = "packages/go" },
     { name = "auryn-grpc", editable = "packages/grpc" },
