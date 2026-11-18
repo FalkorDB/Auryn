@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Ruby language plugin for Auryn: a fast tree-sitter-ruby engine extracting modules/classes/methods/functions/parameters/fields/constants, the class hierarchy (EXTENDS/INCLUDES), require graph (IMPORTS), and calls. A deep pass (a real Ruby loader / Sorbet / RBS symbol resolver for method dispatch and receiver types) is the planned second phase -- Ruby is dynamic, so the fast pass is name-based only."
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     "tree-sitter>=0.26.0",

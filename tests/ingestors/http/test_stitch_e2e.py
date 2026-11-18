@@ -204,3 +204,49 @@ def test_endpoint_dedup_is_idempotent_across_noop_resyncs(graph, tmp_path):
         ingest.ingest_directory(w, str(ui), deep="off", auto_install=False)
         ingest.ingest_directory(w, str(be), deep="off", auto_install=False)
         assert state() == (1, [1, 1])  # one endpoint, one caller edge, one handler edge -- every round
+
+
+def test_invokes_edge_lets_who_calls_cross_the_seam(graph, tmp_path):
+    """The derived INVOKES edge collapses the CALLS_API/EXPOSES_ENDPOINT "V" (caller and handler both
+    point INTO the endpoint node) into one call-like edge, so a single-direction reachability walk --
+    who_calls upstream, impact_of -- crosses the HTTP boundary instead of dying at it. Before this
+    edge, who_calls(handler) stopped at the first repo; now the cross-repo caller shows up in one
+    traversal."""
+    from auryn.core import graph_queries
+
+    w = GraphWriter(graph)
+
+    ui = tmp_path / "uiapp"
+    ui.mkdir()
+    (ui / "api.js").write_text('export function load() { $.get("/widgets/list"); }\n')
+    ingest.ingest_directory(w, str(ui), deep="off", auto_install=False)
+
+    be = tmp_path / "backend"
+    be.mkdir()
+    (be / "Backend.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+                                       '<TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>\n')
+    (be / "WidgetsController.cs").write_text(
+        "namespace App {\n"
+        "  public class WidgetsController {\n"
+        "    public object List() { return null; }\n"
+        "  }\n"
+        "}\n"
+    )
+    ingest.ingest_directory(w, str(be), deep="off", auto_install=False)
+
+    # A direct, HTTP-tagged INVOKES edge now connects the JS caller to the C# handler, across repos.
+    assert graph.query(
+        "MATCH (:Function {name:'load'})-[r:INVOKES {via:'http'}]->(:Method {name:'List'}) RETURN count(r)"
+    ).result_set == [[1]]
+
+    # ...and who_calls(List) -- which follows CALLS|INVOKES -- returns the cross-repo caller in a
+    # single traversal (it would have returned nothing across the seam before this edge existed).
+    handler_id = graph.query("MATCH (m:Method {name:'List'}) RETURN m.id").result_set[0][0]
+    result = graph_queries.callers(graph, handler_id, max_depth=3)
+    assert "load" in {n["name"] for n in result["nodes"]}
+
+    # The seam edge is idempotent: re-running the stitch (via a no-op re-ingest) keeps exactly one.
+    ingest.ingest_directory(w, str(be), deep="off", auto_install=False)
+    assert graph.query(
+        "MATCH (:Function {name:'load'})-[r:INVOKES]->(:Method {name:'List'}) RETURN count(r)"
+    ).result_set == [[1]]
