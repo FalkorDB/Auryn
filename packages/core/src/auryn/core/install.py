@@ -67,14 +67,16 @@ def do_uninstall(*, purge: bool = False, adapters=None) -> Config:
             adapter.deregister(reg)
     # The `commit` trigger put a resync block in each registered repo's git hooks. Left behind, the
     # next commit there would run `auryn sync` again -- recreating the home dir we are removing.
+    stranded = []  # repos still carrying a hook of ours: they stay registered, to retry from
     for repo in prior.repos:
         try:
             hooks.uninstall(repo.local_dir)
         except Exception as e:  # noqa: BLE001 -- one unwritable hook must not strand the rest
             logger.warning("Could not remove the resync hooks from %s (%s)", repo.local_dir, e)
+            stranded.append(repo)
 
     if purge:
         shutil.rmtree(home_dir(), ignore_errors=True)
     else:
-        save_config(Config(backend=prior.backend, agents=()))
+        save_config(Config(backend=prior.backend, agents=(), repos=tuple(stranded)))
     return prior

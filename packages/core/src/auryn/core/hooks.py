@@ -55,8 +55,10 @@ def hooks_dir(local_dir) -> Path:
 
 
 def _block(sync_cmd: list[str]) -> str:
+    # Backgrounded from a subshell: the job is then no child of the hook's own shell, so a `wait`
+    # in the user's body -- which the block sits ahead of -- returns without it.
     line = " ".join(shlex.quote(c) for c in sync_cmd)
-    return f"{_BEGIN}\n{line} >/dev/null 2>&1 &\n{_END}\n"
+    return f"{_BEGIN}\n({line} >/dev/null 2>&1 &)\n{_END}\n"
 
 
 def _strip_block(text: str) -> str:
@@ -163,11 +165,13 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
 
 def uninstall(local_dir) -> None:
     """Remove our block from every hook; delete a hook file that was only ours. A hook that
-    doesn't carry our block is left byte-for-byte as it is."""
+    doesn't carry our block is left byte-for-byte as it is. One we may not write doesn't end the
+    sweep: the hooks after it are cleaned too, then its error is raised."""
     try:
         d = hooks_dir(local_dir)
     except Exception:
         return
+    failed = None
     for name in HOOKS:
         path = d / name
         if not path.exists() or _alias_of(path, d):
@@ -176,10 +180,15 @@ def uninstall(local_dir) -> None:
         if text is None or _BEGIN not in text:
             continue
         stripped = _strip_block(text)
-        if stripped.strip() in _BARE:
-            path.unlink()
-        else:
-            path.write_text(stripped, newline="")
+        try:
+            if stripped.strip() in _BARE:
+                path.unlink()
+            else:
+                path.write_text(stripped, newline="")
+        except OSError as e:
+            failed = failed or e
+    if failed:
+        raise failed
 
 
 def is_installed(local_dir) -> bool:

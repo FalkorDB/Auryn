@@ -103,6 +103,23 @@ def test_hook_block_runs_even_when_the_users_hook_exits_first(tmp_path):
     assert mine.exists()  # ...and the user's own hook still ran
 
 
+def test_a_wait_in_the_users_hook_does_not_wait_for_the_resync(tmp_path):
+    """Ahead of the user's body, our backgrounded line was one more job of the hook's shell: a
+    hook that ends in `wait` (for its own jobs) waited for the resync too, so every commit took
+    as long as the sync. The block backgrounds it from a subshell -- nothing for `wait` to find."""
+    repo = _init_repo(tmp_path / "r")
+    d = hooks.hooks_dir(repo)
+    (d / "post-commit").write_text("#!/bin/sh\ntrue &\nwait\n")
+    (d / "post-commit").chmod(0o755)
+    hooks.install(repo, ["sleep", "5"])  # stands in for a slow resync
+
+    (repo / "b.txt").write_text("y")
+    _git(repo, "add", "-A")
+    started = time.monotonic()
+    _git(repo, "commit", "-q", "-m", "second")
+    assert time.monotonic() - started < 3, "the commit waited for the resync"
+
+
 def test_install_leaves_a_non_shell_hook_and_a_disabled_hook_as_they_are(tmp_path):
     """A shell line appended to a Python hook is a SyntaxError that also stops the USER's hook;
     and `chmod 755` on a hook the user had switched off switches it back on. Neither is ours to
@@ -309,6 +326,41 @@ def test_uninstall_removes_the_hooks_of_every_registered_repo(monkeypatch, tmp_p
 
     assert not hooks.is_installed(repos[1])  # one repo failing doesn't strand the next...
     assert not (tmp_path / "home").exists()  # ...or the rest of the teardown
+
+
+def test_a_hook_we_may_not_write_does_not_end_the_uninstall_sweep(monkeypatch, tmp_path):
+    """A read-only post-commit raised out of the loop: the hooks after it kept their block, and
+    `forget` / `uninstall` dropped the repo from the registry all the same -- nothing left to
+    retry from. The other hooks are cleaned first, and the repo stays registered. (The refusal
+    is simulated, so this holds when run as root too.)"""
+    from auryn.cli import _deregister_repo
+    from auryn.core.install import do_uninstall
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    repo = _init_repo(tmp_path / "r")
+    d = hooks.hooks_dir(repo)
+    locked = d / "post-commit"
+    locked.write_text("#!/bin/sh\necho mine\n")
+    locked.chmod(0o755)
+    app_config.register_repo(app_config.RepoRegistration(local_dir=str(repo)))
+    hooks.install(repo, ["true"])
+    real_write_text = Path.write_text
+
+    def refuses_the_locked_hook(self, *args, **kwargs):
+        if self == locked:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuses_the_locked_hook)
+
+    with pytest.raises(PermissionError):
+        hooks.uninstall(repo)
+    assert [n for n in hooks.HOOKS if (d / n).exists()] == ["post-commit"]  # the rest are cleaned
+
+    _deregister_repo(str(repo), None, None, "g")  # `auryn forget`
+    assert app_config.get_repo(str(repo))
+    do_uninstall(adapters=[])
+    assert app_config.get_repo(str(repo))
 
 
 def test_hook_fires_on_commit(tmp_path):
