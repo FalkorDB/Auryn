@@ -8,22 +8,29 @@ auryn-* dependencies of those, read from the workspace's pyproject files), all a
 locally built wheels, not PyPI), and that the CLI and every plugin entry point load.
 """
 
+import importlib
 import importlib.metadata
 import pathlib
 import re
 import sys
 import tomllib
 
-spec, version, root = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
-normalize = lambda name: re.sub(r"[-_.]+", "-", name).lower()
-dist_name = lambda requirement: normalize(re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", requirement).group())
+
+def normalize(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def dist_name(requirement: str) -> str:
+    return normalize(re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", requirement).group())
 
 
 def project(path: pathlib.Path) -> dict:
     return tomllib.loads(path.read_text())["project"]
 
 
-projects = {normalize(p["name"]): p for p in map(project, [root / "pyproject.toml", *root.glob("packages/*/pyproject.toml")])}
+spec, version, root = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
+pyprojects = [root / "pyproject.toml", *root.glob("packages/*/pyproject.toml")]
+projects = {normalize(p["name"]): p for p in map(project, pyprojects)}
 
 name, _, extras = spec.partition("[")
 name, extras = normalize(name), [e for e in extras.rstrip("]").split(",") if e]
@@ -45,7 +52,7 @@ assert set(found) == expected, f"expected {sorted(expected)}, installed {sorted(
 stale = {d: v for d, v in found.items() if v != version}
 assert not stale, f"not the locally built version {version}: {stale}"
 
-import auryn.cli  # noqa: E402,F401
+importlib.import_module("auryn.cli")
 
 loaded = 0
 for group in ("auryn.languages", "auryn.ingestors", "auryn.enrichments"):

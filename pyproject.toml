@@ -1,18 +1,19 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Workspace root + umbrella distribution.
 #
-# The project is a uv workspace: `auryn-core` plus one package per plugin under packages/*,
-# each published on its own. Two ways to install:
+# The project is a uv workspace: `auryn-core` plus one `auryn-<lang>` package
+# per language, each under packages/*, each with its own third-party dependencies so
+# a consumer only pays for the languages they install. This root is the umbrella
+# `falkordb-auryn` distribution, which depends on every plugin:
 #
-#     pip install falkordb-auryn                 # everything: core + every plugin
-#     pip install "auryn-core[python,http]"      # custom: core + only the plugins named
+#     pip install falkordb-auryn                 # batteries-included: every plugin
+#     pip install "falkordb-auryn[all]"          # + live-DB drivers (oracledb / postgres / mysql)
+#     pip install "auryn-core[python,http]"      # custom: the core + only the plugins named
 #
-# Extras on either package add the heavy optional parts: `[embedded]` (in-process FalkorDB),
-# `[oracle-live]` / `[sql-all]` (live-DB drivers); `falkordb-auryn[all]` adds both drivers.
+# Every auryn-* requirement is pinned to this release's version (release.yml stamps the pins).
 #
-# Every auryn-* requirement is pinned to the release's own version (lockstep). release.yml
-# stamps the version AND these pins from the tag. For local development, `uv sync` installs
-# the whole workspace editable (all members are in the dev group below).
+# For local development, `uv sync` installs the whole workspace editable (all members
+# are in the dev group below), so the full test suite and benchmarks run unchanged.
 # ─────────────────────────────────────────────────────────────────────────────
 
 [project]
@@ -36,12 +37,17 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
     "Operating System :: OS Independent",
 ]
-# Everything by default: `pip install falkordb-auryn` graphs any repo out of the box, including
-# the cross-language links. Deliberately NOT included (opt-in extras below):
-#   * the embedded FalkorDB (`auryn-core[embedded]` -> falkordblite): POSIX-only, with wheels only for
+# Batteries-included: `pip install falkordb-auryn` graphs any repo out of the box -- every file-based
+# language plugin + the cross-ingestor hooks (their tree-sitter deps ship prebuilt wheels for every
+# platform, incl. Windows). Deliberately NOT hard-depended on here:
+#   * the embedded FalkorDB (`auryn-core[embedded]` -> falkordblite) -- POSIX-only, with wheels only for
 #     recent-glibc Linux + macOS, so forcing it would break `pip install` on Windows and older-glibc
-#     Linux. `auryn quickstart` auto-fetches it at runtime where supported.
-#   * the compiled live-DB drivers (oracledb / postgres / mysql).
+#     Linux (Ubuntu 22.04 etc.). `auryn quickstart` auto-fetches it at runtime where supported; on
+#     native Windows or older-glibc Linux it errors, so point at a remote FalkorDB there. `[embedded]`
+#     pre-installs it opt-in (handy for offline / first-run speed; the runtime fetch targets the
+#     running interpreter, so it also works under `uv tool install` -- see core.plugins._install_command).
+#   * the COMPILED live-DB drivers (oracledb / postgres / mysql) -- opt-in via `[all]`/`[oracle-live]`/
+#     `[sql-all]`.
 # For a custom install, use `auryn-core[<plugin>,...]` (see packages/core/pyproject.toml).
 dependencies = [
     "auryn-core==0.1.0",
@@ -81,7 +87,7 @@ Issues = "https://github.com/FalkorDB/Auryn/issues"
 # Only the heavy optional parts; every plugin is already a dependency above.
 embedded = ["auryn-core[embedded]==0.1.0"]      # serverless, in-process FalkorDB (no server/Docker); powers `auryn quickstart`
 oracle-live = ["auryn-oracle[live]==0.1.0"]     # + oracledb for the live `oracle` PL/SQL ingestor
-sql-all = ["auryn-sql[all]==0.1.0"]             # + postgres/mysql/oracle DBAPI drivers
+sql-all = ["auryn-sql[all]==0.1.0"]             # + postgres/mysql/oracle DBAPI drivers pre-installed
 all = [                                         # every live-DB driver
     "auryn-oracle[live]==0.1.0",
     "auryn-sql[all]==0.1.0",
