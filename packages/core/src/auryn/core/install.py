@@ -60,14 +60,16 @@ def do_install(backend: Backend, *, adapters=None, server_command: list[str] | N
 
 def do_uninstall(*, purge: bool = False, adapters=None) -> Config:
     """Reverse an install: stop the local server, deregister every recorded agent, then either
-    clear the manifest (keep data) or purge ``~/.auryn`` entirely. Returns the prior Config
-    (so the caller can report what was removed)."""
+    clear the manifest (keep data) or purge ``~/.auryn`` entirely. An agent that can't be
+    deregistered stays in the manifest -- and the home dir with it -- to retry from. Returns the
+    prior Config (so the caller can report what was removed)."""
     from auryn.core.server_manager import stop_server
 
     prior = load_config()
     stop_server()
 
     by_name = {a.name: a for a in (default_adapters() if adapters is None else adapters)}
+    failed = []
     for reg in prior.agents:
         adapter = by_name.get(reg.name)
         if adapter is not None:
@@ -75,9 +77,10 @@ def do_uninstall(*, purge: bool = False, adapters=None) -> Config:
                 adapter.deregister(reg)
             except Exception as e:  # noqa: BLE001 -- e.g. its CLI is gone: the rest still get reversed
                 logger.warning("Could not deregister %s (%s)", reg.name, e)
+                failed.append(reg)
 
-    if purge:
+    if purge and not failed:
         shutil.rmtree(home_dir(), ignore_errors=True)
     else:
-        save_config(replace(load_config(), agents=()))  # as it is NOW, like do_install
+        save_config(replace(load_config(), agents=tuple(failed)))  # as it is NOW, like do_install
     return prior

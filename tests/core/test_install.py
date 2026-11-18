@@ -129,19 +129,26 @@ def test_install_stops_on_an_unreadable_config_before_touching_any_agent(tmp_pat
 
     with pytest.raises(tomllib.TOMLDecodeError):
         do_install(Backend(mode="local"), adapters=[agent], server_command=["x"])
-    for unreadable in ("[backend\n", "backend = 1\n"):  # not TOML; TOML, but not a section
-        (home / "config.toml").write_text(unreadable)
+    # not TOML; TOML, but not a section; not text -- an error whose repr holds the whole file
+    for unreadable in (b"[backend\n", b"backend = 1\n", b'[backend]\npassword = "hunter2"\n\xff'):
+        (home / "config.toml").write_bytes(unreadable)
         result = CliRunner().invoke(cli, ["install", "-y"])
 
         assert result.exit_code == 1 and "config.toml can't be read" in result.output
+        assert "hunter2" not in result.output
         assert agent.registered_command is None
-        assert (home / "config.toml").read_text() == unreadable
+        assert (home / "config.toml").read_bytes() == unreadable
 
 
 def test_uninstall_goes_on_past_an_agent_it_cannot_deregister(tmp_path, monkeypatch):
     """A recorded agent whose CLI is gone (`claude` off PATH, the agent removed) raises on
-    deregister. That must not stop the uninstall: the agents after it are still reversed and the
-    manifest is still cleared."""
+    deregister. That must not stop the uninstall: the agents after it are still reversed. The
+    one that failed stays in the manifest -- and `--purge` keeps the home dir with it -- so the
+    next run has something to retry from; the CLI names only what it did deregister, and fails."""
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+
     monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
 
     class _Gone(_FakeAgent):
@@ -151,12 +158,21 @@ def test_uninstall_goes_on_past_an_agent_it_cannot_deregister(tmp_path, monkeypa
             raise FileNotFoundError("claude")
 
     gone, agent = _Gone(), _FakeAgent()
-    do_install(Backend(mode="local"), adapters=[gone, agent], server_command=["x"])
+    monkeypatch.setattr("auryn.core.install.default_adapters", lambda: [gone, agent])
+    do_install(Backend(mode="local"), server_command=["x"])
 
-    do_uninstall(adapters=[gone, agent])
+    result = CliRunner().invoke(cli, ["uninstall", "--yes", "--purge"])
 
     assert agent.deregistered is not None
-    assert load_config().agents == ()
+    assert [a.name for a in load_config().agents] == ["gone"]
+    assert result.exit_code == 1 and "Deregistered from: fake\n" in result.output
+    assert "Could not deregister from: gone" in result.output and "Removed ~/.auryn" not in result.output
+
+    monkeypatch.setattr(_Gone, "deregister", lambda self, reg: None)  # `claude` is back on PATH
+    result = CliRunner().invoke(cli, ["uninstall", "--yes", "--purge"])
+
+    assert result.exit_code == 0 and "Deregistered from: gone\n" in result.output
+    assert not (tmp_path / "cg").exists()
 
 
 def test_uninstall_purge_removes_home(tmp_path, monkeypatch):

@@ -379,7 +379,8 @@ def install(backend, host, port, username, password, ssl, trigger, yes) -> None:
         saved = load_config()
     except Exception as e:  # noqa: BLE001 -- invalid TOML, or a section / field of the wrong shape
         raise click.ClickException(
-            f"{config_path()} can't be read ({e!r}). Fix or remove it, then re-run `auryn install`.") from e
+            f"{config_path()} can't be read ({type(e).__name__}: {e}). Fix or remove it, then re-run "
+            "`auryn install`.") from e  # never the repr: a decode error's holds the file, password and all
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
     if trigger is None:
         trigger = saved.resync_trigger if yes else click.prompt(
@@ -416,6 +417,7 @@ def uninstall(purge, yes) -> None:
     """Reverse `install`: stop the local server and deregister Auryn from every agent it was
     registered with. Keeps ~/.auryn (your graphs) unless --purge. Your repos are untouched."""
     from auryn.core import watcher
+    from auryn.core.app_config import load_config
     from auryn.core.install import do_uninstall
 
     if not yes:
@@ -426,8 +428,14 @@ def uninstall(purge, yes) -> None:
             return
     watcher.stop_watcher()
     prior = do_uninstall(purge=purge)
-    removed = ", ".join(a.name for a in prior.agents) or "(no agents were registered)"
-    click.echo(f"Deregistered from: {removed}")
+    left = [a.name for a in load_config().agents]  # those it could not deregister stay on record
+    removed = ", ".join(a.name for a in prior.agents if a.name not in left)
+    if removed or not left:
+        click.echo(f"Deregistered from: {removed or '(no agents were registered)'}")
+    if left:
+        raise click.ClickException(
+            f"Could not deregister from: {', '.join(left)} (see the warning above). Kept on record"
+            + (", and ~/.auryn with it" if purge else "") + " -- run `auryn uninstall` again once that is fixed.")
     if purge:
         click.echo("Removed ~/.auryn.")
     click.echo("Remove the CLI itself with:  uv tool uninstall auryn")
