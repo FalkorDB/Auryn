@@ -82,10 +82,11 @@ def parse_image_ref(ref: str) -> ImageRef:
 
     first, slash, rest = body.partition("/")
     if slash and _looks_like_registry(first):
-        # Lowercase the host up front (registries are case-insensitive) so the DEFAULT_REGISTRY
-        # comparison below is reliable -- `DOCKER.IO/nginx` must key the same node as `docker.io/nginx`
-        # (and get the `library/` namespace) -- and fold Docker Hub's legacy hosts onto docker.io.
-        host = first.lower()
+        # Lowercase the host (registries are case-insensitive) so the DEFAULT_REGISTRY comparison below
+        # is reliable -- `DOCKER.IO/nginx` must key the same node as `docker.io/nginx` (and get the
+        # `library/` namespace) -- and fold Docker Hub's legacy hosts onto docker.io. But an UNRESOLVED
+        # ref keeps the host verbatim so a variable in it (`${REG:-ghcr.io}/...`) isn't mangled.
+        host = first if unresolved else first.lower()
         registry = DEFAULT_REGISTRY if host in _DOCKER_HUB_HOSTS else host
         remainder = rest
     else:
@@ -108,9 +109,9 @@ def parse_image_ref(ref: str) -> ImageRef:
         tag = DEFAULT_TAG
 
     return ImageRef(
-        registry=registry.lower(),
-        # A resolved repository is case-folded (registries are case-insensitive); an UNRESOLVED ref
-        # keeps its case so a `${BASE_IMAGE}` variable name isn't mangled to `${base_image}`.
+        # Case-folded when resolved (registries are case-insensitive); kept verbatim when unresolved so
+        # a `${REG:-ghcr.io}` host / `${BASE_IMAGE}` repo variable isn't mangled.
+        registry=registry if unresolved else registry.lower(),
         repository=repository if unresolved else repository.lower(),
         tag=tag,  # case-sensitive -- NOT lowered
         digest=digest,

@@ -16,6 +16,7 @@ class Service:
     image: str | None = None
     build_context: str | None = None
     build_dockerfile: str | None = None  # relative to the context; defaults to "Dockerfile"
+    build_target: str | None = None      # `build.target` -- the stage that produces the image
     depends_on: tuple[str, ...] = ()
     ports: tuple[str, ...] = ()
 

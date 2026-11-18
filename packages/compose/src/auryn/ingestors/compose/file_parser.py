@@ -24,26 +24,37 @@ def _depends_names(depends) -> tuple[str, ...]:
 
 
 def _ports(ports) -> tuple[str, ...]:
-    """`ports` is a list of `"8080:8080"` strings/ints, or long-form `{target, published}` maps."""
+    """`ports` is a list of `"8080:8080"` strings/ints, or long-form `{target, published, protocol,
+    host_ip}` maps -- normalized so the long form carries the same host/protocol detail the short form
+    does (so `{target:53, published:53, protocol:udp}` isn't confused with the TCP port)."""
     out: list[str] = []
     if isinstance(ports, list):
         for p in ports:
             if isinstance(p, dict):
-                tgt, pub = p.get("target"), p.get("published")
-                out.append(f"{pub}:{tgt}" if pub is not None else str(tgt))
+                tgt, pub, proto, host = p.get("target"), p.get("published"), p.get("protocol"), p.get("host_ip")
+                s = f"{pub}:{tgt}" if pub is not None else str(tgt)
+                if host:
+                    s = f"{host}:{s}"
+                if proto:
+                    s = f"{s}/{proto}"
+                out.append(s)
             else:
                 out.append(str(p))
     return tuple(out)
 
 
-def _build(spec) -> tuple[str | None, str | None]:
-    """`build:` is a context string (`./api`) or a map (`{context, dockerfile}`)."""
+def _build(spec) -> tuple[str | None, str | None, str | None]:
+    """`build:` is a context string (`./api`) or a map (`{context, dockerfile, target}`). A map defaults
+    its context to `.` (Compose's own default) -- except a `dockerfile_inline` build, which has no file
+    on disk to resolve, so it stays unbuilt here."""
     build = spec.get("build")
     if isinstance(build, str):
-        return build, None
+        return build, None, None
     if isinstance(build, dict):
-        return _as_str(build.get("context")), _as_str(build.get("dockerfile"))
-    return None, None
+        if build.get("dockerfile_inline") is not None:
+            return None, None, None
+        return _as_str(build.get("context", ".")), _as_str(build.get("dockerfile")), _as_str(build.get("target"))
+    return None, None, None
 
 
 def parse_source(data: str | bytes) -> ParsedCompose:
@@ -60,13 +71,14 @@ def parse_source(data: str | bytes) -> ParsedCompose:
     for name, spec in doc["services"].items():
         if not isinstance(spec, dict):
             spec = {}
-        ctx, dockerfile = _build(spec)
+        ctx, dockerfile, target = _build(spec)
         services.append(
             Service(
                 name=str(name),
                 image=_as_str(spec.get("image")),
                 build_context=ctx,
                 build_dockerfile=dockerfile,
+                build_target=target,
                 depends_on=_depends_names(spec.get("depends_on")),
                 ports=_ports(spec.get("ports")),
             )

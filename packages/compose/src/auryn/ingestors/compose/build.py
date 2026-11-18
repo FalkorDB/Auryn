@@ -46,9 +46,12 @@ def build_graph(files: list[tuple[str, ParsedCompose]], proj_id: str) -> Iterato
             props: dict[str, object] = {
                 "name": svc.name,
                 "ports": list(svc.ports),
+                # Always written (empty when the service doesn't build) so a resync that DROPS `build:`
+                # overwrites the old value -- a MERGE's `SET n += ...` never clears a now-absent key, so
+                # omitting it would leave a stale path and a false BUILDS_IMAGE.
+                "build_dockerfile": dockerfile or "",
+                "build_target": svc.build_target or "",
             }
-            if dockerfile is not None:
-                props["build_dockerfile"] = dockerfile
             yield GraphNode("Service", {"id": sid}, props)
             yield GraphEdge("HAS_SERVICE", "File", {"id": fid}, "Service", {"id": sid})
 

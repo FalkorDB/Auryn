@@ -53,6 +53,29 @@ def test_ports_long_form():
     assert p.services[0].ports == ("80:8080",)
 
 
+def test_ports_long_form_target_only_and_protocol():
+    # a published-less target exercises the str(tgt) branch; protocol must distinguish udp from tcp
+    p = parse_source(
+        "services:\n  app:\n    image: x\n    ports:\n"
+        "      - target: 8080\n"
+        "      - target: 53\n        published: 53\n        protocol: udp\n"
+    )
+    assert p.services[0].ports == ("8080", "53:53/udp")
+
+
+def test_build_target_and_context_default():
+    # long-form build without `context` defaults to "." (Compose's own default); `target` is captured
+    p = parse_source("services:\n  app:\n    build:\n      dockerfile: Dockerfile\n      target: dev\n")
+    s = p.services[0]
+    assert s.build_context == "." and s.build_dockerfile == "Dockerfile" and s.build_target == "dev"
+
+
+def test_build_dockerfile_inline_is_not_a_file_build():
+    # an inline Dockerfile has no file on disk to resolve, so it isn't treated as a buildable context
+    p = parse_source('services:\n  app:\n    build:\n      dockerfile_inline: "FROM alpine"\n')
+    assert p.services[0].build_context is None
+
+
 def test_non_compose_yaml_is_empty():
     # a YAML doc without a top-level `services:` map is not a compose file
     assert parse_source("name: my-app\nversion: 1\n").services == ()

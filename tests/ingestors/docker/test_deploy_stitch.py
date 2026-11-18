@@ -9,7 +9,8 @@ from auryn.core.graph_client import GraphWriter
 from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.core.local_source import LocalDirectorySource
 from auryn.ingestors.docker.git_sync import sync_at
-from auryn.ingestors.docker.stitch import _recompute_image_resolved, stitch
+from auryn.core.deploy import recompute_image_resolved as _recompute_image_resolved
+from auryn.ingestors.docker.stitch import stitch
 
 
 def _ingest_docker(graph, tmp_path, files: dict[str, str], project="demo"):

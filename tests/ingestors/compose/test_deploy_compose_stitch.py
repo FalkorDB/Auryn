@@ -64,6 +64,33 @@ def test_no_builder_without_a_matching_dockerfile(graph, tmp_path):
     assert _q(graph, "MATCH (i:Image {ref:'docker.io/shop/api:1.0'}) RETURN i.resolved") == [[False]]
 
 
+def test_build_target_links_named_stage_not_final(graph, tmp_path):
+    # a service with `build.target: builder` must build the BUILDER stage, not the final one
+    writer = GraphWriter(graph)
+    _seed_dockerfile_stages(writer)  # builder(0), final(1)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  api:\n    image: shop/api:1.0\n    build:\n      context: ./api\n      target: builder\n")
+    src = LocalDirectorySource(str(tmp_path))
+    sync_at(GraphWriter(graph), src, src.tree_sha(), project_name="shop", repo_uri="t", ref=None)
+    stitch(writer)
+    assert _q(graph, "MATCH (st:BuildStage)-[:BUILDS_IMAGE]->(:Image {ref:'docker.io/shop/api:1.0'}) RETURN st.stage") == [["builder"]]
+
+
+def test_resync_drop_build_clears_builds_image(graph, tmp_path):
+    writer = GraphWriter(graph)
+    _seed_dockerfile_stages(writer)
+    (tmp_path / "docker-compose.yml").write_text(_COMPOSE)
+    sync_at(GraphWriter(graph), LocalDirectorySource(str(tmp_path)), "sha-A", project_name="shop", repo_uri="t", ref=None)
+    stitch(writer)
+    assert _q(graph, "MATCH (i:Image {ref:'docker.io/shop/api:1.0'}) RETURN i.resolved") == [[True]]
+    # drop `build:` from api -> the builder edge and internal flag must clear
+    (tmp_path / "docker-compose.yml").write_text("services:\n  api:\n    image: shop/api:1.0\n")
+    sync_at(GraphWriter(graph), LocalDirectorySource(str(tmp_path)), "sha-B", project_name="shop", repo_uri="t", ref=None)
+    stitch(writer)
+    assert _q(graph, "MATCH ()-[r:BUILDS_IMAGE]->() RETURN count(r)") == [[0]]
+    assert _q(graph, "MATCH (i:Image {ref:'docker.io/shop/api:1.0'}) RETURN i.resolved") == [[False]]
+
+
 def test_stitch_is_idempotent(graph, tmp_path):
     writer = GraphWriter(graph)
     _seed_dockerfile_stages(writer)

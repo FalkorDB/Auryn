@@ -55,7 +55,10 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
         try:
             files.append((path, parse_source(source.read_blob(blob_sha))))
         except Exception:
-            logger.warning("failed to parse compose file %s (its nodes are removed this sync)", path, exc_info=True)
+            logger.warning("failed to read compose file %s (its nodes are removed this sync)", path, exc_info=True)
+    # KNOWN LIMITATION (tracked follow-up, tier-wide with docker): a malformed compose edit parses to an
+    # empty document, so the recompute REMOVES that file's prior services/edges until it's fixed -- it
+    # does not keep last-good like the tree-sitter ingestors' `broken_files` path. Deferred.
 
     project_node = GraphNode(
         "Project", {"id": proj_id},
@@ -63,7 +66,10 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
     )
 
     def make_target():
-        return itertools.chain([project_node], build_graph(files, proj_id))
+        # Project node LAST: its `commit_sha` is written after the File/Service nodes, so a sync that
+        # fails mid-write won't leave a commit-stamped partial graph that the next run short-circuits.
+        # (stream_apply writes ALL nodes before ANY edge, so HAS_FILE still finds its Project.)
+        return itertools.chain(build_graph(files, proj_id), [project_node])
 
     stats, _r, _p = stream_apply(writer, proj_id, OWNED_LABELS, make_target)
     elapsed = time.monotonic() - started
