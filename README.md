@@ -204,7 +204,7 @@ pip install "auryn-core[python,http]"         # core + only the plugins you name
 pip install auryn-core my-auryn-plugin        # core + your own plugin
 ```
 
-Optional extras on either package: `[embedded]` (the in-process FalkorDB), `[oracle-live]` and `[sql-all]` (live-DB drivers); `falkordb-auryn[all]` adds both drivers.
+Optional extras on either package: `[embedded]` (the in-process FalkorDB), `[oracle-live]` and `[sql-all]` (live-DB drivers); `[all]` adds both drivers (`auryn-core[all]` also adds every plugin, the same as `falkordb-auryn[all]`).
 
 ## CLI
 

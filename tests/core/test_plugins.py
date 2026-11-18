@@ -7,6 +7,10 @@ re-discovers -- and is a strict no-op when auto-install is disabled or nothing i
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from auryn.core import ingest, plugins
@@ -137,21 +141,52 @@ def test_install_command_pip_fallback_targets_sys_executable(monkeypatch):
     assert cmd == [plugins.sys.executable, "-m", "pip", "install", "pkg"]
 
 
-def test_install_plugin_pins_a_catalog_plugin_to_the_running_core(monkeypatch):
+class _FakePip:
+    """Records each install command and the constraints file it was given; fails specs in `fail`."""
+
+    def __init__(self, fail=()):
+        self.fail, self.calls = set(fail), []
+
+    def __call__(self, cmd, **kwargs):
+        constraints = Path(cmd[cmd.index("-c") + 1]).read_text() if "-c" in cmd else None
+        spec = cmd[cmd.index("-c") - 1] if "-c" in cmd else cmd[-1]
+        self.calls.append((spec, constraints))
+        return subprocess.CompletedProcess(cmd, 1 if spec in self.fail else 0, "", "")
+
+
+def test_install_plugin_tries_the_core_version_and_holds_installed_auryn_packages(monkeypatch):
     # Unpinned, `pip install auryn-cuda` pulls the newest cuda, whose `auryn-cpp==` pin would
-    # upgrade an auryn-cpp this process has already imported. Other dependencies are left as given.
-    commands: list[list[str]] = []
-    monkeypatch.setattr(plugins.subprocess, "run", lambda cmd, **kw: commands.append(cmd) or _Done())
-    core_version = plugins.importlib.metadata.version("auryn-core")
+    # upgrade an auryn-cpp this process has already imported. Installed auryn-* stay where they are.
+    pip = _FakePip()
+    monkeypatch.setattr(plugins.subprocess, "run", pip)
+    installed = [_dist("auryn-core", "9.1"), _dist("auryn-cpp", "9.0"), _dist("jedi", "1")]
+    monkeypatch.setattr(plugins.importlib.metadata, "distributions", lambda: installed)
 
     assert plugins.install_plugin("auryn-cuda")
     assert plugins.install_plugin("watchdog>=4", label="dependency")
 
-    assert [cmd[-1] for cmd in commands] == [f"auryn-cuda=={core_version}", "watchdog>=4"]
+    assert pip.calls == [
+        ("auryn-cuda==9.1", "auryn-core==9.1\nauryn-cpp==9.0\n"),
+        ("watchdog>=4", None),
+    ]
 
 
-class _Done:
-    returncode = 0
+def test_install_plugin_falls_back_to_the_newest_version_that_fits(monkeypatch):
+    # The core's version of the plugin may not be on PyPI (0.8.0 has auryn-core but no auryn-python),
+    # or may not fit the held packages (a core upgraded on its own, newer than auryn-cpp).
+    pip = _FakePip(fail={"auryn-cuda==9.1"})
+    monkeypatch.setattr(plugins.subprocess, "run", pip)
+    installed = [_dist("auryn-core", "9.1"), _dist("auryn-cpp", "9.0")]
+    monkeypatch.setattr(plugins.importlib.metadata, "distributions", lambda: installed)
+
+    assert plugins.install_plugin("auryn-cuda")
+
+    assert [spec for spec, _ in pip.calls] == ["auryn-cuda==9.1", "auryn-cuda"]
+    assert pip.calls[1][1] == "auryn-core==9.1\nauryn-cpp==9.0\n"
+
+
+def _dist(name, version):
+    return SimpleNamespace(metadata={"Name": name}, version=version)
 
 
 # -- ensure_importable: on-demand optional-dependency install --------------------------

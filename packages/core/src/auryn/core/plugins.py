@@ -27,6 +27,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 logger = logging.getLogger("auryn.plugins")
 
@@ -86,7 +88,7 @@ def packages_for_suffixes(suffixes: set[str]) -> dict[str, str]:
     return out
 
 
-def _install_command(package: str) -> list[str]:
+def _install_command(*args: str) -> list[str]:
     """Prefer the project's toolchain (`uv pip install`) when available, else pip. Both forms target
     the RUNNING interpreter explicitly (`--python sys.executable` / `sys.executable -m pip`) so a
     runtime auto-install lands in the environment auryn is actually running from -- including an
@@ -98,8 +100,8 @@ def _install_command(package: str) -> list[str]:
         cmd = ["uv", "pip", "install", "--python", sys.executable]
         if sys.prefix == sys.base_prefix:  # system/global interpreter, not a virtualenv
             cmd.append("--system")
-        return [*cmd, package]
-    return [sys.executable, "-m", "pip", "install", package]
+        return [*cmd, *args]
+    return [sys.executable, "-m", "pip", "install", *args]
 
 
 def install_plugin(package: str, label: str = "plugin") -> bool:
@@ -107,12 +109,32 @@ def install_plugin(package: str, label: str = "plugin") -> bool:
     ingestor plugin, or an optional runtime dependency) is importable this process. Returns
     True on success. See the module docstring for the security posture -- callers must have
     opted in before calling this, and `package` must be a vetted/hardcoded name, never
-    user-supplied. A catalog plugin is pinned to the running core's version: every release ships
-    all plugins at that version, and the newest plugin's own pins (auryn-cuda -> auryn-cpp) could
-    otherwise upgrade a plugin this process has already imported."""
-    if package in PLUGIN_PACKAGES.values():
-        package = f"{package}=={importlib.metadata.version('auryn-core')}"
-    cmd = _install_command(package)
+    user-supplied.
+
+    A catalog plugin never moves an auryn-* package that is already installed (this process may
+    have imported it, e.g. auryn-cuda's pin on auryn-cpp): those are held at their versions with a
+    constraints file. It tries the core's version first (a release ships every plugin at it), then
+    the newest version that fits, for when the core's version of the plugin was not published."""
+    if package not in PLUGIN_PACKAGES.values():
+        return _run_install(package, label)
+    installed = {
+        dist.metadata["Name"].lower(): dist.version
+        for dist in importlib.metadata.distributions()
+        if dist.metadata["Name"].lower().startswith("auryn-")
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        constraints = Path(tmp, "constraints.txt")
+        constraints.write_text("".join(f"{name}=={version}\n" for name, version in installed.items()))
+        core = installed.get("auryn-core")
+        if core and _run_install(f"{package}=={core}", label, "-c", str(constraints)):
+            return True
+        if core:
+            logger.warning("%s %s is not available; installing the newest version that fits", package, core)
+        return _run_install(package, label, "-c", str(constraints))
+
+
+def _run_install(package: str, label: str, *options: str) -> bool:
+    cmd = _install_command(package, *options)
     logger.warning("Auto-installing %s %r via: %s", label, package, " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:

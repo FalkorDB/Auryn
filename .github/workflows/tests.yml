@@ -87,6 +87,7 @@ jobs:
           - "auryn-core[python]"        # custom: one plugin
           - "auryn-core[http,sql]"      # custom: several plugins
           - "auryn-core[cuda]"          # a plugin that pulls another (auryn-cpp)
+          - "auryn-core[all]"           # the same as falkordb-auryn[all]
     env:
       LOCAL_VERSION: "0.0.0.dev0"
     steps:
@@ -118,21 +119,25 @@ jobs:
           "$env_bin/python" -m pip check
           "$env_bin/auryn" --help > /dev/null
           "$env_bin/python" - <<'PY'
-          import os, pathlib
-          from importlib.metadata import entry_points
-          # The umbrella installs every plugin in packages/; auryn-core[a,b] installs auryn-a and auryn-b.
+          import os, pathlib, re
+          from importlib.metadata import entry_points, requires
+          # The exact plugin set: every plugin in packages/ for the umbrella and auryn-core[all];
+          # auryn-a and auryn-b for auryn-core[a,b], plus the plugins they need (auryn-cuda -> auryn-cpp).
           name, _, extras = os.environ["SPEC"].partition("[")
-          if name == "falkordb-auryn":
+          extras = [e for e in extras.rstrip("]").split(",") if e]
+          if name == "falkordb-auryn" or "all" in extras:
               expected = {f"auryn-{p.parent.name}" for p in pathlib.Path("packages").glob("*/pyproject.toml")}
-              expected.discard("auryn-core")
           else:
-              expected = {f"auryn-{e}" for e in extras.rstrip("]").split(",") if e}
+              expected = {f"auryn-{e}" for e in extras}
+              needed = [r for plugin in expected for r in requires(plugin) or [] if "extra ==" not in r]
+              expected |= {re.match(r"[\w.-]+", r).group() for r in needed if r.startswith("auryn-")}
+          expected.discard("auryn-core")
           loaded = set()
           for group in ("auryn.languages", "auryn.ingestors", "auryn.enrichments"):
               for ep in entry_points(group=group):
                   ep.load()
                   loaded.add(ep.dist.name)
-          assert expected <= loaded, f"plugins not installed or not loaded: {sorted(expected - loaded)}"
+          assert loaded == expected, f"expected plugins {sorted(expected)}, loaded {sorted(loaded)}"
           print(f"{len(loaded)} plugins loaded: {sorted(loaded)}")
           PY
 

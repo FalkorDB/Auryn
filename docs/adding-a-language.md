@@ -508,7 +508,7 @@ so your `sync` never clones or resolves refs itself.
 ## 11. Wire the package into the workspace
 
 Adding a language *does* require touching the **root `pyproject.toml`** (four spots) and
-**`packages/core/pyproject.toml`** (one spot) — the per-language folder is self-contained,
+**`packages/core/pyproject.toml`** (two spots) — the per-language folder is self-contained,
 but the workspace has to know the distribution exists. Copy every place `go` appears:
 
 ```toml
@@ -528,11 +528,12 @@ source = [..., "packages/go/src/auryn", ...]   # 4. include it in coverage
 # packages/core/pyproject.toml
 [project.optional-dependencies]
 go = ["auryn-go==0.1.0"]           # 5. the custom-install extra: pip install "auryn-core[go]"
+all = [..., "auryn-go==0.1.0", ...]   # 6. pip install "auryn-core[all]" installs every plugin
 ```
 
 Pin to the workspace version (the `version` line of every `pyproject.toml`); the release
 workflow rewrites these pins to the released version. `tests/test_package_extras.py` fails
-if a plugin is missing from either list.
+if a plugin is missing from any of these lists.
 
 Then `uv sync` and confirm discovery picks it up:
 

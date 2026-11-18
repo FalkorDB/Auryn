@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 UMBRELLA_EXTRAS = {"embedded", "oracle-live", "sql-all", "all"}
 # Core extras that are not one-plugin-each.
-CORE_OWN_EXTRAS = {"llm", "embedded"}
+CORE_OWN_EXTRAS = {"llm", "embedded", "all"}
 CORE_DRIVER_EXTRAS = {"oracle-live": "auryn-oracle[live]", "sql-all": "auryn-sql[all]"}
 
 
@@ -70,6 +70,14 @@ def test_core_has_one_extra_per_plugin():
         assert extras[extra] == [f"auryn-{extra}=={v}"]
     for extra, requirement in CORE_DRIVER_EXTRAS.items():
         assert extras[extra] == [f"{requirement}=={v}"]
+
+
+def test_core_all_is_every_plugin_and_both_drivers():
+    # The same set as `falkordb-auryn[all]`, so `[all]` means the same on both packages.
+    v = _version()
+    core_all = _project(ROOT / "packages/core/pyproject.toml")["optional-dependencies"]["all"]
+    drivers = {"auryn-oracle": "auryn-oracle[live]", "auryn-sql": "auryn-sql[all]"}
+    assert sorted(core_all) == sorted(f"{drivers.get(name, name)}=={v}" for name in _plugins())
 
 
 def test_plugin_to_plugin_dependencies_are_pinned_to_the_same_release():
