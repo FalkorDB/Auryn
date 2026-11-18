@@ -3,7 +3,8 @@
 - `pip install falkordb-auryn` installs the core and every plugin.
 - `pip install "auryn-core[python,http]"` installs the core and only the plugins named.
 - Extras on the umbrella are only the heavy optional parts.
-- Every auryn-* pin is `==` the workspace version, so release.yml can stamp them (lockstep).
+- Every auryn-* pin is `==` one version, so release.yml can stamp them (lockstep). A package's own
+  version is not in these files: it comes from git (see tests/core/test_version.py).
 """
 
 import importlib.util
@@ -34,15 +35,13 @@ def _members() -> dict[str, dict]:
 
 
 def _version() -> str:
-    return _project(ROOT / "pyproject.toml")["version"]
+    # The version the pins carry in the repo, read off the umbrella's pin on the core.
+    core = next(r for r in _project(ROOT / "pyproject.toml")["dependencies"] if _name(r) == "auryn-core")
+    return core.partition("==")[2]
 
 
 def _plugins() -> set[str]:
     return set(_members()) - {"auryn-core"}
-
-
-def test_every_package_shares_the_workspace_version():
-    assert {p["version"] for p in _members().values()} == {_version()}
 
 
 def test_umbrella_installs_core_and_every_plugin():
@@ -101,7 +100,7 @@ def test_no_plugin_requires_the_umbrella():
         assert "falkordb-auryn" not in {_name(r) for r in requirements}
 
 
-def test_stamp_version_rewrites_versions_and_pins(tmp_path):
+def test_stamp_version_rewrites_the_pins(tmp_path):
     shutil.copy(ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
     for path in (ROOT / "packages").glob("*/pyproject.toml"):
         (tmp_path / "packages" / path.parent.name).mkdir(parents=True)
@@ -115,7 +114,6 @@ def test_stamp_version_rewrites_versions_and_pins(tmp_path):
     assert len(files) == len(_members()) + 1
     for f in files:
         project = _project(f)
-        assert project["version"] == "9.8.7"
         requirements = project.get("dependencies", []) + [
             r for rs in project.get("optional-dependencies", {}).values() for r in rs
         ]

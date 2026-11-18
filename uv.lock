@@ -128,7 +128,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-compose"
-version = "0.1.0"
 source = { editable = "packages/compose" }
 dependencies = [
     { name = "auryn-core" },
@@ -382,7 +381,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-docker"
-version = "0.1.0"
 source = { editable = "packages/docker" }
 dependencies = [
     { name = "auryn-core" },
@@ -471,7 +469,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-k8s"
-version = "0.1.0"
 source = { editable = "packages/k8s" }
 dependencies = [
     { name = "auryn-core" },

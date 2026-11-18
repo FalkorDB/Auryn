@@ -544,8 +544,8 @@ go = ["auryn-go==0.1.0"]           # 5. the custom-install extra: pip install "a
 all = [..., "auryn-go==0.1.0", ...]   # 6. pip install "auryn-core[all]" installs every plugin
 ```
 
-Pin to the workspace version (the `version` line of every `pyproject.toml`); the release
-workflow rewrites these pins to the released version. `tests/test_package_extras.py` fails
+Pin to the version the other pins carry; the release workflow rewrites these pins to the
+released version (the package's own version comes from git, see step 1). `tests/test_package_extras.py` fails
 if a plugin is missing from the umbrella's dependencies (1), its core extra (5) or `all` (6).
 
 Then `uv sync` and confirm discovery picks it up:

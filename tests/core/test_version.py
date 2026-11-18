@@ -75,3 +75,13 @@ def test_every_package_takes_its_version_from_git():
         assert "version" not in data["project"] and data["project"]["dynamic"] == ["version"], f
         assert "hatch-vcs" in data["build-system"]["requires"], f
         assert data["tool"]["hatch"]["version"]["source"] == "vcs", f
+
+
+def test_an_archive_with_no_tag_behind_it_falls_back():
+    """.git_archival.txt records the nearest tag only. With a `node:` line next to it, an archive
+    of a commit no tag reaches (a fork, an export without tags) was built as `0.0` -- a release
+    by its looks -- where a checkout of that commit is `0.0.0.dev<N>+g<sha>`. Without the line
+    there is nothing to read, and the build falls back to 0.0.0.dev0 like any tree without git."""
+    root = Path(__file__).resolve().parents[2]
+    fields = [line.partition(":")[0] for line in (root / ".git_archival.txt").read_text().splitlines()]
+    assert "describe-name" in fields and "node" not in fields
