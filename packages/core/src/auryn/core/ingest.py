@@ -210,6 +210,7 @@ def ingest_repository(
     cache_root: Path | None = None,
     auto_install: bool | None = None,
     deep: str = "inline",
+    embed: str | None = None,
     include_dirs: tuple[str, ...] = (),
     exclude_dirs: tuple[str, ...] = (),
     include_suffixes: tuple[str, ...] = (),
@@ -221,9 +222,12 @@ def ingest_repository(
     or any URI git understands) into `writer`'s graph, moving each language's
     subgraph to `ref` (default: the repo's default branch). `project_name` defaults
     to the repo's own name. `deep` controls two-phase languages' deep upgrade
-    ("inline"|"background"|"off"; see DEEP_MODES). The include_/exclude_ dir and suffix
-    lists are an optional allow/deny filter (see core/source_filter.SourceFilter). See the
-    module docstring for logging/error behavior."""
+    ("inline"|"background"|"off"; see DEEP_MODES). `embed` overrides how the post-ingest
+    embedding pass runs ("inline"|"background"|"off"; None -> resolve from env/config, default
+    background -- see embeddings.embedder.embed_mode); callers on an ad-hoc connection a separate
+    process couldn't reach (serverless/quickstart, explicit --host) must pass "inline". The
+    include_/exclude_ dir and suffix lists are an optional allow/deny filter (see
+    core/source_filter.SourceFilter). See the module docstring for logging/error behavior."""
     started = time.monotonic()
     project_name = project_name or _derive_project_name(repo_uri)
     logger.info("Ingesting repository %s (ref=%s) as project %r", repo_uri, ref or "<default>", project_name)
@@ -246,6 +250,7 @@ def ingest_repository(
         started=started,
         auto_install=auto_install,
         deep=deep,
+        embed=embed,
         enrichment_only=enrichment_only,
         enrichment_skip=enrichment_skip,
     )
@@ -260,6 +265,7 @@ def ingest_directory(
     cache_root: Path | None = None,
     auto_install: bool | None = None,
     deep: str = "inline",
+    embed: str | None = None,
     include_dirs: tuple[str, ...] = (),
     exclude_dirs: tuple[str, ...] = (),
     include_suffixes: tuple[str, ...] = (),
@@ -312,6 +318,7 @@ def ingest_directory(
         started=started,
         auto_install=auto_install,
         deep=deep,
+        embed=embed,
         enrichment_only=enrichment_only,
         enrichment_skip=enrichment_skip,
     )
@@ -369,6 +376,7 @@ def _ingest_from_source(
     started: float,
     auto_install: bool | None = None,
     deep: str = "inline",
+    embed: str | None = None,
     enrichment_only: tuple[str, ...] = (),
     enrichment_skip: tuple[str, ...] = (),
 ) -> RepoIngestReport:
@@ -506,10 +514,10 @@ def _ingest_from_source(
 
     # Opt-in semantic layer: once every language's graph is settled, build/refresh embeddings so
     # the MCP `search_code` tool works. Off by default; enable with AURYN_EMBED=1 (see
-    # embeddings.embedder.embeddings_enabled). Skipped when a deep pass is still running in the
-    # background, so it doesn't embed nodes the deep pass is about to update (which would just
-    # invalidate them); a deep=background caller runs `auryn embed` when ready instead.
-    _maybe_embed(writer, deep)
+    # embeddings.embedder.embeddings_enabled). By default the heavy compute is handed to the
+    # detached embed daemon ("background"), so this returns -- and the graph is queryable -- the
+    # moment it's built, rather than blocking on every vector.
+    _maybe_embed(writer, deep, embed)
 
     elapsed = time.monotonic() - started
     ingested = sum(1 for r in reports if r.result is not None)
@@ -528,23 +536,76 @@ def _ingest_from_source(
     )
 
 
-def _maybe_embed(writer: GraphWriter, deep: str) -> None:
-    """Build/refresh embeddings after ingest when opted in (AURYN_EMBED=1). Inline, so it
-    completes within this (typically already-backgrounded, e.g. watcher-spawned `sync`) process --
-    no daemon that would die on exit. Contained: an embedding failure (e.g. the model can't be
-    fetched offline) is logged and never fails the ingest, which has already succeeded."""
-    from auryn.core.embeddings import configured_model, embeddings_enabled
+def _maybe_embed(writer: GraphWriter, deep: str, embed: str | None = None) -> None:
+    """Build/refresh embeddings after ingest when opted in (AURYN_EMBED=1), the way `embed`/config
+    says to (see embeddings.embedder.embed_mode):
 
-    if not embeddings_enabled() or deep == "background":
+    - **background** (default): enqueue the graph for the detached embed daemon and return at once,
+      so the ingest call -- and the already-built, queryable graph -- isn't held up by the heavy
+      vector compute. The daemon reconnects to the configured backend on its own.
+    - **inline**: embed synchronously here. Used by callers whose connection a separate process
+      couldn't reach (serverless/quickstart, explicit --host), and available as an override.
+    - **off**: skip.
+
+    Contained: any failure (e.g. the model can't be fetched offline) is logged and never fails the
+    ingest, which has already succeeded."""
+    from auryn.core.embeddings import embeddings_enabled
+    from auryn.core.embeddings.embedder import embed_mode
+
+    if not embeddings_enabled():
+        return
+    mode = embed_mode(embed)
+    if mode == "off":
+        return
+
+    graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
+    from auryn.core.embeddings import configured_model, get_embedder
+    from auryn.core.embeddings.daemon import daemon_supported
+
+    # Background needs (a) a graph name the daemon can reconnect to and (b) a platform that can run
+    # the daemon (POSIX fcntl). Without either, fall back to inline rather than queueing a request
+    # nothing will ever drain -- native Windows has no daemon, so a background request would sit
+    # forever and semantic search would never come up (cubic review).
+    if mode == "background" and graph_name and daemon_supported():
+        _embed_in_background(graph_name, deep, configured_model())
+        return
+
+    # Inline. A background deep pass is still mutating nodes, so embedding now would race it (and
+    # leave stale vectors the worker won't re-scan); defer to a manual `auryn embed` in that case.
+    if deep == "background":
+        logger.info("Embedding deferred: deep pass still running (run `auryn embed` once it settles)")
         return
     try:
         from auryn.core.embeddings.worker import embed_graph
-        from auryn.core.embeddings import get_embedder
 
         stats = embed_graph(writer, get_embedder(configured_model()))
         logger.info("Embeddings: %d embedded, %d scanned (%s)", stats.embedded, stats.scanned, stats.model_id)
     except Exception:
         logger.exception("Embedding pass failed (ingest itself succeeded; run `auryn embed` to retry)")
+
+
+def _embed_in_background(graph_name: str, deep: str, model: str | None = None) -> None:
+    """Hand `graph_name` to the detached embed daemon. When a background deep pass is still in
+    flight, wait for it first (on a daemon thread, so the caller still returns now) so the daemon
+    embeds settled nodes rather than racing deep's updates -- which also means an auto-embed finally
+    happens for deep=background ingests (previously they embedded nothing until a manual run)."""
+    from auryn.core.embeddings.daemon import request_embed
+
+    try:
+        if deep == "background":
+            def _after_deep() -> None:
+                try:
+                    join_deep_phase()
+                    request_embed(graph_name, model)
+                except Exception:
+                    logger.exception("Background embed (after deep) failed to enqueue for %r", graph_name)
+
+            threading.Thread(target=_after_deep, name="embed-after-deep", daemon=True).start()
+        else:
+            request_embed(graph_name, model)
+        logger.info("Embedding %r in the background (graph is already queryable)", graph_name)
+    except Exception:
+        logger.exception("Failed to enqueue background embed for %r (run `auryn embed` to build it)", graph_name)
 
 
 def _run_phase(

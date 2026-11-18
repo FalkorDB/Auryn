@@ -46,10 +46,11 @@ def do_install(backend: Backend, *, adapters=None, server_command: list[str] | N
             registrations.append(adapter.register(command))
         except Exception as e:  # noqa: BLE001 -- one bad agent must not fail the whole install
             logger.warning("Skipped %s: could not register (%s)", adapter.name, e)
-    # Only the backend + manifest are install's to rewrite: a re-run must keep the repo registry,
-    # the resync trigger, disabled hooks and the embed setting already in config.toml. The manifest
-    # also keeps an agent an earlier run registered and this one didn't (not detected from this
-    # shell, or its registration failed) -- `uninstall` reverses only what the manifest lists.
+    # Preserve everything else the user already configured (resync trigger, disabled hooks,
+    # registered repos, embed mode) -- a re-install only updates the backend and the set of
+    # registered agents, it must not silently reset persisted settings. The manifest also keeps
+    # an agent an earlier run registered and this one didn't (not detected from this shell, or
+    # its registration failed) -- `uninstall` reverses only what the manifest lists.
     prior = load_config()  # as it is NOW: registering took a while, and an ingest may have saved
     config = replace(prior, backend=backend, agents=tuple(registrations))
     names = {r.name for r in registrations}
