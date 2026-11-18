@@ -230,7 +230,7 @@ def create_app(client: FalkorDB) -> Flask:
         # The only endpoint besides git-sync that does real I/O beyond a Cypher
         # query: it fetches from the remote so the branch/tag list is current,
         # not whatever this cache last had. Still never writes to the graph.
-        from auryn.core.git_source import GitRepoCache
+        from auryn.core.git_source import GitRepoCache, repos_cache_dir
 
         project_id = request.args.get("project_id")
         if not project_id:
@@ -248,10 +248,6 @@ def create_app(client: FalkorDB) -> Flask:
         blocker = _sync_blocker(project)
         if blocker:
             return jsonify({"error": blocker, "sync_unavailable": blocker}), 400  # as in git-projects
-        # Only now: a refusal must not depend on the C# plugin being installed (auryn-core alone,
-        # or with another language's plugin, serves the viewer too).
-        from auryn.ingestors.csharp.git_sync import repos_cache_dir
-
         try:
             refs = GitRepoCache(repo_uri, repos_cache_dir()).list_refs()
         except git.GitCommandError as e:
@@ -282,7 +278,9 @@ def create_app(client: FalkorDB) -> Flask:
         blocker = _sync_blocker(project)
         if blocker:
             return jsonify({"error": blocker, "sync_unavailable": blocker}), 400  # as in git-projects
-        from auryn.ingestors.csharp.git_sync import GitCSharpProjectConfig, sync  # see graph_git_refs
+        # Only now: a refusal must not depend on the C# plugin being installed (auryn-core alone,
+        # or with another language's plugin, serves the viewer too).
+        from auryn.ingestors.csharp.git_sync import GitCSharpProjectConfig, sync
 
         config = GitCSharpProjectConfig(
             repo_uri=props["repo_uri"],

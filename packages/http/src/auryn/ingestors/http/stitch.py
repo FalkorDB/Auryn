@@ -36,9 +36,14 @@ def stitch(writer: GraphWriter) -> dict | None:
     # to the SAME route-keyed APIEndpoint (core.http_seam), so they arrive already merged -- one node,
     # no duplicate. This pass only has to (a) reach the endpoints that DON'T converge by id: MVC
     # `/Controller/Action` conventions and `/api/x/5` -> `api/x/{id}` templates; (b) set every
-    # endpoint's `resolved` from whether a handler exposes it; (c) GC endpoints left with neither a
-    # caller nor a handler (e.g. a route deleted from the code).
+    # endpoint's `resolved` from whether a handler exposes it; (c) GC endpoints left with no caller, no
+    # handler, AND no deployment exposure (SERVES, a k8s Ingress -- ADR 0007) -- e.g. a route deleted
+    # from the code and from every manifest.
     if not writer.ro_query("MATCH (e:APIEndpoint) RETURN e.id LIMIT 1").result_set:
+        # No endpoints remain -- but if the LAST route was just removed from the code, this layer's
+        # EXPOSES_ENDPOINT/INVOKES edges are now stale. Returning here without clearing would leave
+        # them behind (traversal would still report the deleted call), so drop them before returning.
+        _clear_prior_layer(writer)
         return None  # nothing to stitch -- also guards the empty-graph "operation on empty key"
 
     writer.setup_schema(NODE_SCHEMAS)
@@ -73,6 +78,8 @@ def stitch(writer: GraphWriter) -> dict | None:
 
     writer.merge_edges(edges)
     _recompute_resolved(writer)
+    invokes = _build_invokes_edges(writer)
+    writer.merge_edges(invokes)
     orphans_removed = _gc_orphan_endpoints(writer)
 
     report = {
@@ -81,18 +88,48 @@ def stitch(writer: GraphWriter) -> dict | None:
         "unresolved_routes": unresolved,
         "ambiguous_routes": ambiguous,
         "exposes_edges": len(edges),
+        "invokes_edges": len(invokes),
         "orphans_removed": orphans_removed,
     }
-    logger.info("http-endpoints: %d placeholders, %d resolved, %d exposes edges (%d ambiguous, %d orphans GC'd)",
-                len(placeholders), len(resolved_ids), len(edges), len(ambiguous), orphans_removed)
+    logger.info("http-endpoints: %d placeholders, %d resolved, %d exposes + %d invokes edges (%d ambiguous, %d orphans GC'd)",
+                len(placeholders), len(resolved_ids), len(edges), len(invokes), len(ambiguous), orphans_removed)
     return report
 
 
 def _clear_prior_layer(writer: GraphWriter) -> None:
-    """Recompute-from-scratch: drop this hook's EXPOSES_ENDPOINT edges. A declared (language-parser)
-    edge has no `http-stitch` provenance and survives; `resolved` is rebuilt afterward by
-    _recompute_resolved, so it isn't reset here."""
+    """Recompute-from-scratch: drop this hook's EXPOSES_ENDPOINT and INVOKES edges. A declared
+    (language-parser) edge has no `http-stitch` provenance and survives; `resolved` is rebuilt
+    afterward by _recompute_resolved, so it isn't reset here."""
     writer.query("MATCH ()-[r:EXPOSES_ENDPOINT]->() WHERE r.provenance = 'http-stitch' DELETE r")
+    writer.query("MATCH ()-[r:INVOKES]->() WHERE r.provenance = 'http-stitch' DELETE r")
+
+
+def _build_invokes_edges(writer: GraphWriter) -> list[GraphEdge]:
+    """A direct, traversable `caller -[:INVOKES {via:"http"}]-> handler` edge for every resolved
+    seam. The endpoint node forms a "V" -- the caller points INTO it (CALLS_API) and the handler
+    points INTO it (EXPOSES_ENDPOINT) -- so a single-direction reachability walk (who_calls upstream,
+    impact_of) can't make the forward-then-backward turn and dies at the boundary. This collapses
+    that V into one call-like edge the curated traversal tools follow, so blast radius spans repos
+    and languages in one query.
+
+    Read straight off the finished graph -- every (caller, handler) pair that shares a route-keyed
+    APIEndpoint -- so it catches BOTH stitched seams and the exact-route merges where the declaration
+    and the call already collapsed onto one node (there the EXPOSES edge is the language parser's, so
+    a placeholder-driven pass would miss it). Raw CALLS_API/EXPOSES_ENDPOINT stay (provenance + the
+    viewer); INVOKES is the derived convenience edge, tagged so it's never confused with an in-process
+    CALLS. 1-to-many preserved: a route served in two repos links the caller to each handler."""
+    rows = writer.ro_query(
+        "MATCH (caller)-[:CALLS_API]->(:APIEndpoint)<-[:EXPOSES_ENDPOINT]-(handler) "
+        "WHERE (caller:Function OR caller:Method) AND (handler:Function OR handler:Method) "
+        "AND caller.id <> handler.id "
+        f"RETURN DISTINCT caller.id, {semantic_label('caller')}, handler.id, {semantic_label('handler')}"
+    ).result_set
+    return [
+        GraphEdge("INVOKES", str(caller_label), {"id": str(caller_id)},
+                  str(handler_label), {"id": str(handler_id)},
+                  {"provenance": "http-stitch", "via": "http"})
+        for caller_id, caller_label, handler_id, handler_label in rows
+    ]
 
 
 def _recompute_resolved(writer: GraphWriter) -> None:
@@ -107,16 +144,16 @@ def _recompute_resolved(writer: GraphWriter) -> None:
 
 
 def _gc_orphan_endpoints(writer: GraphWriter) -> int:
-    """Delete route-keyed endpoints left with neither a caller (CALLS_API) nor a handler
-    (EXPOSES_ENDPOINT, from any node kind). These are the residue of a removed route or a removed
-    call: the `extern://http/` node lives outside any single project's id-prefix, so a project resync
-    can't reclaim it -- this does. Scoped to `extern://http/` so it never touches a project-scoped
-    endpoint another ingestor owns (e.g. pyframework's `Function`-exposed routes, which that ingestor's
-    own resync manages). An endpoint that is merely uncalled (declared, no caller) keeps its EXPOSES
-    and is NOT an orphan."""
+    """Delete route-keyed endpoints left with no referrer at all: no caller (CALLS_API), no handler
+    (EXPOSES_ENDPOINT), and no deployment exposure (SERVES, a k8s Ingress -- ADR 0007). These are the
+    residue of a removed route/call/Ingress: the `extern://http/` node lives outside any single
+    project's id-prefix, so a project resync can't reclaim it -- this does. Scoped to `extern://http/`
+    so it never touches a project-scoped endpoint another ingestor owns (e.g. pyframework's
+    `Function`-exposed routes). An endpoint that is merely uncalled (declared, or Ingress-served, with
+    no caller) keeps its EXPOSES/SERVES and is NOT an orphan."""
     orphans = writer.ro_query(
         "MATCH (e:APIEndpoint) WHERE e.id STARTS WITH 'extern://http/' "
-        "AND NOT ()-[:EXPOSES_ENDPOINT]->(e) AND NOT ()-[:CALLS_API]->(e) "
+        "AND NOT ()-[:EXPOSES_ENDPOINT]->(e) AND NOT ()-[:CALLS_API]->(e) AND NOT ()-[:SERVES]->(e) "
         "RETURN e.id"
     ).result_set
     if orphans:

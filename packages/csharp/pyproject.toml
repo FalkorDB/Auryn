@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "C# language plugin for Auryn: fast tree-sitter parse + deep Roslyn extractor (bundled source, built on demand; requires the .NET SDK)."
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     "click>=8.1",

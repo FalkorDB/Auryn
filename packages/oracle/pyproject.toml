@@ -4,13 +4,13 @@ version = "0.1.0"
 description = "Oracle-stack plugins for Auryn: live-DB and file-based PL/SQL (vendored ANTLR grammar) and Redgate schema-catalog reconstruction (oraschema). (The generic relational-DB schema ingestor now lives in auryn-sql.)"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     # oraschema (Redgate schema-catalog reconstruction) reuses the generic relational
     # schema graph model -- ingestors/oraschema/schema.py imports auryn.ingestors.sql
     # at load, so the `sql` package is a hard dependency, not an optional extra.
-    "auryn-sql",
+    "auryn-sql==0.1.0",
     "click>=8.1",
     # must exactly match the ANTLR tool version used to generate ingestors/plsql/grammar/
     "antlr4-python3-runtime==4.13.2",
