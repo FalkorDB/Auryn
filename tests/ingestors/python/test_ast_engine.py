@@ -337,6 +337,22 @@ def test_ast_engine_leaves_nested_sibling_calls_unresolved():
     assert "python://demo/module/m.func.outer().func.sibling()" not in targets    # sibling -> unresolved
 
 
+def test_nested_call_shadowed_by_enclosing_def_is_not_bound_to_module():
+    # the module has `helper` AND `outer` defines a nested `helper`; a call to `helper()` in a sibling
+    # nested def is shadowed by outer's helper -> NOT bound to the module helper (no WRONG edge) (#786 review)
+    m = _module(
+        "def helper():\n    return 1\n\n"
+        "def outer():\n"
+        "    def helper():\n        return 2\n"
+        "    def run():\n        return helper()\n"
+        "    return run\n"
+    )
+    items = list(resolution.resolve([m], "python://demo"))
+    assert "python://demo/module/m.func.helper()" not in {
+        t for t, _ in _calls_from(items, "python://demo/module/m.func.outer().func.run()")
+    }
+
+
 def test_lambda_param_shadowing_a_module_function_is_not_an_edge():
     # a lambda arg named like a module function: `lambda helper: helper()` calls the ARG, not the
     # function -> no false CALLS edge (#786 review)

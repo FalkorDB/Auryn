@@ -431,7 +431,7 @@ def _emit_attribute(attr: RawAttribute, cls_id: str, ctx: _ModCtx) -> Iterator[G
 
 
 def _resolve_scope_calls(
-    calls: list[RawCall], caller_label: str, caller_id: str, ctx: _ModCtx, scope_params: frozenset = frozenset()
+    calls: list[RawCall], caller_label: str, caller_id: str, ctx: _ModCtx, scope_locals: frozenset = frozenset()
 ) -> tuple[list[GraphEdge], list[GraphNode], list[str]]:
     """Resolve the calls made from one scope -- a function/method body OR a module's top-level
     code -- into CALLS edges originating at `caller_id`, the external placeholder nodes those
@@ -443,7 +443,7 @@ def _resolve_scope_calls(
     external_nodes: list[GraphNode] = []
     unresolved_calls: list[str] = []
     for call in calls:
-        res = _resolve_call(call, ctx, scope_params)
+        res = _resolve_call(call, ctx, scope_locals)
         if res is None:
             if ctx.oracle is not None and call.is_simple_name:
                 unresolved_calls.append(_call_text(call))
@@ -469,13 +469,15 @@ def _resolve_scope_calls(
     return call_edges, external_nodes, unresolved_calls
 
 
-def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotted: str, container_rel: str, container_id: str, container_label: str, ctx: _ModCtx, enclosing_params: frozenset = frozenset()) -> Iterator[GraphNode | GraphEdge]:
+def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotted: str, container_rel: str, container_id: str, container_label: str, ctx: _ModCtx, enclosing_locals: frozenset = frozenset()) -> Iterator[GraphNode | GraphEdge]:
     is_method = container_label == "Class"
     param_names = [p.name for p in fn.params]
-    # Names bound locally in this scope (this function's params + those of enclosing functions, for a
-    # nested def's closure). A simple-name call matching one of these is a call THROUGH a local binding
-    # -- it must not resolve to a module/import/sibling function of the same name (it shadows them).
-    scope_params = enclosing_params | frozenset(param_names)
+    # Names bound locally in this scope chain: this function's params + its own nested defs, plus the
+    # same from every enclosing function (a nested def closes over them). A simple-name call matching
+    # one of these is a LOCAL / shadowed reference -- it must NOT resolve to a module/import function of
+    # the same name. The ast fallback stays conservative (shadowed -> unresolved, never a WRONG edge);
+    # the jedi engine resolves the real target by inference.
+    scope_locals = enclosing_locals | frozenset(param_names) | frozenset(n.name for n in fn.nested)
     fn_id = ids.method_id(scope_id, fn.name, param_names) if is_method else ids.function_id(scope_id, fn.name, param_names)
     label = "Method" if is_method else "Function"
     annotated_ret = fn.returns is not None
@@ -483,7 +485,7 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
     # Resolve calls first so `unresolved_calls` can ride on the node we're about to emit.
     # A resolved call edges to the project callable; an _External call edges to a placeholder
     # (ADR 0004) -- surfacing stdlib/builtin/third-party and not-yet-ingested sibling symbols.
-    call_edges, external_nodes, unresolved_calls = _resolve_scope_calls(fn.calls, label, fn_id, ctx, scope_params)
+    call_edges, external_nodes, unresolved_calls = _resolve_scope_calls(fn.calls, label, fn_id, ctx, scope_locals)
 
     props: dict[str, object] = {
         "name": fn.name,
@@ -538,7 +540,7 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
     for nested in fn.nested:
         yield from _emit_function(
             nested, fn_id, f"{qual_prefix}.{fn.name}", scope_dotted,
-            "HAS_NESTED_FUNCTION", fn_id, label, ctx, scope_params,
+            "HAS_NESTED_FUNCTION", fn_id, label, ctx, scope_locals,
         )
 
 
@@ -622,11 +624,12 @@ def _constructor_call(class_qname: str, ctx: _ModCtx) -> _Call | None:
     return _Call(cls_id, "Class", "constructor", simple)
 
 
-def _resolve_call(call: RawCall, ctx: _ModCtx, scope_params: frozenset = frozenset()) -> _Call | _External | None:
+def _resolve_call(call: RawCall, ctx: _ModCtx, scope_locals: frozenset = frozenset()) -> _Call | _External | None:
     """Resolve a call. Returns a _Call (bound to a project callable), an _External (nameable but
     not defined in this ingest -> a placeholder node, ADR 0004), or None (dynamic / unnameable).
-    `scope_params` are the names bound as parameters in this/enclosing scopes -- a call through one of
-    them is a local and must not bind to a module/import function that it shadows."""
+    `scope_locals` are the names bound locally in this/enclosing scopes (params + nested defs) -- a
+    call through one of them is a local/shadowed reference and must not bind to a module/import
+    function of the same name."""
     if ctx.oracle is not None:
         full_name = ctx.oracle.resolve_call(ctx.module_path, call.line, call.col)
         if not full_name:
@@ -651,13 +654,12 @@ def _resolve_call(call: RawCall, ctx: _ModCtx, scope_params: frozenset = frozens
 
     # ast path: import-bound or same-module direct name calls -> project functions first.
     if call.is_simple_name:
-        # A name bound as a parameter in this or an enclosing scope is a LOCAL (a callback passed in, a
-        # reassigned variable, a closure arg) -- it shadows a module/import function of the same name, so
-        # leave the call unresolved rather than draw a false edge (`def run(helper): helper()`). A call to
-        # a SIBLING/enclosing/recursive nested function is also left UNRESOLVED by the ast fallback: it
-        # does NOT do enclosing-scope resolution (that risks shadowing false edges) -- the default jedi
-        # engine resolves those by inference.
-        if call.name in scope_params:
+        # A name bound locally in this or an enclosing scope -- a parameter, or a nested def (so a call
+        # to a sibling/enclosing/recursive nested function) -- is a LOCAL / shadowed reference. The ast
+        # fallback leaves it UNRESOLVED rather than binding it to a same-named module/import function
+        # (`def run(helper): helper()`; or `outer` defining both `helper` and the caller): never a WRONG
+        # edge. The default jedi engine resolves the real nested target by inference.
+        if call.name in scope_locals:
             return None
         if call.name in ctx.import_map:
             hit = ctx.idx.callable_by_qname.get(ctx.import_map[call.name].target)
