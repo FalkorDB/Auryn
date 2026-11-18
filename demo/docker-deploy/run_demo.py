@@ -162,6 +162,15 @@ def main() -> None:
             "RETURN r.rtype, r.name, head([l IN labels(n) WHERE l <> 'Entity']) ORDER BY r.name"):
             print(f"  {rtype} {name:6}  PROVISIONS  a {kind}")
 
+        section("10. HELM  (render-free: the chart DEPLOYS a workload that runs the SAME hub image)")
+        for chart, dep in rows(g,
+            "MATCH (c:Resource {kind:'chart'})-[:DEPENDS_ON]->(d:Resource) RETURN c.name, d.name ORDER BY d.name"):
+            print(f"  chart {chart:6}  DEPENDS_ON  {dep}")
+        for chart, svc, img in rows(g,
+            "MATCH (c:Resource {kind:'chart'})-[:DEPLOYS]->(s:Service)-[:RUNS_IMAGE]->(i:Image) "
+            "RETURN c.name, s.name, i.ref ORDER BY s.name"):
+            print(f"  chart {chart:6}  DEPLOYS  '{svc}'  which RUNS  {img}  (resolved from values.yaml)")
+
         # The most-shared hub image and how many producers reach it (1 builder + N runners) -- derived
         # from the graph, not a hard-coded ref.
         top = rows(g, "MATCH (n)-[:BUILDS_IMAGE|RUNS_IMAGE]->(i:Image) WITH i, count(DISTINCT n) AS c "

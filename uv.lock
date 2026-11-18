@@ -19,6 +19,7 @@ members = [
     "auryn-events",
     "auryn-go",
     "auryn-grpc",
+    "auryn-helm",
     "auryn-http",
     "auryn-java",
     "auryn-julia",
@@ -169,6 +170,7 @@ all = [
     { name = "auryn-events" },
     { name = "auryn-go" },
     { name = "auryn-grpc" },
+    { name = "auryn-helm" },
     { name = "auryn-http" },
     { name = "auryn-java" },
     { name = "auryn-julia" },
@@ -217,6 +219,9 @@ go = [
 ]
 grpc = [
     { name = "auryn-grpc" },
+]
+helm = [
+    { name = "auryn-helm" },
 ]
 http = [
     { name = "auryn-http" },
@@ -296,6 +301,8 @@ requires-dist = [
     { name = "auryn-go", marker = "extra == 'go'", editable = "packages/go" },
     { name = "auryn-grpc", marker = "extra == 'all'", editable = "packages/grpc" },
     { name = "auryn-grpc", marker = "extra == 'grpc'", editable = "packages/grpc" },
+    { name = "auryn-helm", marker = "extra == 'all'", editable = "packages/helm" },
+    { name = "auryn-helm", marker = "extra == 'helm'", editable = "packages/helm" },
     { name = "auryn-http", marker = "extra == 'all'", editable = "packages/http" },
     { name = "auryn-http", marker = "extra == 'http'", editable = "packages/http" },
     { name = "auryn-java", marker = "extra == 'all'", editable = "packages/java" },
@@ -336,7 +343,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.2,<2.1" },
     { name = "tomli-w", specifier = ">=1.0" },
 ]
-provides-extras = ["llm", "embedded", "python", "typescript", "java", "go", "rust", "c", "cpp", "cuda", "csharp", "php", "ruby", "kotlin", "swift", "julia", "bash", "sql", "sql-all", "oracle", "oracle-live", "http", "orm", "grpc", "events", "docker", "compose", "k8s", "terraform", "all"]
+provides-extras = ["llm", "embedded", "python", "typescript", "java", "go", "rust", "c", "cpp", "cuda", "csharp", "php", "ruby", "kotlin", "swift", "julia", "bash", "sql", "sql-all", "oracle", "oracle-live", "http", "orm", "grpc", "events", "docker", "compose", "k8s", "terraform", "helm", "all"]
 
 [[package]]
 name = "auryn-cpp"
@@ -442,6 +449,21 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "auryn-core", editable = "packages/core" }]
+
+[[package]]
+name = "auryn-helm"
+version = "0.1.0"
+source = { editable = "packages/helm" }
+dependencies = [
+    { name = "auryn-core" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "auryn-core", editable = "packages/core" },
+    { name = "pyyaml", specifier = ">=6.0" },
+]
 
 [[package]]
 name = "auryn-http"
@@ -1176,6 +1198,7 @@ dependencies = [
     { name = "auryn-events" },
     { name = "auryn-go" },
     { name = "auryn-grpc" },
+    { name = "auryn-helm" },
     { name = "auryn-http" },
     { name = "auryn-java" },
     { name = "auryn-julia" },
@@ -1221,6 +1244,7 @@ dev = [
     { name = "auryn-events" },
     { name = "auryn-go" },
     { name = "auryn-grpc" },
+    { name = "auryn-helm" },
     { name = "auryn-http" },
     { name = "auryn-java" },
     { name = "auryn-julia" },
@@ -1258,6 +1282,7 @@ requires-dist = [
     { name = "auryn-events", editable = "packages/events" },
     { name = "auryn-go", editable = "packages/go" },
     { name = "auryn-grpc", editable = "packages/grpc" },
+    { name = "auryn-helm", editable = "packages/helm" },
     { name = "auryn-http", editable = "packages/http" },
     { name = "auryn-java", editable = "packages/java" },
     { name = "auryn-julia", editable = "packages/julia" },
@@ -1293,6 +1318,7 @@ dev = [
     { name = "auryn-events", editable = "packages/events" },
     { name = "auryn-go", editable = "packages/go" },
     { name = "auryn-grpc", editable = "packages/grpc" },
+    { name = "auryn-helm", editable = "packages/helm" },
     { name = "auryn-http", editable = "packages/http" },
     { name = "auryn-java", editable = "packages/java" },
     { name = "auryn-julia", editable = "packages/julia" },
