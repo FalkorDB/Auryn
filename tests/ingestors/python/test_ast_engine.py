@@ -363,6 +363,14 @@ def test_lambda_param_shadowing_a_module_function_is_not_an_edge():
     }
 
 
+def test_lambda_param_receiver_shadowing_an_import_is_not_an_edge():
+    # `lambda client: client.send()` calls through the lambda arg, not the imported `client` module
+    # (receiver is lambda-bound) -> no false edge (#786 review)
+    m = _module("import services as client\n\ndef use():\n    f = lambda client: client.send()\n    return f\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    assert _calls_from(items, "python://demo/module/m.func.use()") == set()
+
+
 def test_param_shadows_sibling_function_no_false_edge():
     # `run`'s parameter `helper` shadows the sibling nested `helper` -- the call is the local param, so
     # no false CALLS edge to outer.helper (#786 review)

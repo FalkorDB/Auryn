@@ -374,7 +374,10 @@ def _calls_in_body(body: list[ast.stmt]) -> list[RawCall]:
             return
         if isinstance(node, ast.Call):
             rc = _raw_call(node.func)
-            if rc is not None and not (rc.is_simple_name and rc.name in bound):
+            # Drop a call bound to a lambda parameter: a simple-name call to it (`lambda f: f()`), OR a
+            # `receiver.attr()` whose RECEIVER is the param (`lambda client: client.send()` -- the arg,
+            # not a same-named import). An unbound receiver still resolves normally.
+            if rc is not None and not (rc.is_simple_name and rc.name in bound) and not (rc.receiver and rc.receiver in bound):
                 out.append(rc)
         for child in ast.iter_child_nodes(node):
             visit(child, bound)
