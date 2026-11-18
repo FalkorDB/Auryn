@@ -97,6 +97,18 @@ def test_embed_mode_roundtrip_and_setter(tmp_path, monkeypatch):
     assert load_config().embed_mode == "background"    # back to default -> section omitted again
 
 
+def test_reinstall_preserves_embed_mode(tmp_path, monkeypatch):
+    """Re-running install only updates backend + agents; a persisted embed mode (and the other
+    settings) must survive, not silently reset to the default."""
+    from auryn.core.app_config import Backend, load_config, set_embed_mode
+    from auryn.core.install import do_install
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    set_embed_mode("inline")
+    do_install(Backend(mode="local"), adapters=[], server_command=["x"])
+    assert load_config().embed_mode == "inline"
+
+
 def test_set_hook_disabled_install_wide(tmp_path, monkeypatch):
     from auryn.core.app_config import load_config, set_hook_disabled
 
