@@ -141,6 +141,16 @@ def main() -> None:
             "RETURN fn.name, i.ref, s.name ORDER BY fn.name"):
             print(f"  change {fn}()  ->  ships {img}  ->  run by service '{svc}'")
 
+        section("8. CLUSTER  (k8s: workloads run the SAME hub image; Ingress exposes an external route)")
+        for kind, name, img in rows(g,
+            "MATCH (s:Service)-[:RUNS_IMAGE]->(i:Image) WHERE s.kind IS NOT NULL "
+            "RETURN s.kind, s.name, i.ref ORDER BY s.name"):
+            print(f"  {kind} {name:6}  RUNS  {img}")
+        for host, route, svc in rows(g,
+            "MATCH (s:Service)-[:SERVES]->(e:APIEndpoint) OPTIONAL MATCH (ing:Ingress {route:e.route}) "
+            "RETURN ing.host, e.route, s.name ORDER BY e.route"):
+            print(f"  https://{host}{route}  -SERVES->  APIEndpoint  (by workload '{svc}')")
+
         print(f"\n{BAR}\nDone. Inspect it yourself:  uv run auryn view   (graph: {GRAPH})\n{BAR}\n")
     finally:
         _shutdown(conn, pid)
