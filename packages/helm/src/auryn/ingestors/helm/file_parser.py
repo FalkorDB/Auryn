@@ -79,33 +79,60 @@ def _workload_name(doc: str, template_stem: str) -> str:
     return template_stem
 
 
+def _strip_inline_comment(value: str) -> str:
+    """Drop a trailing YAML inline comment (` # ...`). A `#` opens a comment only when preceded by
+    whitespace; an image ref (incl. a `repo@sha256:...` digest) never contains ` #`, so this is safe."""
+    return re.sub(r"\s+#.*$", "", value).strip()
+
+
 def _images(doc: str, values: dict) -> tuple[str, ...]:
     out: dict[str, None] = {}
     for m in re.finditer(r"(?m)^\s*-?\s*image:\s*(.+?)\s*$", doc):
-        resolved = resolve_image(m.group(1).strip(), values)
+        raw = _strip_inline_comment(m.group(1).strip())
+        resolved = resolve_image(raw, values) if raw else None
         if resolved:
             out.setdefault(resolved, None)
     return tuple(out)
 
 
-def _parse_template(rel_name: str, text: str, values: dict) -> list[Workload]:
+def _template_rel(chart_dir: str, rel_name: str) -> str:
+    """The template's path relative to its chart dir. Accepts either a repo path under the chart
+    (`charts/x/templates/d.yaml` -> `templates/d.yaml`) or an already-chart-relative name
+    (`templates/d.yaml`, left as-is)."""
+    rel = rel_name.replace(chr(92), "/").strip("/")
+    cd = chart_dir.replace(chr(92), "/").strip("/")
+    if cd and (rel == cd or rel.startswith(cd + "/")):
+        rel = rel[len(cd):].strip("/")
+    return rel
+
+
+def _parse_template(chart_dir: str, rel_name: str, text: str, values: dict) -> list[Workload]:
+    tpl = _template_rel(chart_dir, rel_name)
     stem = posixpath.splitext(posixpath.basename(rel_name))[0]
     out: list[Workload] = []
+    seen: dict[tuple[str, str], int] = {}
     for doc in _documents(text):
         kind = _kind(doc)
-        if kind in _WORKLOAD_KINDS:
-            out.append(Workload(kind=kind, name=_workload_name(doc, stem), template=stem, images=_images(doc, values)))
+        if kind not in _WORKLOAD_KINDS:
+            continue
+        name = _workload_name(doc, stem)
+        n = seen.get((kind, name), 0)
+        seen[(kind, name)] = n + 1
+        if n:  # a 2nd+ workload of the same kind+name in ONE file (e.g. both names are templated and fall
+            name = f"{name}-{n + 1}"  # back to the stem) -- suffix so their workload_ids stay distinct
+        out.append(Workload(kind=kind, name=name, template=tpl, images=_images(doc, values)))
     return out
 
 
 def parse_chart(chart_dir: str, chart_yaml, values_yaml, templates: list[tuple[str, str]]) -> ParsedChart:
     """Assemble a `ParsedChart` from a chart's raw files. `templates` is a list of `(relative-name,
-    text)` for the chart's `templates/*.yaml`. `chart_yaml`/`values_yaml` may be None/empty."""
+    text)` for the chart's `templates/*.yaml` (relative-name is the repo path). `chart_yaml`/`values_yaml`
+    may be None/empty."""
     chart = parse_chart_yaml(chart_yaml) if chart_yaml else None
     values = load_values(values_yaml) if values_yaml else {}
     workloads: list[Workload] = []
     for rel_name, text in templates:
         if isinstance(text, bytes):
             text = text.decode("utf-8", errors="replace")
-        workloads.extend(_parse_template(rel_name, text, values))
+        workloads.extend(_parse_template(chart_dir, rel_name, text, values))
     return ParsedChart(chart_dir=chart_dir, chart=chart, workloads=tuple(workloads))

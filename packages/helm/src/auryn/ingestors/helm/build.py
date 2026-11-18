@@ -18,7 +18,7 @@ from auryn.ingestors.helm.model import ParsedChart
 
 
 def _scope(pc: ParsedChart) -> str:
-    return ids.chart_scope(pc.chart_dir, pc.chart.name if pc.chart else "")
+    return ids.chart_scope(pc.chart_dir)
 
 
 def _chart_file(chart_dir: str) -> str:
@@ -58,7 +58,7 @@ def build_graph(charts: list[ParsedChart], proj_id: str) -> Iterator[GraphNode |
                 yield GraphEdge("DEPENDS_ON", "Resource", {"id": cid}, "Resource", {"id": target})
 
         for w in pc.workloads:
-            wid = ids.workload_id(proj_id, scope, w.template, w.name)
+            wid = ids.workload_id(proj_id, scope, w.template, w.kind, w.name)
             yield GraphNode("Service", {"id": wid}, {
                 "name": w.name, "kind": w.kind, "template": w.template, "chart_dir": pc.chart_dir,
             })

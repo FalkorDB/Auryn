@@ -22,9 +22,11 @@ class Chart:
 class Workload:
     """A deployable workload found in a `templates/*.yaml` file (a `kind:` of Deployment, StatefulSet,
     DaemonSet, Job, CronJob, ...). `name` is the manifest's resolved name, or -- when it is templated
-    (`{{ include "chart.fullname" . }}`) and can't be resolved statically -- the template file stem.
-    `template` is the template file's basename (part of the id). `images` are the container image refs
-    it runs, resolved against `values.yaml` (the hub seam); only fully-resolved refs are kept."""
+    (`{{ include "chart.fullname" . }}`) and can't be resolved statically -- the template file stem
+    (a second+ workload of the same kind+name within one file is suffixed `-2`, `-3`, ... to stay
+    distinct). `template` is the template file's path RELATIVE TO THE CHART DIR (e.g. `templates/deploy.yaml`
+    -- part of the id, so nested templates sharing a basename don't collide). `images` are the container
+    image refs it runs, resolved against `values.yaml` (the hub seam); only fully-resolved refs are kept."""
 
     kind: str
     name: str

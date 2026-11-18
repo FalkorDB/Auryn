@@ -119,3 +119,60 @@ def test_unresolvable_image_is_not_materialized():
     )
     pc = _chart([("templates/x.yaml", tmpl)])
     assert pc.workloads[0].images == ()
+
+
+# ── image resolution hardening (render-free edge cases) ─────────────────────────
+def test_resolve_pipeline_is_not_evaluated():
+    # a pipeline/function on a .Values ref can't be evaluated render-free -> NOT materialized (taking the
+    # raw value would be wrong: `{{ .Values.tag | upper }}` is not `.Values.tag`)
+    assert resolve_image("{{ .Values.repo }}:{{ .Values.tag | upper }}", {"repo": "shop/api", "tag": "1.0"}) is None
+
+
+def test_resolve_shell_var_rejected():
+    assert resolve_image("$IMAGE", {}) is None
+    assert resolve_image("${IMAGE}:latest", {}) is None
+
+
+def test_resolve_empty_value_rejected():
+    # an empty tag renders `shop/api:`, which core.image_ref silently forces to `:latest` -> a false edge
+    assert resolve_image("{{ .Values.repo }}:{{ .Values.tag }}", {"repo": "shop/api", "tag": ""}) is None
+
+
+def test_resolve_malformed_trailing_colon_rejected():
+    assert resolve_image("shop/api:", {}) is None
+
+
+def test_resolve_prose_value_rejected():
+    assert resolve_image("see the deployment docs", {}) is None  # whitespace -> not an image ref
+
+
+# ── templates: inline comments, over-match, within-file disambiguation ───────────
+def test_inline_comment_stripped_from_image():
+    tmpl = (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n"
+        "      containers:\n        - image: nginx:1.25  # pinned for prod\n"
+    )
+    assert _chart([("templates/d.yaml", tmpl)]).workloads[0].images == ("nginx:1.25",)
+
+
+def test_prose_image_key_not_materialized():
+    tmpl = (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n"
+        "      containers:\n        - image: the base image to use\n"
+    )
+    assert _chart([("templates/d.yaml", tmpl)]).workloads[0].images == ()
+
+
+def test_two_templated_workloads_in_one_file_are_disambiguated():
+    doc = (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
+        '  name: {{ include "x.fullname" . }}\nspec:\n  template:\n    spec:\n      containers:\n        - image: a:1\n'
+    )
+    pc = _chart([("templates/multi.yaml", doc + "---\n" + doc)])
+    assert [w.name for w in pc.workloads] == ["multi", "multi-2"]  # both fall back to the stem -> suffixed
+
+
+def test_template_path_is_chart_relative_from_repo_path():
+    # given a full repo path, Workload.template is the path RELATIVE to the chart dir (part of the id)
+    pc = parse_chart("charts/shop", _CHART, _VALUES, [("charts/shop/templates/nested/deploy.yaml", _DEPLOYMENT)])
+    assert pc.workloads[0].template == "templates/nested/deploy.yaml"

@@ -143,7 +143,7 @@ def main() -> None:
 
         section("8. CLUSTER  (k8s: workloads run the SAME hub image; Ingress exposes an external route)")
         for kind, name, img in rows(g,
-            "MATCH (s:Service)-[:RUNS_IMAGE]->(i:Image) WHERE s.kind IS NOT NULL "
+            "MATCH (s:Service)-[:RUNS_IMAGE]->(i:Image) WHERE s.namespace IS NOT NULL "  # k8s workloads only (Helm Services carry no namespace -> §10)
             "RETURN s.kind, s.name, i.ref ORDER BY s.name"):
             print(f"  {kind} {name:6}  RUNS  {img}")
         for host, route, svc in rows(g,

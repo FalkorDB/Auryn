@@ -78,10 +78,12 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
         return source.read_blob(blob_sha) if blob_sha else None
 
     parsed_charts = []
+    files_count = 0  # actual YAML files consumed (Chart.yaml + values.yaml + templates), not chart count
     for cd, (chart_blob, values_blob, templates) in _collect_charts(source, target_sha).items():
         try:
             tpls = [(p, source.read_blob(sha)) for p, sha in templates]
             parsed_charts.append(parse_chart(cd, _read(chart_blob), _read(values_blob), tpls))
+            files_count += 1 + (1 if values_blob else 0) + len(templates)
         except Exception:
             # KNOWN LIMITATION (tier-wide): a failed read drops the chart from the target, so the
             # recompute REMOVES its prior nodes -- no keep-last-good.
@@ -105,7 +107,7 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
     return SyncStats(
         nodes_added=stats.nodes_added, nodes_updated=stats.nodes_updated, nodes_removed=stats.nodes_removed,
         edges_added=stats.edges_added, edges_updated=stats.edges_updated, edges_removed=stats.edges_removed,
-        commit_sha=target_sha, elapsed_seconds=elapsed, files_parsed=len(parsed_charts),
+        commit_sha=target_sha, elapsed_seconds=elapsed, files_parsed=files_count,
     )
 
 

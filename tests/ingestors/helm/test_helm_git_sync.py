@@ -68,3 +68,50 @@ def test_resync_removes_deleted_chart(graph, tmp_path):
     q = _ingest(graph, tmp_path, {"charts/shop/Chart.yaml": "apiVersion: v2\nname: shop-api\nversion: 2.0.0\n"})
     assert q("MATCH (s:Service) RETURN count(s)") == [[0]]
     assert q("MATCH (:Resource)-[:DEPENDS_ON]->() RETURN count(*)") == [[0]]  # the redis dep is gone too
+
+
+# ── id-collision hardening ──────────────────────────────────────────────────────
+_TEMPLATED_WORKLOAD = (
+    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
+    '  name: {{ include "x.fullname" . }}\nspec:\n  template:\n    spec:\n      containers:\n        - image: a:1\n'
+)
+
+
+def test_nested_same_basename_templates_stay_distinct(graph, tmp_path):
+    # two templates with the SAME basename and a templated (fallback-to-stem) name -- the chart-relative
+    # template PATH (not just the basename) keeps their Service nodes distinct
+    files = {
+        "charts/shop/Chart.yaml": "apiVersion: v2\nname: shop\nversion: 1.0.0\n",
+        "charts/shop/templates/a/deploy.yaml": _TEMPLATED_WORKLOAD,
+        "charts/shop/templates/b/deploy.yaml": _TEMPLATED_WORKLOAD,
+    }
+    q = _ingest(graph, tmp_path, files)
+    assert q("MATCH (s:Service) RETURN count(s)") == [[2]]
+
+
+def test_same_name_different_kind_stay_distinct(graph, tmp_path):
+    # same name + same template file, different kind -> kind is part of the id, so two Services
+    multi = (
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: worker\nspec:\n  template:\n    spec:\n"
+        "      containers:\n        - image: a:1\n---\n"
+        "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: worker\n"
+    )
+    files = {
+        "charts/shop/Chart.yaml": "apiVersion: v2\nname: shop\nversion: 1.0.0\n",
+        "charts/shop/templates/w.yaml": multi,
+    }
+    q = _ingest(graph, tmp_path, files)
+    assert q("MATCH (s:Service {name:'worker'}) RETURN count(s)") == [[2]]
+
+
+def test_root_chart_and_sibling_dir_do_not_merge(graph, tmp_path):
+    # a ROOT chart whose Chart.yaml name equals a sibling subchart's DIRECTORY must not merge: the scope
+    # keys on the directory ('_root' for the root), never the Chart.yaml name
+    files = {
+        "Chart.yaml": "apiVersion: v2\nname: shop\nversion: 1.0.0\n",        # root chart, named 'shop'
+        "shop/Chart.yaml": "apiVersion: v2\nname: other\nversion: 1.0.0\n",  # a subchart in dir 'shop'
+    }
+    q = _ingest(graph, tmp_path, files)
+    assert q("MATCH (r:Resource {kind:'chart'}) RETURN count(r)") == [[2]]
+    assert q("MATCH (r:Resource {kind:'chart', name:'shop'}) RETURN count(r)") == [[1]]
+    assert q("MATCH (r:Resource {kind:'chart', name:'other'}) RETURN count(r)") == [[1]]
