@@ -256,13 +256,68 @@ def test_same_module_instantiation_edges_to_constructor():
     assert ctor_edge.properties["receiver_type"] == "Service"
 
 
-def test_instantiation_without_init_draws_no_edge():
-    # A class with no local __init__ has no node to point at -> no constructor edge (and no stray
-    # external placeholder either): a default/inherited ctor keeps the no-edge convention.
+def test_instantiation_without_init_edges_to_the_class_node():
+    # A class with no local __init__ has no __init__ method to point at, so the constructor edge
+    # targets the CLASS node itself -- the instantiation is still captured for who_calls/impact (#785).
     m = _module("class Bare:\n    def run(self):\n        pass\n\nBare()\n")
     items = list(resolution.resolve([m], "python://demo"))
-    assert [e for e in _edges_of(items, "CALLS") if e.properties["resolution"] == "constructor"] == []
-    assert _calls_from(items, "python://demo/module/m") == set()
+    ctor = [e for e in _edges_of(items, "CALLS") if e.properties["resolution"] == "constructor"]
+    assert len(ctor) == 1
+    assert ctor[0].to_label == "Class"
+    assert str(ctor[0].to_key["id"]) == "python://demo/module/m.class.bare"
+    assert ctor[0].properties["receiver_type"] == "Bare"
+
+
+def test_inherited_constructor_edges_to_class_node():
+    # a subclass that only INHERITS __init__ has no local one -> the constructor edge targets the
+    # subclass's Class node (previously no edge at all) (#785)
+    m = _module("class Base:\n    def __init__(self):\n        pass\n\nclass Derived(Base):\n    pass\n\nDerived()\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    ctor = [e for e in _edges_of(items, "CALLS") if e.properties["resolution"] == "constructor"]
+    assert [(e.to_label, str(e.to_key["id"])) for e in ctor] == [("Class", "python://demo/module/m.class.derived")]
+
+
+def test_raise_of_project_exception_edges_to_class_node():
+    # `raise Refused(...)` instantiates a project class with no local __init__ -> edge to its Class node (#785)
+    m = _module("class Refused(Exception):\n    pass\n\ndef deny():\n    raise Refused('no')\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    assert ("python://demo/module/m.class.refused", "constructor") in _calls_from(items, "python://demo/module/m.func.deny()")
+
+
+# -- lambdas & nested functions (#785) -------------------------------------------
+
+
+def test_lambda_body_calls_attributed_to_enclosing_function():
+    # a call inside a lambda (`observe(lambda: helper())`) is anonymous -> attributed to the enclosing
+    # function, not dropped (#785)
+    m = _module(
+        "def helper():\n    return 1\n\n"
+        "def observe(fn):\n    return fn()\n\n"
+        "def in_lambda():\n    return observe(lambda: helper())\n"
+    )
+    items = list(resolution.resolve([m], "python://demo"))
+    targets = {tid for tid, _ in _calls_from(items, "python://demo/module/m.func.in_lambda()")}
+    assert "python://demo/module/m.func.helper()" in targets      # the lambda's helper() isn't lost
+    assert "python://demo/module/m.func.observe(fn)" in targets
+
+
+def test_nested_function_is_a_node_and_its_calls_resolve():
+    # a nested `def` is a first-class Function node; its calls originate there (who_calls finds it),
+    # not in the enclosing function (#785)
+    m = _module(
+        "def helper():\n    return 1\n\n"
+        "def outer():\n    def tool():\n        return helper()\n    return tool\n"
+    )
+    items = list(resolution.resolve([m], "python://demo"))
+    outer_id = "python://demo/module/m.func.outer()"
+    tool_id = "python://demo/module/m.func.outer().func.tool()"
+    tool = _node(items, tool_id)
+    assert tool.label == "Function"
+    assert tool.properties["qualified_name"] == "m.outer.tool"
+    assert any(e.from_key["id"] == outer_id and e.to_key["id"] == tool_id
+               for e in _edges_of(items, "HAS_NESTED_FUNCTION"))
+    assert ("python://demo/module/m.func.helper()", "resolved") in _calls_from(items, tool_id)
+    assert "python://demo/module/m.func.helper()" not in {t for t, _ in _calls_from(items, outer_id)}
 
 
 def test_import_bound_instantiation_resolves_to_constructor():

@@ -110,22 +110,28 @@ class _Index:
                 self.packages.add(m.dotted)
         scope_id = _scope_id(self.proj_id, m)
         for fn in m.functions:
-            self.callable_by_qname[f"{m.dotted}.{fn.name}"] = (
-                ids.function_id(scope_id, fn.name, [p.name for p in fn.params]),
-                "Function",
-            )
+            self._index_function(fn, m.dotted, scope_id)
         for cls in m.classes:
             self._index_class(cls, m.dotted, scope_id)
+
+    def _index_function(self, fn: RawFunction, parent_dotted: str, parent_scope_id: str):
+        """Index a function and (recursively) the functions nested in its body. A nested def is
+        scoped under its enclosing function's id/qname (`<module>.outer.inner`)."""
+        qname = f"{parent_dotted}.{fn.name}"
+        fid = ids.function_id(parent_scope_id, fn.name, [p.name for p in fn.params])
+        self.callable_by_qname[qname] = (fid, "Function")
+        for nested in fn.nested:
+            self._index_function(nested, qname, fid)
 
     def _index_class(self, cls: RawClass, scope_dotted: str, scope_id: str):
         qname = f"{scope_dotted}.{cls.name}"
         cls_id = ids.class_id(scope_id, cls.name)
         self.class_by_qname[qname] = cls_id
         for method in cls.methods:
-            self.callable_by_qname[f"{qname}.{method.name}"] = (
-                ids.method_id(cls_id, method.name, [p.name for p in method.params]),
-                "Method",
-            )
+            mid = ids.method_id(cls_id, method.name, [p.name for p in method.params])
+            self.callable_by_qname[f"{qname}.{method.name}"] = (mid, "Method")
+            for nested in method.nested:  # a def inside a method is a nested Function scoped under it
+                self._index_function(nested, f"{qname}.{method.name}", mid)
         for nested in cls.nested:
             self._index_class(nested, qname, cls_id)
 
@@ -514,6 +520,16 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
 
     yield from call_edges
 
+    # Nested functions (closures, factory-/decorator-registered handlers) are first-class nodes, so
+    # calls inside them aren't lost and `who_calls` finds them. Each is scoped under this function's
+    # id/qname and emitted as a Function (never a Method) regardless of whether this scope is a
+    # function or a method -- so the container is this node via HAS_NESTED_FUNCTION.
+    for nested in fn.nested:
+        yield from _emit_function(
+            nested, fn_id, f"{qual_prefix}.{fn.name}", scope_dotted,
+            "HAS_NESTED_FUNCTION", fn_id, label, ctx,
+        )
+
 
 # -- resolution helpers ------------------------------------------------------------
 
@@ -578,16 +594,21 @@ def _external_or_none(qualifier: str, name: str, ctx: _ModCtx) -> _External | No
 
 
 def _constructor_call(class_qname: str, ctx: _ModCtx) -> _Call | None:
-    """Instantiating a project class runs its constructor: redirect the call to the class's own
-    `__init__` method when it defines one. A class with no local `__init__` (a default or purely
-    inherited constructor) has no node to point at, so no edge is drawn -- matching the no-edge
-    convention for a call the model can't name. `resolution="constructor"` marks the edge as
-    object construction (not a literal textual call to `__init__`); `receiver_type` is the class's
-    simple name, mirroring a receiver-typed method call."""
+    """Instantiating a project class runs its constructor. Redirect the call to the class's own
+    `__init__` method when it defines one; otherwise (a default constructor, or one purely inherited
+    from a base -- no local `__init__` to name) edge to the CLASS node itself, so that every
+    project-class instantiation (`raise SomeError(...)`, `Topology()`, a subclass that only inherits
+    `__init__`) is still captured for `who_calls`/`impact_of`. `resolution="constructor"` marks the
+    edge as object construction (not a literal textual call to `__init__`); `receiver_type` is the
+    class's simple name, mirroring a receiver-typed method call."""
+    simple = class_qname.rsplit(".", 1)[-1]
     ctor = ctx.idx.callable_by_qname.get(f"{class_qname}.__init__")
-    if ctor is None:
+    if ctor is not None:
+        return _Call(ctor[0], ctor[1], "constructor", simple)
+    cls_id = ctx.idx.class_by_qname.get(class_qname)
+    if cls_id is None:  # not a known project class (shouldn't happen -- callers gate on class_by_qname)
         return None
-    return _Call(ctor[0], ctor[1], "constructor", class_qname.rsplit(".", 1)[-1])
+    return _Call(cls_id, "Class", "constructor", simple)
 
 
 def _resolve_call(call: RawCall, ctx: _ModCtx) -> _Call | _External | None:

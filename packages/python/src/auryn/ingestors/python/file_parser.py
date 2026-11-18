@@ -248,10 +248,38 @@ def _function(node: ast.FunctionDef | ast.AsyncFunctionDef, src: _Source, *, in_
         calls=_calls(node),
         source=src.segment(node),
         doc=src.leading_comment(_decl_top_line(node)),
+        nested=_nested_functions(node.body, src),
     )
     if in_class and fn.params:
         fn.self_attrs = _self_attrs(node, self_name=fn.params[0].name)
     return fn
+
+
+def _nested_functions(body: list[ast.stmt], src: _Source) -> list[RawFunction]:
+    """The functions declared inside a scope's OWN body -- so a nested `def` (a tool/handler
+    registered inside a `register(app)` factory, a closure) becomes its own node and its calls
+    aren't lost. Mirrors `_calls_in_body`'s scope rules: it finds defs at any statement depth in
+    the body (inside `if`/`for`/...) but stops at a deeper `def`/`class` -- those own their inner
+    defs. A nested `def` is always a plain function, never a method (even inside a method body)."""
+    out: list[RawFunction] = []
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.append(_function(child, src))  # its own nested defs are collected recursively there
+                continue  # don't descend -- that scope owns its inner defs
+            if isinstance(child, ast.ClassDef):
+                continue  # a nested class's methods aren't this scope's nested functions
+            walk(child)
+
+    for stmt in body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.append(_function(stmt, src))
+            continue
+        if isinstance(stmt, ast.ClassDef):
+            continue
+        walk(stmt)
+    return out
 
 
 def _params(args: ast.arguments) -> list[RawParameter]:
@@ -324,18 +352,23 @@ def _calls_in_body(body: list[ast.stmt]) -> list[RawCall]:
     function's decorators and default-argument expressions -- which hang off the `def` node, not
     its body, and execute in the ENCLOSING scope at definition time (`@deco`, `def f(x=compute())`)
     -- are correctly excluded from the function's own calls. Document order; a call's arguments are
-    descended into so `print(load())` captures both."""
+    descended into so `print(load())` captures both.
+
+    A `lambda` body is NOT skipped: a lambda is anonymous and never becomes its own graph node, so
+    the calls inside it (`observe(lambda: helper(x))` -> `helper`) would otherwise vanish. They're
+    attributed to the enclosing scope. A nested `def`/`class` IS skipped here -- it gets its own
+    node and its calls are collected there (see `_function`'s nested recursion)."""
     out: list[RawCall] = []
 
     def walk(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-                continue  # a nested scope -- owns its own calls
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue  # a nested def/class -- its own node owns its calls
             if isinstance(child, ast.Call):
                 rc = _raw_call(child.func)
                 if rc is not None:
                     out.append(rc)
-            walk(child)
+            walk(child)  # descends into a lambda body too (anonymous -> calls belong to this scope)
 
     for stmt in body:
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

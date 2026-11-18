@@ -91,6 +91,8 @@ def _python_referenced_names(m) -> set[str]:
         add_expr(f.returns)
         for p in f.params:
             add_expr(p.annotation)
+        for n in f.nested:  # nested defs are their own nodes; collect the names their bodies reference
+            fn(n)
 
     def cls(c) -> None:
         for b in c.bases:
