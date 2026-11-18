@@ -8,7 +8,7 @@ Part of [Auryn](https://github.com/FalkorDB/Auryn), which turns a codebase into 
 
 ```bash
 pip install falkordb-auryn                  # Auryn with every plugin
-pip install "auryn-core[oracle]"            # Auryn with only this plugin
+pip install "auryn-core[oracle]"            # Auryn with this plugin and auryn-sql, which it uses
 pip install "auryn-core[oracle-live]"       # + the oracledb driver for live databases
 ```
 

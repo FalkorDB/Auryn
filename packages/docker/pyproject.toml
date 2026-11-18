@@ -1,7 +1,7 @@
 [project]
 name = "auryn-docker"
 version = "0.1.0"
-description = "Dockerfile plugin for Auryn and the first producer of the deployment & infrastructure tier (ADR 0007). A dependency-free Dockerfile parser emits BuildStage nodes, the shared image-keyed `Image` hub (the FROM chain, as resolved:false placeholders), and multi-stage COPY --from edges; a companion `deploy` enrichment hook stitches build stages to the code they package (PACKAGES), recomputes image `resolved`, and GCs orphan images. The hub that Compose/k8s/Helm/Terraform producers join onto. Depends only on auryn-core."
+description = "Dockerfile plugin for Auryn and the first producer of the deployment & infrastructure tier (ADR 0007). A dependency-free Dockerfile parser emits BuildStage nodes, the shared image-keyed `Image` hub (the FROM chain, as resolved:false placeholders) and multi-stage COPY --from edges; a `deploy` enrichment links build stages to the code they package (PACKAGES), recomputes image `resolved` and GCs orphan images. Compose/k8s/Helm/Terraform producers join onto the hub. Depends only on auryn-core."
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"

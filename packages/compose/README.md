@@ -1,6 +1,6 @@
 # auryn-compose
 
-Docker Compose plugin for Auryn and the second producer of the deployment & infrastructure tier (ADR 0007). Parses docker-compose files into Service nodes (RUNS_IMAGE the shared Image hub, DEPENDS_ON other services), and a `deploy-compose` enrichment hook that closes the build->run loop: it resolves each service's `build:` to the Dockerfile's final BuildStage and links BUILDS_IMAGE, flipping that image to resolved/internal. Composes with auryn-docker onto the same image-keyed hub. Depends only on auryn-core.
+Docker Compose plugin for Auryn (deployment & infrastructure tier, ADR 0007). Parses docker-compose files into Service nodes (RUNS_IMAGE the shared Image hub, DEPENDS_ON other services). A `deploy-compose` enrichment links each service that has both `build:` and `image:` to the Dockerfile stage it builds (`build.target`, else the final stage) with BUILDS_IMAGE, marking the image resolved/internal; the stages come from auryn-docker, so install both. Depends on auryn-core and PyYAML.
 
 Part of [Auryn](https://github.com/FalkorDB/Auryn), which turns a codebase into a queryable knowledge graph for AI agents.
 
@@ -9,6 +9,7 @@ Part of [Auryn](https://github.com/FalkorDB/Auryn), which turns a codebase into 
 ```bash
 pip install falkordb-auryn                  # Auryn with every plugin
 pip install "auryn-core[compose]"           # Auryn with only this plugin
+pip install "auryn-core[compose,docker]"    # + auryn-docker, for the build -> image links
 ```
 
 ## License
