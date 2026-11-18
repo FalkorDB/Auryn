@@ -162,13 +162,15 @@ def main() -> None:
             "RETURN r.rtype, r.name, head([l IN labels(n) WHERE l <> 'Entity']) ORDER BY r.name"):
             print(f"  {rtype} {name:6}  PROVISIONS  a {kind}")
 
-        # How many producers reach the shared api image (1 builder + N runners) -- reported from the
-        # graph, not assumed.
-        prod = rows(g, "MATCH (n)-[e:BUILDS_IMAGE|RUNS_IMAGE]->(:Image {ref:'docker.io/shop/api:1.0'}) "
-                       "RETURN count(DISTINCT n)")
-        n = prod[0][0] if prod else 0
-        print(f"\n{BAR}\n{n} producers converge on one hub image (shop/api:1.0).  "
-              f"Inspect it:  uv run auryn view   (graph: {GRAPH})\n{BAR}\n")
+        # The most-shared hub image and how many producers reach it (1 builder + N runners) -- derived
+        # from the graph, not a hard-coded ref.
+        top = rows(g, "MATCH (n)-[:BUILDS_IMAGE|RUNS_IMAGE]->(i:Image) WITH i, count(DISTINCT n) AS c "
+                      "RETURN i.ref, c ORDER BY c DESC LIMIT 1")
+        if top and top[0][1] > 1:
+            headline = f"{top[0][1]} producers converge on one hub image ({top[0][0]})."
+        else:
+            headline = "(no shared hub image in this graph)."
+        print(f"\n{BAR}\n{headline}  Inspect it:  uv run auryn view   (graph: {GRAPH})\n{BAR}\n")
     finally:
         _shutdown(conn, pid)
 

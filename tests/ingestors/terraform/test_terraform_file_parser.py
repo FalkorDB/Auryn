@@ -67,5 +67,30 @@ def test_nested_image_attribute_is_found():
     assert p.blocks[0].images == ("gcr.io/app:1",)
 
 
+def test_interpolated_image_uri_is_kept():
+    # an `image_uri` built from an ECR reference must still produce an (unresolved) Image, not vanish
+    p = parse_source('resource "aws_apprunner_service" "s" { image_uri = "${aws_ecr_repository.r.url}:1.0" }')
+    assert any("$" in img for img in p.blocks[0].images)
+
+
+def test_vm_boot_disk_image_is_not_a_container_image():
+    p = parse_source(
+        'resource "google_compute_instance" "vm" {\n'
+        '  boot_disk {\n    initialize_params {\n      image = "debian-cloud/debian-12"\n    }\n  }\n}\n'
+    )
+    assert p.blocks[0].images == ()  # a VM boot image under boot_disk, NOT a container
+
+
+def test_nested_brace_interpolation_keeps_reference():
+    # the ref lives after a nested `{...}` -- brace-balancing must not stop at the inner `}`
+    p = parse_source('resource "aws_x" "y" { v = "${merge({a = 1}, {b = aws_iam_role.exec.arn})}" }')
+    assert "aws_iam_role.exec" in p.blocks[0].refs
+
+
+def test_escaped_interpolation_is_not_a_reference():
+    p = parse_source('resource "aws_x" "y" { note = "literal $${aws_iam_role.exec.arn}" }')
+    assert p.blocks[0].refs == ()
+
+
 def test_malformed_hcl_is_empty():
     assert parse_source('resource "aws_x" "y" { = = =').blocks == ()

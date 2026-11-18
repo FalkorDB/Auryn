@@ -1,6 +1,7 @@
 """Canonical id scheme for the Terraform graph (ADR 0007 §2). A `Resource` is keyed by its Terraform
-address within the project (`terraform://<project>/<address>`). The shared `Image` hub keys via
-`core.image_ref`, so a resource that runs an image converges with the other producers."""
+address within its MODULE directory (`terraform://<project>/<module-dir>/<address>`, or
+`terraform://<project>/<address>` at the root). The shared `Image` hub keys via `core.image_ref`, so a
+resource that runs an image converges with the other producers."""
 
 from __future__ import annotations
 
@@ -31,8 +32,10 @@ def resource_id(proj_id: str, module_dir: str, address: str) -> str:
 
 
 def database_id(proj_id: str, module_dir: str, address: str) -> str:
-    return f"{_module_prefix(proj_id, module_dir)}/database/{address}"
+    # Keyed off the (unique) resource id with a `#` marker -- which can't appear in a module dir -- so a
+    # provisioned node never collides with a nested-module `Resource` that happens to share the path.
+    return f"{resource_id(proj_id, module_dir, address)}#database"
 
 
 def registry_id(proj_id: str, module_dir: str, address: str) -> str:
-    return f"{_module_prefix(proj_id, module_dir)}/registry/{address}"
+    return f"{resource_id(proj_id, module_dir, address)}#registry"

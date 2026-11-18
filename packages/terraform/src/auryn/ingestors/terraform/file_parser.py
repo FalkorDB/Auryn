@@ -19,11 +19,29 @@ from auryn.ingestors.terraform.model import Block, ParsedTf
 _REF = re.compile(
     r"(?<![\w.])(module\.[A-Za-z_][\w-]*|data\.[A-Za-z_]\w*\.[A-Za-z_][\w-]*|[A-Za-z_]\w*_[A-Za-z_]\w*\.[A-Za-z_][\w-]*)"
 )
-# The CONTENT of each `${...}` interpolation (where references actually live -- a quoted string
-# literal like `"aws_x.y"` is NOT an interpolation and must not fabricate a reference).
-_INTERP = re.compile(r"\$\{([^}]*)\}")
 # `image = "x"` / `"image": "x"` inside an attribute (e.g. a container_definitions jsonencode blob).
 _IMAGE = re.compile(r'"?image(?:_uri)?"?\s*[:=]\s*"([^"${}\s]+)"')
+
+
+def _interpolations(s: str):
+    """Yield the CONTENT of each top-level `${...}` in `s`, brace-BALANCED (so
+    `${lookup({}, aws_x.y.z)}` keeps the whole expression) and skipping an escaped `$${` (which
+    Terraform treats as a literal `${`). References live only here -- a quoted string literal like
+    `"aws_x.y"` is NOT an interpolation and must not fabricate a reference."""
+    i, n = 0, len(s)
+    while i < n - 1:
+        if s[i] == "$" and s[i + 1] == "{":
+            if i > 0 and s[i - 1] == "$":  # `$${` -> literal, not an interpolation
+                i += 2
+                continue
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += (s[j] == "{") - (s[j] == "}")
+                j += 1
+            yield s[i + 2 : j - 1]
+            i = j
+        else:
+            i += 1
 
 
 def _unq(s):
@@ -61,7 +79,7 @@ def _address(ref: str) -> str:
 def _refs(attrs: dict, self_address: str) -> tuple[str, ...]:
     out: dict[str, None] = {}
     for s in _strings(attrs):
-        for interp in _INTERP.findall(s):  # only the ${...} content, not plain string literals
+        for interp in _interpolations(s):  # only ${...} content, not plain string literals
             for m in _REF.findall(interp):
                 addr = _address(m)
                 if addr != self_address:
@@ -69,22 +87,26 @@ def _refs(attrs: dict, self_address: str) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _collect_image_keys(v, out: dict) -> None:
-    """Find every `image`/`image_uri` attribute at ANY nesting (Cloud Run's `template.containers.image`,
-    not just top-level)."""
+def _collect_image_keys(v, out: dict, in_container: bool = False) -> None:
+    """Find CONTAINER image refs at any nesting. `image_uri` (Lambda/App Runner) is container-specific,
+    so collected anywhere; a bare `image` is collected ONLY inside a container context (`containers`
+    block -- Cloud Run's `template.containers.image`), so a VM boot disk's `boot_disk.initialize_params
+    .image` is NOT mistaken for a container image. Interpolated (`${...}`) values are KEPT -- the shared
+    `image_node` flags them unresolved -- so an `image_uri = "${ecr...}:tag"` still gets an Image."""
     if isinstance(v, dict):
         for k, x in v.items():
             if _meta_key(k):
                 continue
-            if k in ("image", "image_uri") and isinstance(x, str):
+            if (k == "image_uri" or (k == "image" and in_container)) and isinstance(x, str):
                 img = _unq(x)
-                if img and "${" not in img:
+                if img:
                     out.setdefault(img, None)
             else:
-                _collect_image_keys(x, out)
+                child_container = in_container or (isinstance(k, str) and "container" in k.lower())
+                _collect_image_keys(x, out, child_container)
     elif isinstance(v, list):
         for x in v:
-            _collect_image_keys(x, out)
+            _collect_image_keys(x, out, in_container)
 
 
 def _images(attrs: dict) -> tuple[str, ...]:
