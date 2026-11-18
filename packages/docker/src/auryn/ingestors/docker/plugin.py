@@ -5,10 +5,12 @@ GitLanguage's `sync` is a lazy thunk that imports auryn.ingestors.docker.git_syn
 actually contains Dockerfiles. Single-phase (declarative -- no deep pass).
 
 Detection uses suffix matching (`path.endswith`), which catches `Dockerfile`, `web.Dockerfile`, and
-`*.dockerfile`. The `Dockerfile.prod` / `Dockerfile.dev` basename-variant family is NOT matched by a
-pure suffix -- the clean fix is the optional `GitLanguage.filename_matches` predicate proposed in ADR
-0007 §7 (every IaC producer needs basename matching). Until that lands, those variants are a known
-gap."""
+`*.dockerfile`. Two KNOWN gaps, both resolved by the optional `GitLanguage.filename_matches` predicate
+proposed in ADR 0007 §7 (every IaC producer needs basename matching), deferred until that lands:
+  - the `Dockerfile.prod` / `Dockerfile.dev` basename-variant family isn't matched by a pure suffix;
+  - an extensionless `Dockerfile` has an empty `Path.suffix`, so the save-watcher's suffix-based
+    `note_change` won't trigger an incremental resync on edit (a full `index`/commit resync still
+    picks it up). Both want basename-aware detection, not a suffix."""
 
 from __future__ import annotations
 

@@ -5,8 +5,9 @@ node, keyed by normalized reference and indexed on `ref` so the `deploy` stitch'
 joins (and future Compose/k8s `RUNS_IMAGE`) are index seeks.
 
 `Project`/`File`/`HAS_FILE` match the other ingestors verbatim (shared backbone). The code seam
-(`PACKAGES`), `BUILDS_IMAGE`, and the derived `SHIPS` edge are written by the `deploy` enrichment
-(stitch.py), not the producer, so they are declared there."""
+(`PACKAGES`), `BUILDS_IMAGE`, and the derived `SHIPS` edge are synthesized by the `deploy` enrichment
+(stitch.py), not the producer -- the stitch MERGEs them directly against the existing indexes, so it
+declares no `EdgeSchema` of its own; they are intentionally absent from this producer contract."""
 
 from __future__ import annotations
 

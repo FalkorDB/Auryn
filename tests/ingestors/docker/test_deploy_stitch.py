@@ -91,6 +91,16 @@ def test_absolute_copy_source_resolves_under_context(graph, tmp_path):
     assert [r[0] for r in _q(graph, "MATCH (:BuildStage)-[:PACKAGES]->(f:File) RETURN f.path")] == ["svc/app/main.go"]
 
 
+def test_copy_glob_matches_pattern_not_siblings(graph, tmp_path):
+    """`COPY src/*.py` packages only the .py files under src/, not a sibling non-match."""
+    writer = GraphWriter(graph)
+    _seed_file(writer, "py", "svc/src/app.py")      # matches src/*.py
+    _seed_file(writer, "py", "svc/src/README.md")   # same dir, does NOT match the glob
+    _ingest_docker(graph, tmp_path, {"svc/Dockerfile": "FROM scratch\nCOPY src/*.py /app\n"})
+    stitch(writer)
+    assert [r[0] for r in _q(graph, "MATCH (:BuildStage)-[:PACKAGES]->(f:File) RETURN f.path")] == ["svc/src/app.py"]
+
+
 def test_from_stage_copy_is_not_host_package(graph, tmp_path):
     """A `COPY --from=<stage>` pulls from another stage, not the host context -- it must NOT create a
     PACKAGES edge to host files (only a COPIES_FROM stage edge, asserted in the producer tests)."""

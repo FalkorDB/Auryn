@@ -60,8 +60,12 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
     for path, blob_sha in sorted(seen.items()):
         try:
             files.append((path, parse_source(source.read_blob(blob_sha))))
-        except Exception:  # a single malformed Dockerfile never fails the whole ingest
-            logger.warning("failed to parse Dockerfile %s", path, exc_info=True)
+        except Exception:
+            # A single malformed Dockerfile never fails the whole ingest. KNOWN LIMITATION (tracked
+            # follow-up): a parse/read failure drops the file from the recomputed target, so this
+            # sync REMOVES its prior nodes -- it does not keep last-good like the tree-sitter
+            # ingestors' `broken_files` path. Adopting that keep-last-good behavior here is deferred.
+            logger.warning("failed to parse Dockerfile %s (its graph nodes are removed this sync)", path, exc_info=True)
 
     project_node = GraphNode(
         "Project", {"id": proj_id},

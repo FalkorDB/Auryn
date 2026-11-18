@@ -78,9 +78,15 @@ identically).** A Dockerfile `FROM python:3.12-slim`, a Compose `image: python:3
 - Lowercase registry + repository (they are case-insensitive); the tag is case-*sensitive*.
 - Prefer `@<digest>` over `:<tag>` when a digest is present (it is the stronger identity).
 - `${VAR}`/`$(…)` interpolations that can't be statically resolved key a `resolved:false` `Image`
-  with the raw unexpanded ref kept in a property, so a later pass (compose that substitutes the var)
-  can heal it. Normalization lives in **one** shared helper (`core.image_ref`), imported by every
-  producer — never re-implemented per ingestor.
+  from the raw text (case-preserved, so the variable name round-trips) with that raw ref kept in a
+  property. Note a variable placeholder and the concrete image it later expands to are **different
+  `image://` ids** — keeping the raw ref does not auto-merge them; a producer that CAN expand the var
+  (Compose/CI, which knows the build args) emits the concrete id, and the raw placeholder is GC'd once
+  nothing references it. Within-Dockerfile `ARG` defaults are expanded at parse time; an empty/missing
+  `ARG` or a `${VAR:-default}` modifier form is left unresolved rather than half-substituted.
+- Normalization lives in **one** shared helper, imported by every producer — never re-implemented per
+  ingestor. *(Transitional: the first producer keeps it in `auryn.ingestors.docker.image_ref`; it
+  moves to `auryn.core.image_ref` when the second producer lands — §7.)*
 
 ### 3. Edge types
 
@@ -96,7 +102,7 @@ identically).** A Dockerfile `FROM python:3.12-slim`, a Compose `image: python:3
 | `DEPLOYS` | `Resource`(release)/ci-job → `Service`/`Resource` | Helm release / CI deploy step |
 | `STORED_IN` | `Image` → `Registry` | where an image is pushed/pulled |
 | `MOUNTS` | `Service` → `ConfigValue`/`Secret`/`Volume` | config/secret/volume wiring |
-| **`PACKAGES`** | `Image` → `Project`/`File` | **the code seam** (§4) |
+| **`PACKAGES`** | `BuildStage` → `Project`/`File` | **the code seam** (§4); from the `BuildStage` pre-publish (no image ref yet), mirrored onto the `Image` once a tag exists |
 | **`SERVES`** | `Service` → `APIEndpoint` | **the HTTP seam** (§4); route-keyed, joins the *same* node as ADR 0006 |
 | `CONNECTS_TO` | `Service` → `Database`/`Table` | **the ORM seam** (§4), from a connection-string `ConfigValue` |
 | **`SHIPS`** | `Service` → `Project`/`File` | **derived collapse edge** (§5) |
@@ -142,10 +148,12 @@ instead of a `linkage_key`:
 - `resolved` is a pure function of the graph: `true` iff some `BUILDS_IMAGE` points at the image
   (an internally-built image) — recomputed by the stitch, independent of ingest order and of which
   side wrote the node.
-- **GC.** An `image://…` node left with neither a builder (`BUILDS_IMAGE`) nor a runner
-  (`RUNS_IMAGE`) is the residue of a removed Dockerfile or manifest; the stitch deletes it, scoped to
-  the `image://` prefix so it never touches a project-owned node — the same shared-node lifecycle
-  `APIEndpoint` has (ADR 0006).
+- **GC.** An `image://…` node left with **no inbound reference of any kind** — no base (`BASED_ON`),
+  no stage copy (`COPIES_FROM`), no builder (`BUILDS_IMAGE`), no runner (`RUNS_IMAGE`) — is the
+  residue of a removed Dockerfile or manifest; the stitch deletes it (predicate + delete in one
+  query), scoped to the `image://` prefix so it never touches a project-owned node — the same
+  shared-node lifecycle `APIEndpoint` has (ADR 0006). An external base like `python:3.12-slim` keeps
+  its `BASED_ON` referrers, so it is **not** an orphan while any Dockerfile still builds `FROM` it.
 
 **v1 keeps Port/Volume as edge properties**, not nodes (ingestor principle: *invent no node a query
 doesn't need*). They are promoted to first-class nodes only when a seam needs to point *at* one.
@@ -207,7 +215,7 @@ rules as the code graph:
 
 | Ingestor | Emits (nodes) | Emits (intra-file edges) | Stitch arm adds |
 |---|---|---|---|
-| **docker** | `BuildStage`, placeholder `Image` (bases) | `HAS_STAGE`, `BASED_ON`, `COPIES_FROM` | `BUILDS_IMAGE`, `PACKAGES` (context+COPY → Project/File) |
+| **docker** | `BuildStage`, placeholder `Image` (bases) | `HAS_STAGE`, `BASED_ON`, `COPIES_FROM` | `PACKAGES` (context+COPY → Project/File). *Not `BUILDS_IMAGE`*: a Dockerfile doesn't name the image it produces — the tag comes from Compose `build:`/`image:` or CI `-t`, so that edge is the Compose/CI arm's (keyed by the normalized ref, matched to the `BuildStage` by build context). |
 | **compose** | `Service`, `Image` (from `image:`) | `DEPENDS_ON`, `MOUNTS`, `RUNS_IMAGE` | resolve `build:` → the Dockerfile `BuildStage` (`BUILDS_IMAGE`); DB service → `CONNECTS_TO` |
 | **k8s** | `Service`, `ConfigValue`/`Secret`, `Image` | `RUNS_IMAGE`, `MOUNTS`, label-selector `DEPENDS_ON` | Ingress route → `SERVES` APIEndpoint; connection string → `CONNECTS_TO` |
 | **helm** | `Resource`(release), `Service`, `ConfigValue` | `DEPENDS_ON` (chart deps), `RUNS_IMAGE` (values image) | optional `helm template` → k8s arm |

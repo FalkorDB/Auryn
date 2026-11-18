@@ -19,6 +19,7 @@ producers -- their clears are already wired here so they compose into this one p
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import posixpath
 
@@ -133,20 +134,22 @@ def _target_path(context: str, src: str) -> str:
         return context
     # Docker resolves COPY sources from the build-context ROOT: a leading `/` is dropped (not an
     # absolute host path), so `COPY /app` means `<context>/app`. Without stripping it, the joined
-    # target stays absolute and never matches a repo-relative code path.
+    # target stays absolute and never matches a repo-relative code path. A glob is kept VERBATIM (not
+    # reduced to its dir) so `_path_under` matches the pattern, not every sibling.
     src = src.lstrip("/").rstrip("/")
-    if any(ch in src for ch in _GLOB_CHARS):
-        src = posixpath.dirname(src)
     joined = posixpath.join(context, src) if context else src
     norm = posixpath.normpath(joined) if joined else ""
     return "" if norm == "." else norm
 
 
 def _path_under(path: str, target: str) -> bool:
-    """A code file `path` is packaged by a copy resolving to `target` iff it IS that file or lives
-    under that directory. `target == ""` is the whole repo root (a `COPY .` from a root context)."""
+    """A code file `path` is packaged by a copy resolving to `target` iff: the target is the whole
+    context root (`""`); the target is a glob and the path matches it (`COPY src/*.py` links only the
+    .py files, not `src/README`); or the path IS that file or lives under that directory."""
     if target == "":
         return True
+    if any(ch in target for ch in _GLOB_CHARS):
+        return fnmatch.fnmatchcase(path, target)
     return path == target or path.startswith(target + "/")
 
 
@@ -166,10 +169,13 @@ def _gc_orphan_images(writer: GraphWriter) -> int:
     builder (`BUILDS_IMAGE`), a runner (`RUNS_IMAGE`), nor a stage copy (`COPIES_FROM`). These are the
     residue of a removed Dockerfile/manifest; the `image://` node lives outside any project prefix, so
     a project resync can't reclaim it -- this does (the shared-node lifecycle, ADR 0007 §6)."""
-    orphans = writer.ro_query(
+    # Predicate test AND delete in ONE write query: a separate check-then-delete could DETACH DELETE
+    # an image a concurrent ingest referenced in between (the delete rechecked only ids, not the
+    # orphan predicate). One query closes that TOCTOU -- same pattern as the http stitch's orphan GC.
+    res = writer.query(
         "MATCH (i:Image) WHERE NOT ()-[:BASED_ON]->(i) AND NOT ()-[:BUILDS_IMAGE]->(i) "
-        "AND NOT ()-[:RUNS_IMAGE]->(i) AND NOT ()-[:COPIES_FROM]->(i) RETURN i.id"
-    ).result_set
-    if orphans:
-        writer.query("MATCH (i:Image) WHERE i.id IN $ids DETACH DELETE i", {"ids": [r[0] for r in orphans]})
-    return len(orphans)
+        "AND NOT ()-[:RUNS_IMAGE]->(i) AND NOT ()-[:COPIES_FROM]->(i) "
+        "WITH i, i.id AS gone DETACH DELETE i RETURN count(gone)"
+    )
+    rows = res.result_set
+    return int(rows[0][0]) if rows and rows[0][0] else 0
