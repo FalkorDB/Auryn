@@ -2,6 +2,7 @@
 name = "auryn-compose"
 version = "0.1.0"
 description = "Docker Compose plugin for Auryn and the second producer of the deployment & infrastructure tier (ADR 0007). Parses docker-compose files into Service nodes (RUNS_IMAGE the shared Image hub, DEPENDS_ON other services), and a `deploy-compose` enrichment hook that closes the build->run loop: it resolves each service's `build:` to the Dockerfile's final BuildStage and links BUILDS_IMAGE, flipping that image to resolved/internal. Composes with auryn-docker onto the same image-keyed hub. Depends only on auryn-core."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }
