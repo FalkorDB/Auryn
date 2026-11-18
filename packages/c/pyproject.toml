@@ -2,6 +2,7 @@
 name = "auryn-c"
 dynamic = ["version"]
 description = "C language plugin for Auryn: fast tree-sitter-c engine (functions/structs/unions/enums/typedefs/globals/macros/#includes/calls, no build config). A deep libclang engine (resolved types, header<->.c linking, cross-TU calls) is the planned second phase."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }

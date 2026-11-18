@@ -2,6 +2,7 @@
 name = "auryn-csharp"
 dynamic = ["version"]
 description = "C# language plugin for Auryn: fast tree-sitter parse + deep Roslyn extractor (bundled source, built on demand; requires the .NET SDK)."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }

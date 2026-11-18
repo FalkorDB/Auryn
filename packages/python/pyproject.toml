@@ -2,6 +2,7 @@
 name = "auryn-python"
 dynamic = ["version"]
 description = "Python language plugin for Auryn: fast `ast` + deep Jedi (in-process) engines, plus the web-framework route enrichment."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }

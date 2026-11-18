@@ -2,6 +2,7 @@
 name = "auryn-sql"
 dynamic = ["version"]
 description = "Generic relational-database schema ingestor for Auryn: reflects any SQLAlchemy-supported engine (PostgreSQL, MySQL/MariaDB, SQLite, Oracle, ...) into Database/Schema/Table/Column/View/Sequence/Index/Constraint nodes plus foreign-key edges, via SQLAlchemy's dialect-agnostic Inspector. Dialect-specific DBAPI drivers are optional extras, auto-installed on demand."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }
