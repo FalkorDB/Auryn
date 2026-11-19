@@ -391,6 +391,7 @@ def _emit_class(cls: RawClass, scope_id: str, scope_dotted: str, container_id: s
             "doc": cls.doc,
             "line_start": cls.line_start,
             "line_end": cls.line_end,
+            "file_path": ctx.module_path,
         },
     )
     yield GraphEdge(container_rel, container_label, {"id": container_id}, "Class", {"id": cls_id})
@@ -433,7 +434,12 @@ def _resolve_scope_calls(
     call texts (jedi engine only, for the node's `unresolved_calls` property). Shared by
     `_emit_function` and `_emit_module` so a top-level call and a function-body call resolve
     identically; only the caller node (`caller_label`/`caller_id`) differs."""
-    call_edges: list[GraphEdge] = []
+    # One CALLS edge per (caller, target) -- the graph MERGEs on that pair anyway -- carrying every
+    # call-site line in `lines` (sorted, unique, capped at _MAX_CALL_LINES) so a who_calls/callees
+    # answer can cite file:line without the agent grepping for it. Insertion order is kept (first
+    # call to a target decides its position); the props of the LAST call to a target win, matching
+    # the MERGE last-write behaviour of emitting one edge per call.
+    by_target: dict[tuple[str, str], tuple[dict, set[int]]] = {}
     external_nodes: list[GraphNode] = []
     unresolved_calls: list[str] = []
     for call in calls:
@@ -447,20 +453,27 @@ def _resolve_scope_calls(
             if eid not in ctx.idx.emitted_externs:
                 ctx.idx.emitted_externs.add(eid)
                 external_nodes.append(_external_symbol_node(res))
-            call_edges.append(
-                GraphEdge(
-                    "CALLS", caller_label, {"id": caller_id}, res.label, {"id": eid},
-                    {"resolution": "external", "receiver_type": None, "argument_types": [], "type_arguments": []},
-                )
-            )
-            continue
-        call_edges.append(
-            GraphEdge(
-                "CALLS", caller_label, {"id": caller_id}, res.label, {"id": res.id},
-                {"resolution": res.resolution, "receiver_type": res.receiver_type, "argument_types": [], "type_arguments": []},
-            )
-        )
+            target = (res.label, eid)
+            props = {"resolution": "external", "receiver_type": None, "argument_types": [], "type_arguments": []}
+        else:
+            target = (res.label, res.id)
+            props = {"resolution": res.resolution, "receiver_type": res.receiver_type,
+                     "argument_types": [], "type_arguments": []}
+        _, lines = by_target.get(target, (None, set()))
+        if isinstance(call.line, int):
+            lines.add(call.line)
+        by_target[target] = (props, lines)
+    call_edges = [
+        GraphEdge("CALLS", caller_label, {"id": caller_id}, to_label, {"id": to_id},
+                  {**props, "lines": sorted(lines)[:_MAX_CALL_LINES]})
+        for (to_label, to_id), (props, lines) in by_target.items()
+    ]
     return call_edges, external_nodes, unresolved_calls
+
+
+# Cap on call-site lines stored per CALLS edge: enough to cite every site of a normal call
+# relationship, bounded so a generated/huge function can't bloat one edge.
+_MAX_CALL_LINES = 20
 
 
 def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotted: str, container_rel: str, container_id: str, container_label: str, ctx: _ModCtx) -> Iterator[GraphNode | GraphEdge]:
@@ -490,6 +503,7 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
         "doc": fn.doc,
         "line_start": fn.line_start,
         "line_end": fn.line_end,
+        "file_path": ctx.module_path,
     }
     if is_method:
         props.update(kind=_method_kind(fn), is_abstract=_method_is_abstract(fn), overrides=None)
