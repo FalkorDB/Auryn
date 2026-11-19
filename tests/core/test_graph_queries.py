@@ -427,6 +427,60 @@ class TestCallersCalleesEdges:
         assert (edge["from"], edge["to"], edge["resolution"]) == ("x", "y", "inferred")
 
 
+class TestCompactTraversalResponses:
+    """The traversal tools (who_calls/callees/impact_of/find_path) must NOT echo the full
+    `source` of the node the caller already identified by id, nor the full per-edge property
+    bag -- that echo, repeated across a multi-call investigation, was the single largest
+    avoidable token cost. get_context(id) remains the full-source escape hatch."""
+
+    def test_center_echo_omits_source(self, graph):
+        graph.query(
+            "CREATE (x:Function {id:'x', name:'charge', source:'def charge(): ...body...'})"
+            "-[:CALLS]->(y:Function {id:'y', name:'authorize', source:'def authorize(): ...'})"
+        )
+        for res in (
+            gq.callers(graph, "y"),
+            gq.callees(graph, "x"),
+            gq.impact_of(graph, "x", direction="downstream"),
+        ):
+            assert res["center"]["name"]  # still self-describing (id/name/label kept)
+            assert "source" not in res["center"]["properties"]
+        # get_context (neighbors) is the detail tool -- it DOES keep the center source.
+        assert gq.neighbors(graph, "x")["center"]["properties"].get("source")
+
+    def test_find_path_endpoints_omit_source(self, graph):
+        graph.query(
+            "CREATE (x:Function {id:'x', source:'...body...'})-[:CALLS]->(y:Function {id:'y', source:'...'})"
+        )
+        res = gq.shortest_path(graph, "x", "y")
+        assert res["found"]
+        assert "source" not in res["from"]["properties"] and "source" not in res["to"]["properties"]
+
+    def test_traversal_list_nodes_drop_duplication_and_internal_keys(self, graph):
+        graph.query(
+            "CREATE (a:Function {id:'a', name:'a', qualified_name:'m.a', linkage_key:'extern://a', "
+            "signature:'a()', is_async:false, decorators:[], line_start:1})"
+            "-[:CALLS]->(b:Function {id:'b', name:'b'})"
+        )
+        node = gq.callers(graph, "b", max_depth=1)["nodes"][0]
+        assert node["id"] == "a" and node["name"] == "a"            # top-level identity preserved
+        p = node["properties"]
+        assert "id" not in p and "name" not in p                    # the top-level duplication is gone
+        assert "linkage_key" not in p and "qualified_name" not in p  # internal / redundant dropped
+        assert "is_async" not in p and "decorators" not in p        # empty / low-value dropped
+        assert p.get("signature") == "a()" and p.get("line_start") == 1  # locating props survive
+
+    def test_lean_edges_drop_the_full_property_bag(self, graph):
+        graph.query(
+            "CREATE (x:Function {id:'x'})-[:CALLS {resolution:'resolved', via:'http', "
+            "argument_types:['int','str'], type_arguments:['T']}]->(y:Function {id:'y'})"
+        )
+        edge = gq.callees(graph, "x", max_depth=1)["edges"][0]
+        assert (edge["from"], edge["to"], edge["type"]) == ("x", "y", "CALLS")
+        assert edge["resolution"] == "resolved" and edge["via"] == "http"
+        assert "properties" not in edge  # the full bag (argument_types/type_arguments) is gone
+
+
 class TestTraceCrossesHttpSeam:
     """trace_entrypoint's closure follows CALLS AND transitively crosses the HTTP seam
     (caller -[:CALLS_API]-> APIEndpoint <-[:EXPOSES_ENDPOINT]- handler), so 'what does this

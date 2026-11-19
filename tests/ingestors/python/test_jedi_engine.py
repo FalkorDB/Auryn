@@ -152,7 +152,7 @@ def test_instantiation_resolves_to_constructor(tmp_path):
     assert "python://demo/module/app.func.boot()" in froms  # in-function `Service()`
     assert all(e.properties["receiver_type"] == "Service" for e in ctor)
 
-    # Bare has no __init__ -> no constructor edge anywhere
+    # Bare has no __init__ -> no edge to a __init__ METHOD (it now edges to the Class node instead, #785)
     assert not any(str(e.to_key["id"]).endswith("bare.method.__init__()") for e in _edges_of(items, "CALLS"))
 
 
@@ -309,3 +309,14 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
     top_level = {str(e.to_key["id"]) for e in _edges_of(items, "CALLS")
                  if e.from_key["id"] == "python://demo/module/tests.test_core"}
     assert [callee.rsplit("::", 1)[-1] for callee in top_level] == ["object"]  # `object()`, nothing else
+
+
+def test_collect_queries_includes_module_scope_calls():
+    # a top-level (module-scope) call -- e.g. a module-level lambda's body -- must be in the jedi query
+    # set, else the precomputed oracle returns no target for it during deep ingestion (#785 review)
+    from auryn.ingestors.python.jedi_engine import _collect_queries
+
+    m = parse_module(b"def helper():\n    return 1\n\nx = helper()\n", "m.py")
+    assert m.calls  # the parser captured the module-scope call
+    _types, call_positions = _collect_queries(m)
+    assert (m.calls[0].line, m.calls[0].col) in call_positions

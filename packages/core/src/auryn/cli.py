@@ -149,7 +149,10 @@ def mcp_serve(
     from auryn.mcp.server import create_server
 
     config = _resolve_connection(host, port, username, password, ssl)
-    server = create_server(connect_client(config), graph_name or default_graph_name())
+    # An explicit --host is an ad-hoc connection the background embed daemon (which reconnects via
+    # the configured backend) might not match, so force inline embedding for this server's ingests.
+    server = create_server(connect_client(config), graph_name or default_graph_name(),
+                           embed=("inline" if host else None))
     server.run("stdio")
 
 
@@ -163,10 +166,6 @@ def mcp_serve(
 @click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
 @click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
 @click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
-@click.option("--auto/--no-auto", "auto_opt", default=None,
-              help="Persist the install-wide auto-embed setting (~/.auryn/config.toml): with --auto, "
-                   "every future ingest/resync builds & refreshes the vector index automatically. "
-                   "Sticks across shells/venvs/MCP restarts. Without it, just embeds now.")
 def embed(
     graph_name: str | None,
     model: str | None,
@@ -176,36 +175,48 @@ def embed(
     username: str | None,
     password: str | None,
     ssl: bool,
-    auto_opt: bool | None,
 ) -> None:
-    """Compute vector embeddings for a graph's callables/types/files, then build the vector index
-    -- what powers the MCP `search_code` (semantic) tool. Idempotent: only nodes without an
-    embedding are processed, so re-running after an incremental resync embeds just the changed
-    ones. Pass --reembed to rebuild everything (e.g. after --model changes -- the index is
-    fixed-dimension). Pass --auto to also flip on install-wide auto-embed so every future ingest
-    stays indexed without the AURYN_EMBED env var. The local embedding model is auto-installed on
-    first use (opt-out; AURYN_AUTO_INSTALL=0 to disable). See auryn/core/embeddings/."""
+    """Compute vector embeddings for a graph's callables/types/files now, then build the vector
+    index -- what powers the MCP `search_code` (semantic) tool. Embeddings are built automatically
+    in the background on every ingest, so this is only for forcing a build on demand (e.g. after an
+    offline ingest, or `--reembed` to rebuild the whole graph after a `--model` change -- the index
+    is fixed-dimension). Idempotent: only nodes without an embedding are processed. The local
+    embedding model is auto-installed on first use (opt-out; AURYN_AUTO_INSTALL=0). See
+    auryn/core/embeddings/."""
     from auryn.core.embeddings import get_embedder
     from auryn.core.embeddings.worker import embed_graph, reembed_all
     from auryn.core.project import default_graph_name
-
-    if auto_opt is not None:
-        from auryn.core.app_config import set_auto_embed
-
-        set_auto_embed(auto_opt)
-        click.echo(
-            "Auto-embed: on — every future ingest builds/refreshes the vector index automatically"
-            if auto_opt else "Auto-embed: off"
-        )
 
     config = _resolve_connection(host, port, username, password, ssl)
     graph = connect_client(config).select_graph(graph_name or default_graph_name())
     run = reembed_all if reembed else embed_graph
     stats = run(GraphWriter(graph), get_embedder(model))
+    # `index_ready` is False both when nothing was embedded (the index wasn't touched) and when the
+    # build couldn't be confirmed (it outlasted the wait, or its state can't be read -- see
+    # GraphWriter.await_indexes). `--reembed` DROPS the index up front, so "unchanged" would be wrong
+    # even with zero embeds -- the index is gone until a later run rebuilds it.
+    if reembed and not stats.embedded:
+        index = "reset -- dropped, and no nodes to rebuild it from"
+    elif not stats.embedded:
+        index = "unchanged"
+    elif stats.index_ready:
+        index = "ready"
+    else:
+        index = "not ready yet -- searches may return nothing until it is"
     click.echo(
         f"Embedded {stats.embedded} node(s) ({stats.scanned} scanned) with {stats.model_id} "
-        f"(dim={stats.dim}); vector index {'ready' if stats.index_ready else 'unchanged'}."
+        f"(dim={stats.dim}); vector index {index}."
     )
+
+
+@cli.command("embed-daemon", hidden=True)
+def embed_daemon() -> None:
+    """Internal: the background embedding worker. Normally spawned detached by an ingest whose
+    embed mode is `background` (see embeddings.daemon); it drains the request queue, embedding each
+    graph's pending vectors, and self-terminates once the queue goes idle. Run directly to debug."""
+    from auryn.core.embeddings.daemon import run_embed_daemon
+
+    run_embed_daemon()
 
 
 def _render_impact(report: dict) -> None:
@@ -361,35 +372,25 @@ def _prompt_backend(backend, host, port, username, password, ssl, assume_yes):
 @click.option("--ssl", is_flag=True, default=False, help="Connect to the remote FalkorDB over TLS.")
 @click.option("--trigger", type=click.Choice(["manual", "commit", "save"]), default=None,
               help="How the graph is kept fresh after an edit. Prompted for if omitted (default: commit).")
-@click.option("--embed/--no-embed", "embed_opt", default=None,
-              help="Automatically build & refresh semantic embeddings on every ingest (persisted in "
-                   "~/.auryn/config.toml, so it sticks across shells/venvs/MCP restarts). Prompted for "
-                   "if omitted (default: no).")
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="Non-interactive: auto-select the backend (local unless --backend is given) and skip all prompts.")
-def install(backend, host, port, username, password, ssl, trigger, embed_opt, yes) -> None:
+def install(backend, host, port, username, password, ssl, trigger, yes) -> None:
     """Set up Auryn on this machine: choose a FalkorDB backend and register the MCP server
     with every detected agent (Claude Code, OpenAI Codex, Antigravity, GitHub Copilot, Cursor,
     Windsurf, Gemini CLI), user-scoped. Writes only to ~/.auryn and the agent's own config —
     never your repo. Re-runnable."""
-    from auryn.core.app_config import set_auto_embed, set_resync_trigger
+    from auryn.core.app_config import set_resync_trigger
     from auryn.core.install import default_server_command, do_install
 
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
     if trigger is None:
         trigger = "commit" if yes else click.prompt(
             "Keep the graph fresh on", type=click.Choice(["commit", "save", "manual"]), default="commit")
-    if embed_opt is None:
-        embed_opt = False if yes else click.confirm(
-            "Build semantic embeddings automatically on every ingest?", default=False)
     config = do_install(chosen)
     set_resync_trigger(trigger)
-    set_auto_embed(embed_opt)
-    click.echo(
-        "Auto-embed: on — every ingest builds/refreshes the semantic vector index"
-        if embed_opt else
-        "Auto-embed: off (enable later with `auryn install --embed` or `auryn embed --auto`)"
-    )
+    # Semantic embeddings are always on (built in the background, off the ingest critical path) --
+    # no install choice for it.
+    click.echo("Semantic embeddings: on (built in the background on every ingest)")
     click.echo(f"Resync trigger: {trigger}"
                + {"commit": " (a git hook resyncs on each commit)",
                   "save": " (a watcher resyncs on save)",
@@ -595,8 +596,11 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
     graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
     project = reg.project_name if reg else None
     config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
+    # An explicit --host is an ad-hoc connection the background daemon (which reconnects via the
+    # configured backend) might not match, so embed inline there; otherwise let it resolve to the
+    # default (background).
     report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
-                              deep=deep, auto_install=False)
+                              deep=deep, auto_install=False, embed=("inline" if host else None))
     _echo_ingest_report(report)
 
 
@@ -914,6 +918,8 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
     try:
         report = ingest.ingest_directory(
             writer, path, project_name=project_name, solution_name=solution_name, deep=deep,
+            # Explicit --host is an ad-hoc connection the background daemon may not match -> inline.
+            embed=("inline" if ctx.obj.get("host") else None),
             include_dirs=include_dirs, exclude_dirs=exclude_dirs,
             include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
             enrichment_only=only_hooks, enrichment_skip=skip_hooks,
@@ -973,7 +979,8 @@ def ingest_repo(
         graph = ctx.obj["graph_name"] or default_graph_name(dest)
         writer = _ingest_writer(ctx, graph)
         report = ingest.ingest_directory(writer, str(dest), project_name=project_name,
-                                         solution_name=solution_name, deep=deep, **_filters)
+                                         solution_name=solution_name, deep=deep,
+                                         embed=("inline" if ctx.obj.get("host") else None), **_filters)
         _echo_ingest_report(report)
         _wire_trigger(str(dest.resolve()), graph, project_name, trigger or load_config().resync_trigger)
         return
@@ -983,7 +990,8 @@ def ingest_repo(
     writer = _ingest_writer(ctx, graph)
     try:
         report = ingest.ingest_repository(
-            writer, repo_uri, ref=ref, project_name=project_name, solution_name=solution_name, deep=deep, **_filters
+            writer, repo_uri, ref=ref, project_name=project_name, solution_name=solution_name, deep=deep,
+            embed=("inline" if ctx.obj.get("host") else None), **_filters
         )
     except (ValueError, git.GitCommandError) as e:  # bad ref / unreachable repo -> clean CLI error
         raise click.ClickException(str(e)) from e
@@ -1063,6 +1071,9 @@ def quickstart(path: str | None, db_path: str | None, graph_name: str, project_n
     try:
         report = ingest.ingest_directory(
             writer, str(root), project_name=project_name, deep=deep,
+            # Serverless/embedded DB lives in THIS process -- a detached daemon couldn't reach it,
+            # so embed inline here rather than enqueuing a background job that would find nothing.
+            embed="inline",
             include_dirs=include_dirs, exclude_dirs=exclude_dirs,
             include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
         )

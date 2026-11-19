@@ -2,9 +2,10 @@
 name = "auryn-julia"
 version = "0.1.0"
 description = "Julia language plugin for Auryn: a fast tree-sitter-julia engine extracting modules/structs/abstract+primitive types/generic functions/methods/fields/params, the subtype hierarchy (EXTENDS), multiple-dispatch (DISPATCHES_ON), and calls. A deep pass (Julia's own type inference for precise method resolution) is the planned second phase."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     "tree-sitter>=0.26.0",

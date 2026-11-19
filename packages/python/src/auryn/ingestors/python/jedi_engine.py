@@ -131,6 +131,8 @@ def _collect_queries(module: RawModule) -> tuple[list[tuple[int, int]], list[tup
                 type_positions.append((p.name_line, p.name_col))
         for c in fn.calls:
             call_positions.append((c.line, c.col))
+        for nested in fn.nested:  # nested defs are their own nodes -- query Jedi at their positions too
+            do_func(nested)
 
     def do_class(cls) -> None:
         for a in cls.class_attrs:
@@ -148,6 +150,8 @@ def _collect_queries(module: RawModule) -> tuple[list[tuple[int, int]], list[tup
         do_func(fn)
     for cls in module.classes:
         do_class(cls)
+    for c in module.calls:  # module-scope (top-level) calls -- resolved like a function body (#785)
+        call_positions.append((c.line, c.col))
     return type_positions, call_positions
 
 

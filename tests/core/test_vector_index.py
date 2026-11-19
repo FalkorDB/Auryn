@@ -39,8 +39,8 @@ def test_write_and_search_spans_kinds(writer):
     writer.create_vector_index(writer.SHARED_EMBEDDING_LABEL, writer.EMBEDDING_PROPERTY, dim=3)
     writer.write_embeddings(
         [
-            ("Function", "f1", [1.0, 0.0, 0.0]),
-            ("Class", "c1", [0.0, 1.0, 0.0]),
+            ("Function", "f1", [1.0, 0.0, 0.0], None),
+            ("Class", "c1", [0.0, 1.0, 0.0], None),
         ]
     )
     hits = writer.knn_search([1.0, 0.0, 0.0], 5, return_properties=("name",))
@@ -60,7 +60,7 @@ def test_create_vector_index_is_idempotent(writer):
 def test_clear_embeddings_removes_from_index(writer):
     _seed(writer)
     writer.create_vector_index(writer.SHARED_EMBEDDING_LABEL, writer.EMBEDDING_PROPERTY, dim=3)
-    writer.write_embeddings([("Function", "f1", [1.0, 0.0, 0.0])])
+    writer.write_embeddings([("Function", "f1", [1.0, 0.0, 0.0], None)])
     assert [h["id"] for h in writer.knn_search([1.0, 0.0, 0.0], 5)] == ["f1"]
     writer.clear_embeddings([("Function", "f1")])
     assert writer.knn_search([1.0, 0.0, 0.0], 5) == []
@@ -72,7 +72,23 @@ def test_clear_embeddings_removes_from_index(writer):
 def test_drop_vector_index_then_search_degrades(writer):
     _seed(writer)
     writer.create_vector_index(writer.SHARED_EMBEDDING_LABEL, writer.EMBEDDING_PROPERTY, dim=3)
-    writer.write_embeddings([("Function", "f1", [1.0, 0.0, 0.0])])
+    writer.write_embeddings([("Function", "f1", [1.0, 0.0, 0.0], None)])
     writer.drop_vector_index(writer.SHARED_EMBEDDING_LABEL, writer.EMBEDDING_PROPERTY)
     assert writer.knn_search([1.0, 0.0, 0.0], 5) == []
     writer.drop_vector_index(writer.SHARED_EMBEDDING_LABEL, writer.EMBEDDING_PROPERTY)  # idempotent
+
+
+def test_write_embeddings_skips_when_fingerprint_changed(writer):
+    """The `_fingerprint` guard: a vector built against now-stale content (the node changed and a
+    resync re-fingerprinted it) is dropped rather than marking the node done -- so a concurrent
+    background embed can't resurrect a stale vector the resync just invalidated."""
+    writer.query("CREATE (:Function {id:'f1', name:'connect', _fingerprint:'fp-new'})")
+    writer.create_vector_index(writer.SHARED_EMBEDDING_LABEL, writer.EMBEDDING_PROPERTY, dim=3)
+
+    # Vector computed against the OLD content (fp-old); the node now carries fp-new -> not written.
+    writer.write_embeddings([("Function", "f1", [1.0, 0.0, 0.0], "fp-old")])
+    assert writer.knn_search([1.0, 0.0, 0.0], 5) == []
+
+    # The matching fingerprint writes normally.
+    writer.write_embeddings([("Function", "f1", [1.0, 0.0, 0.0], "fp-new")])
+    assert [h["id"] for h in writer.knn_search([1.0, 0.0, 0.0], 5)] == ["f1"]
