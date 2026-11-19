@@ -148,18 +148,15 @@ _MISSING = object()
 
 
 SYNC_MARKER = "commit_sha"
-"""The property a sync short-circuits on: every engine opens with "is the Project node already at
-`target_sha`?" and returns at once if so. So while a sync is changing the graph the node carrying
-it must claim NO commit: the stamp is cleared before the first mutation and written LAST. Stamped
-first (it used to be the first item merged), a sync that died mid-apply left a half-written graph
-that every later sync took for current; and merely keeping the OLD stamp until the end would let
-a sync back to that commit short-circuit over the same half-written graph. With no stamp the next
-sync -- to any commit -- recomputes in full against what the graph actually holds."""
+"""The property a sync short-circuits on ("is the Project node already at `target_sha`?"). It is
+cleared before a sync's first mutation and written LAST -- a sync that dies mid-apply leaves no
+stamp, so the next one, to any commit, recomputes in full rather than short-circuiting."""
 
 
 def unstamped(node: GraphNode) -> GraphNode:
-    """`node` with its SYNC_MARKER cleared (a None value removes the property): written before
-    anything else changes -- it also brings a brand-new Project node into existence for its edges."""
+    """A copy of `node` with its SYNC_MARKER cleared (a None value removes the property): written
+    before anything else changes -- it also brings a brand-new Project node into existence for its
+    edges."""
     return GraphNode(node.label, node.key, {**node.properties, SYNC_MARKER: None})
 
 

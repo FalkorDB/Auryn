@@ -1,11 +1,11 @@
 """One resync per repo at a time (ADR 0003: "a per-repo lock in `run/`").
 
-Every git hook fires `auryn sync <repo> &`, so a rebase or a burst of commits starts many at
-once -- 17 from one 15-commit rebase. Unserialized they interleave their reads and writes of the
-same project's subgraph and leave it wrong (2 of 31 functions) while the last one to finish
-reports it current. `sync_lock` makes them take turns, and sends all but ONE waiter home: a sync
-that starts after the one in progress reads the working tree as it is then, so a single queued
-sync already covers every trigger that arrived in the meantime.
+Every git hook fires `auryn sync <repo> &`, so a burst of commits starts many at once.
+Unserialized they interleave their reads and writes of the same project's subgraph and leave it
+wrong while the last one to finish reports it current. `sync_lock` makes them take turns, and
+sends all but ONE waiter home: a sync that starts after the one in progress reads the working
+tree as it is then, so a single queued sync already covers every trigger that arrived in the
+meantime.
 
 `auryn ingest dir` and the MCP `index_repository` tool write the same subgraph, so they take
 their turn under this lock too (`queue_one=False`). `auryn ingest repo` (a ref, read through the
@@ -32,8 +32,9 @@ logger = logging.getLogger(__name__)
 
 @contextlib.contextmanager
 def sync_lock(local_dir: Path, *, queue_one: bool = True) -> Iterator[bool]:
-    """Yields True once it is this sync's turn for `local_dir` (blocking while another runs), or
-    False straight away when a sync of it is already waiting its turn -- this one is redundant.
+    """Serialize the syncs of `local_dir`: yield True once it is this sync's turn (blocking while
+    another runs), or False straight away when one is already waiting its turn -- this one is
+    redundant.
 
     `queue_one=False` is for a sync the queued one would NOT cover -- it asks for a deep pass,
     targets another server, or is an explicit ingest: it never steps aside, it just waits for its
