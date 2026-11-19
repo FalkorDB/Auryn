@@ -283,3 +283,19 @@ def test_emit_streaming_matches_resolve():
     assert any(rel == "CALLS" for (rel, _f, _t, _p) in a_edges)                     # self.greet()/s.run()
     assert any(rel in ("INHERITS_FROM", "EXTENDS") for (rel, _f, _t, _p) in a_edges)  # Sub(Base) cross-module
     assert plan.broken == []
+
+
+def test_incremental_seeds_class_init_for_constructor_resolution(graph, tmp_path):
+    # #785 review: a constructor call collects only the CLASS name (not "__init__"), so the incremental
+    # symbol seed must still load the class's __init__ -- else the no-local-__init__ class-node fallback
+    # wrongly fires on a resync for a class that DOES define one (full vs incremental divergence).
+    from auryn.ingestors.python import incremental
+
+    (tmp_path / "svc.py").write_text("class Service:\n    def __init__(self):\n        pass\n")
+    (tmp_path / "app.py").write_text("from svc import Service\n\ndef boot():\n    return Service()\n")
+    ingest.ingest_directory(GraphWriter(graph), str(tmp_path), project_name="demo")
+    # a resync of only app.py references the class name 'Service', never '__init__'
+    idx = incremental.read_graph_index(
+        GraphWriter(graph), "python://demo", exclude_keys={"app"}, names={"Service", "boot"}
+    )
+    assert "svc.Service.__init__" in idx.callable_by_qname

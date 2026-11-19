@@ -1,0 +1,12 @@
+# A Helm chart that deploys the SAME shop/api:1.0 the Dockerfile builds and compose/k8s/terraform run
+# -- so the chart's workload RUNS_IMAGE the one shared Image hub. It depends on the `redis` chart
+# (an external dependency -> a placeholder Resource the chart DEPENDS_ON).
+apiVersion: v2
+name: shop
+description: The shop API, packaged as a Helm chart.
+version: 1.0.0
+appVersion: "1.0"
+dependencies:
+  - name: redis
+    version: "17.x"
+    repository: https://charts.bitnami.com/bitnami

@@ -65,9 +65,14 @@ different repos (and two different ingestors) must agree on without coordination
 | `BuildStage` | `docker://<project>/<dockerfile-path>#<stage-name-or-index>` | project |
 | `Service` (compose) | `compose://<project>/<file>/<service>` | project |
 | `Service` (k8s) | `k8s://<project>/<namespace>/<kind>/<name>` | project |
-| `Resource` (terraform) | `tf://<project>/<module>/<type>.<name>` | project |
-| `Resource`/`Service` (helm) | `helm://<project>/<chart>/<template>/<name>` | project |
+| `Resource` (terraform) | `terraform://<project>/<module-dir>/<address>` — `<address>` is the full Terraform address: `<type>.<name>` (resource), `data.<type>.<name>` (data source), or `module.<name>` (module); the root module omits `<module-dir>` | project |
+| `Database` (terraform) | `<resource-id>#database` — the provisioning resource's id plus a `#database` suffix (a Terraform address never contains `#`, so it can't collide with a `Resource`) | **project / producer-scoped** |
+| `Registry` (terraform) | `<resource-id>#registry` — the provisioning resource's id plus a `#registry` suffix | **project / producer-scoped** |
+| `Resource` (helm) | chart: `helm://<project>/<chart-dir>` (`_root` for the repo-root chart); external-dep placeholder: `helm://<project>/_dep/<name>` | project |
+| `Service` (helm) | `helm://<project>/<chart-dir>/<template-path>/<kind>/<name>` (kind + chart-relative template path keep nested/same-name workloads distinct) | project |
 | `ConfigValue` / `Secret` | `<owner-id>/env/<NAME>` | owner-scoped |
+
+Unlike `Image` (the one global join key), the v1 `Database`/`Registry` nodes are **producer-scoped**: their id is derived from the provisioning Terraform resource, so a second producer (a CI pipeline, another IaC tool) referencing the *same* registry or database will NOT converge on the same node. This is deliberate for v1 — Terraform is the only `PROVISIONS` producer, and a producer-neutral key isn't even derivable from Terraform's static config (an ECR registry host embeds the AWS account id, which lives in provider config, not the resource). Cross-producer convergence is a **future** concern: it would re-key these on a normalized identity (registry host + repository; database endpoint/engine) and is tracked with the `rds`→ORM `Database` seam (`CONNECTS_TO`) in the per-source map below.
 
 **Image reference normalization (the whole contract hinges on this — every producer MUST canonicalize
 identically).** A Dockerfile `FROM python:3.12-slim`, a Compose `image: python:3.12-slim`, and a k8s
@@ -95,8 +100,8 @@ identically).** A Dockerfile `FROM python:3.12-slim`, a Compose `image: python:3
 | `BASED_ON` | `BuildStage`/`Image` → base `Image` | the `FROM` chain; carries `resolution` |
 | `COPIES_FROM` | `BuildStage` → `BuildStage` | multi-stage `COPY --from=` |
 | **`BUILDS_IMAGE`** | `BuildStage` → `Image` | the published image a build emits (written by the stitch once a tag is assigned) |
-| **`RUNS_IMAGE`** | `Service` → `Image` | the image a workload runs |
-| `DEPENDS_ON` | `Service` → `Service` | **reuse the contract edge**; compose `depends_on`, k8s/tf refs, Helm chart deps |
+| **`RUNS_IMAGE`** | `Service`/`Resource` → `Image` | the image a workload (or a Terraform resource — ECS task, Cloud Run) runs |
+| `DEPENDS_ON` | `Service`/`Resource` → `Service`/`Resource` | **reuse the contract edge**; compose `depends_on`, Terraform interpolation refs (scoped to the module dir), Helm chart deps |
 | `PROVISIONS` | `Resource` → `Service`/`Image`/`Registry`/`Database` | a Terraform resource creates a runtime thing |
 | `DEPLOYS` | `Resource`(release)/ci-job → `Service`/`Resource` | Helm release / CI deploy step |
 | `STORED_IN` | `Image` → `Registry` | where an image is pushed/pulled |
@@ -218,6 +223,6 @@ rules as the code graph:
 | **docker** | `BuildStage`, placeholder `Image` (bases) | `HAS_STAGE`, `BASED_ON`, `COPIES_FROM` | `PACKAGES` (context+COPY → Project/File). *Not `BUILDS_IMAGE`*: a Dockerfile doesn't name the image it produces — the tag comes from Compose `build:`/`image:` or CI `-t`, so that edge is the Compose/CI arm's (keyed by the normalized ref, matched to the `BuildStage` by build context). |
 | **compose** | `Service`, `Image` (from `image:`) | `DEPENDS_ON`, `MOUNTS`, `RUNS_IMAGE` | resolve `build:` → the Dockerfile `BuildStage` (`BUILDS_IMAGE`); DB service → `CONNECTS_TO` |
 | **k8s** *(v1)* | `Service` (workload), `Ingress`, `Image` | `RUNS_IMAGE`, `HAS_INGRESS` | the backing **workload** `SERVES` the route-keyed `APIEndpoint` and the `Ingress` `ROUTES` to it (backend resolved via the k8s Service **selector**, name-match fallback; `host` on the edges). *Future:* `ConfigValue`/`Secret` + `MOUNTS`, connection string → `CONNECTS_TO`. |
-| **helm** | `Resource`(release), `Service`, `ConfigValue` | `DEPENDS_ON` (chart deps), `RUNS_IMAGE` (values image) | optional `helm template` → k8s arm |
-| **terraform** | `Resource`, `Registry`, `Image` | `DEPENDS_ON`/`PROVISIONS` (HCL refs) | task-def image → `BUILDS_IMAGE`; `rds` → `CONNECTS_TO`; `lambda` src → `PACKAGES`; `lb`/`api_gw` → `SERVES` |
+| **helm** *(v1)* | `Resource` (chart/release), `Service` (workload), `Image` | `HAS_RESOURCE`, `DEPENDS_ON` (chart deps, resolved to an in-repo chart by name else a placeholder), `DEPLOYS` (chart → its workloads), `RUNS_IMAGE` (a workload's image resolved from `values.yaml` → the hub) | the shared `core.deploy` image lifecycle. Render-free — only fully-resolved `{{ .Values.* }}` images are materialized. *Future:* `ConfigValue`/`Secret` from `values.yaml`; an opt-in `helm template` → k8s arm. |
+| **terraform** *(v1)* | `Resource` (resource/module/data, classified), `Database`, `Registry`, `Image` | `HAS_RESOURCE`, `DEPENDS_ON` (HCL interpolation refs), `RUNS_IMAGE` (a container image in a resource → the hub), `PROVISIONS` (`rds`→`Database`, `ecr`→`Registry`) | the shared `core.deploy` image lifecycle. *Future:* `rds`→ the ORM `Database` seam (`CONNECTS_TO`), `lambda` src → `PACKAGES`, `lb`/`api_gw` → `SERVES`. |
 | **ci** (follow-up) | ci-job `Resource`, `Image`, `Registry` | build/push steps | `BUILDS_IMAGE` + `STORED_IN`; deploy step → `DEPLOYS` |

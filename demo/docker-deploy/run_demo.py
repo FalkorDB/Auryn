@@ -143,7 +143,7 @@ def main() -> None:
 
         section("8. CLUSTER  (k8s: workloads run the SAME hub image; Ingress exposes an external route)")
         for kind, name, img in rows(g,
-            "MATCH (s:Service)-[:RUNS_IMAGE]->(i:Image) WHERE s.kind IS NOT NULL "
+            "MATCH (s:Service)-[:RUNS_IMAGE]->(i:Image) WHERE s.namespace IS NOT NULL "  # k8s workloads only (Helm Services carry no namespace -> §10)
             "RETURN s.kind, s.name, i.ref ORDER BY s.name"):
             print(f"  {kind} {name:6}  RUNS  {img}")
         for host, route, svc in rows(g,
@@ -151,7 +151,35 @@ def main() -> None:
             "RETURN ing.host, e.route, s.name ORDER BY e.route"):
             print(f"  https://{host}{route}  -SERVES->  APIEndpoint  (by workload '{svc}')")
 
-        print(f"\n{BAR}\nDone. Inspect it yourself:  uv run auryn view   (graph: {GRAPH})\n{BAR}\n")
+        section("9. CLOUD  (terraform: resources, the dependency graph, and the SAME hub image)")
+        for rtype, name, img in rows(g,
+            "MATCH (r:Resource)-[:RUNS_IMAGE]->(i:Image) RETURN r.rtype, r.name, i.ref ORDER BY r.name"):
+            print(f"  {rtype} {name:6}  RUNS  {img}")
+        for a, b in rows(g, "MATCH (a:Resource)-[:DEPENDS_ON]->(b:Resource) RETURN a.address, b.address"):
+            print(f"  {a}  DEPENDS_ON  {b}")
+        for rtype, name, kind in rows(g,
+            "MATCH (r:Resource)-[:PROVISIONS]->(n) "
+            "RETURN r.rtype, r.name, head([l IN labels(n) WHERE l <> 'Entity']) ORDER BY r.name"):
+            print(f"  {rtype} {name:6}  PROVISIONS  a {kind}")
+
+        section("10. HELM  (render-free: the chart DEPLOYS a workload that runs the SAME hub image)")
+        for chart, dep in rows(g,
+            "MATCH (c:Resource {kind:'chart'})-[:DEPENDS_ON]->(d:Resource) RETURN c.name, d.name ORDER BY d.name"):
+            print(f"  chart {chart:6}  DEPENDS_ON  {dep}")
+        for chart, svc, img in rows(g,
+            "MATCH (c:Resource {kind:'chart'})-[:DEPLOYS]->(s:Service)-[:RUNS_IMAGE]->(i:Image) "
+            "RETURN c.name, s.name, i.ref ORDER BY s.name"):
+            print(f"  chart {chart:6}  DEPLOYS  '{svc}'  which RUNS  {img}  (resolved from values.yaml)")
+
+        # The most-shared hub image and how many producers reach it (1 builder + N runners) -- derived
+        # from the graph, not a hard-coded ref.
+        top = rows(g, "MATCH (n)-[:BUILDS_IMAGE|RUNS_IMAGE]->(i:Image) WITH i, count(DISTINCT n) AS c "
+                      "RETURN i.ref, c ORDER BY c DESC LIMIT 1")
+        if top and top[0][1] > 1:
+            headline = f"{top[0][1]} producers converge on one hub image ({top[0][0]})."
+        else:
+            headline = "(no shared hub image in this graph)."
+        print(f"\n{BAR}\n{headline}  Inspect it:  uv run auryn view   (graph: {GRAPH})\n{BAR}\n")
     finally:
         _shutdown(conn, pid)
 
