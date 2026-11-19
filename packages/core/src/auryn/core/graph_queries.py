@@ -153,6 +153,35 @@ def serialize_node_min(node: Node) -> dict:
     }
 
 
+# Properties a symbol's COMPACT answer (locate results, the get_context center) never needs: the
+# list-tool drop set minus `qualified_name` (worth showing once per symbol), plus the bulky/internal
+# linkage tables.
+_COMPACT_DROP_KEYS = (_MIN_NODE_DROP_KEYS - {"qualified_name"}) | {"reexports", "linkage_aliases"}
+_SIGNATURE_CHARS = 400
+
+
+def serialize_node_compact(node: Node) -> dict:
+    """One symbol for an agent: id/label/name, its location (file_path, line_start/line_end) and
+    `signature` ALWAYS kept (a long annotated signature is trimmed to _SIGNATURE_CHARS, never
+    dropped -- the lean 200-char rule would otherwise drop it exactly where it matters), plus the
+    other small identifying props. No source, no doc, no internal/linkage keys."""
+    label = first_semantic_label(node.labels)
+    props = _visible_properties(node.properties)
+    kept = {
+        k: v for k, v in _lean_props(props).items()
+        if k not in _COMPACT_DROP_KEYS and v not in ("", [], {}, None)
+    }
+    sig = props.get("signature")
+    if isinstance(sig, str) and sig:
+        kept["signature"] = sig if len(sig) <= _SIGNATURE_CHARS else sig[:_SIGNATURE_CHARS] + "..."
+    return {
+        "id": props.get("id"),
+        "label": label,
+        "name": props.get("name") or props.get("id"),
+        "properties": kept,
+    }
+
+
 def serialize_edge(from_id: str, to_id: str, rel_type: str, rel_props) -> dict:
     """One edge in the canonical shape every edge-returning tool uses: explicit **direction**
     (`from` -> `to`), the relation `type`, and -- lifted to the top level so a caller never has to
@@ -180,7 +209,96 @@ def serialize_edge_lean(from_id: str, to_id: str, rel_type: str, rel_props) -> d
         edge["resolution"] = props["resolution"]
     if "via" in props:
         edge["via"] = props["via"]
+    if props.get("lines"):
+        edge["lines"] = sorted(props["lines"])  # cross-repo heals may union lines out of order
     return edge
+
+
+# -- evidence helpers (agent-evidence design §1-§3) -----------------------------------------------
+# Every answer an agent gets should carry the evidence it would otherwise grep for: the file, the
+# line, and the code on that line. The code is cut from the node's stored `source` (no filesystem
+# read): line N of a node is `source.splitlines()[N - line_start]`.
+
+_MAX_SITES = 3  # call sites shown with code per edge (all line numbers stay in `lines`)
+_CONTAINS = "HAS_FUNCTION|HAS_METHOD|HAS_CLASS"
+
+
+def _source_line(source, line_start, line) -> str | None:
+    """The stripped code on absolute `line` of a node whose `source` starts at `line_start`, or
+    None when that line is outside the stored source (decorators, a stale line, no source)."""
+    if not isinstance(source, str) or not isinstance(line_start, int) or not isinstance(line, int):
+        return None
+    idx = line - line_start
+    if idx < 0:
+        return None
+    rows = source.splitlines()
+    return rows[idx].strip() if idx < len(rows) else None
+
+
+def _sites(source, line_start, lines) -> list[dict]:
+    """Up to _MAX_SITES `{line, code}` call sites; lines whose code isn't in `source` are skipped."""
+    out = []
+    for ln in lines or []:
+        code = _source_line(source, line_start, ln)
+        if code is not None:
+            out.append({"line": ln, "code": code})
+            if len(out) == _MAX_SITES:
+                break
+    return out
+
+
+def _file_paths(graph: Graph, node_ids: list[str]) -> dict[str, str]:
+    """`file_path` per node id: the node's own property, else the nearest containing Module/Package
+    (a node ingested before definitions carried `file_path` -- the old-graph fallback)."""
+    if not node_ids:
+        return {}
+    rows = graph.ro_query(
+        "MATCH (n:Entity) WHERE n.id IN $ids "
+        f"OPTIONAL MATCH (n)<-[:{_CONTAINS}*1..3]-(m) WHERE m.file_path IS NOT NULL "
+        "RETURN n.id, n.file_path, head(collect(m.file_path))",
+        {"ids": list(node_ids)},
+        timeout=DEFAULT_QUERY_TIMEOUT_MS,
+    ).result_set
+    out = {}
+    for nid, own, inherited in rows:
+        path = own or inherited
+        if path:
+            out[str(nid)] = str(path)
+    return out
+
+
+def _attach_file_paths(graph: Graph, nodes: list[dict]) -> list[dict]:
+    """Fill `properties.file_path` on serialized nodes that lack it (old-graph fallback)."""
+    missing = [n["id"] for n in nodes if n.get("id") and "file_path" not in n.get("properties", {})]
+    found = _file_paths(graph, missing)
+    for n in nodes:
+        if n.get("id") in found:
+            n.setdefault("properties", {})["file_path"] = found[n["id"]]
+    return nodes
+
+
+def _add_call_evidence(graph: Graph, edges: list[dict]) -> list[dict]:
+    """Add the caller's `file` and code `sites` to CALLS edges (serialize_edge_lean shape)."""
+    callers_ = sorted({e["from"] for e in edges if e.get("type") == "CALLS"})
+    if not callers_:
+        return edges
+    rows = graph.ro_query(
+        "MATCH (n:Entity) WHERE n.id IN $ids RETURN n.id, n.source, n.line_start",
+        {"ids": callers_},
+        timeout=DEFAULT_QUERY_TIMEOUT_MS,
+    ).result_set
+    src = {str(nid): (source, line_start) for nid, source, line_start in rows}
+    files = _file_paths(graph, callers_)
+    for e in edges:
+        if e.get("type") != "CALLS":
+            continue
+        if e["from"] in files:
+            e["file"] = files[e["from"]]
+        source, line_start = src.get(e["from"], (None, None))
+        sites = _sites(source, line_start, e.get("lines"))
+        if sites:
+            e["sites"] = sites
+    return edges
 
 
 def _label_counts(graph: Graph) -> list[tuple[str, int]]:
@@ -265,7 +383,27 @@ def search_nodes(
         {"label": label, "q": q, "limit": limit},
         timeout=DEFAULT_QUERY_TIMEOUT_MS,
     ).result_set
-    return [serialize_node_lean(row[0]) for row in rows]
+    return _attach_file_paths(graph, [serialize_node_lean(row[0]) for row in rows])
+
+
+def locate_nodes(
+    graph: Graph, label: str | None, q: str | None, limit: int = DEFAULT_SEARCH_LIMIT
+) -> list[dict]:
+    """search_nodes for the agent-facing `locate` tool: same matches, each in the compact shape
+    (serialize_node_compact) with `file_path` filled from the defining module when the node lacks
+    it. search_nodes itself keeps its lean shape for the web viewer."""
+    rows = graph.ro_query(
+        """
+        MATCH (n)
+        WHERE ($label IS NULL OR $label IN labels(n))
+          AND ($q IS NULL OR (n.name IS NOT NULL AND toLower(n.name) CONTAINS toLower($q)))
+        RETURN n
+        LIMIT $limit
+        """,
+        {"label": label, "q": q, "limit": limit},
+        timeout=DEFAULT_QUERY_TIMEOUT_MS,
+    ).result_set
+    return _attach_file_paths(graph, [serialize_node_compact(row[0]) for row in rows])
 
 
 def all_nodes_and_edges(graph: Graph, limit: int = DEFAULT_ALL_LIMIT) -> dict:
@@ -747,6 +885,100 @@ def trace_entrypoint(
     }
 
 
+_PREVIEW_LINES = 40
+_MAX_RANGE_LINES = 200
+_DOC_CHARS = 300
+_CONTEXT_CALLS = 10
+_CONTEXT_NEIGHBORS = 25
+_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+
+
+def _numbered(source: str, line_start: int, first: int, last: int) -> list[dict]:
+    """`{line, code}` rows for absolute lines first..last (inclusive) that exist in `source`."""
+    rows = source.splitlines()
+    out = []
+    for ln in range(max(first, line_start), last + 1):
+        idx = ln - line_start
+        if idx >= len(rows):
+            break
+        out.append({"line": ln, "code": rows[idx]})
+    return out
+
+
+def context_view(graph: Graph, node_id: str, lines: str | None = None) -> dict | None:
+    """get_context's answer (agent-evidence design §2): a COMPACT package for one node instead of
+    its full source -- location (file_path, line_start/line_end), signature, a short doc, a
+    numbered `preview` of the first lines, its callers/callees WITH call sites, and lean 1-hop
+    neighbours. `lines="a-b"` returns exactly those numbered source lines (absolute line
+    numbers, capped at _MAX_RANGE_LINES) so an agent never needs to open the file for a range the
+    graph holds. None if the node doesn't exist."""
+    rng = None
+    if lines is not None:
+        m = _RANGE_RE.match(str(lines))
+        if not m or int(m.group(1)) < 1 or int(m.group(2)) < int(m.group(1)):
+            raise ValueError(f"lines must look like '120-160' (start-end, start <= end), got {lines!r}")
+        first = int(m.group(1))
+        rng = (first, min(int(m.group(2)), first + _MAX_RANGE_LINES - 1))
+
+    rows = graph.ro_query(
+        "MATCH (n:Entity {id: $id}) RETURN n", {"id": node_id}, timeout=DEFAULT_QUERY_TIMEOUT_MS
+    ).result_set
+    if not rows:
+        return None
+    node = rows[0][0]
+    full = _visible_properties(node.properties)
+    center = serialize_node_compact(node)
+    doc = full.get("doc")
+    if isinstance(doc, str) and doc.strip():
+        center["properties"]["doc"] = doc.strip()[:_DOC_CHARS]
+    _attach_file_paths(graph, [center])
+
+    out: dict = {"center": center}
+    source, line_start = full.get("source"), full.get("line_start")
+    if isinstance(source, str) and source and isinstance(line_start, int):
+        total = len(source.splitlines())
+        out["source_lines_total"] = total
+        if rng is not None:
+            out["lines"] = _numbered(source, line_start, rng[0], rng[1])
+            span_end = line_start + total - 1
+            if rng[0] < line_start or rng[1] > span_end:
+                out["range_note"] = (f"this node's source spans lines {line_start}-{span_end}; lines outside "
+                                     "it are not stored here -- locate/get_context the enclosing symbol")
+        else:
+            out["preview"] = _numbered(source, line_start, line_start, line_start + _PREVIEW_LINES - 1)
+            if total > _PREVIEW_LINES:
+                out["preview_note"] = (f"first {_PREVIEW_LINES} of {total} lines; pass lines='a-b' "
+                                       "for any other range")
+    elif rng is not None:
+        out["lines"] = []
+        out["range_note"] = "this node has no stored source with line numbers"
+
+    calls_in = callers(graph, node_id, 1, _CONTEXT_CALLS) or {}
+    calls_out = callees(graph, node_id, 1, _CONTEXT_CALLS) or {}
+    out["callers"] = calls_in.get("edges", [])
+    out["callees"] = calls_out.get("edges", [])
+
+    # Non-call neighbours (parameters, the containing class/module, endpoints, tables...) in the
+    # minimal list shape, each with its relationship inline -- callers/callees above already cover
+    # CALLS/INVOKES, so they are not repeated here, and no separate long-id edge list is returned.
+    hood = neighbors(graph, node_id, limit=_CONTEXT_NEIGHBORS) or {}
+    rel_of: dict[str, tuple[str, str]] = {}
+    for e in hood.get("edges", []):
+        if e.get("type") in ("CALLS", "INVOKES"):
+            continue
+        other, direction = (e["to"], "out") if e["from"] == node_id else (e["from"], "in")
+        rel_of.setdefault(other, (e["type"], direction))
+    out["neighbors"] = [
+        {"id": n["id"], "label": n["label"], "name": n["name"], "rel": rel_of[n["id"]][0],
+         "dir": rel_of[n["id"]][1],
+         "properties": {k: v for k, v in _lean_props(n["properties"]).items()
+                        if k not in _COMPACT_DROP_KEYS and v not in ("", [], {}, None)}}
+        for n in hood.get("nodes", []) if n["id"] in rel_of
+    ]
+    out["truncated"] = bool(hood.get("truncated") or calls_in.get("truncated") or calls_out.get("truncated"))
+    return out
+
+
 DEFAULT_CALL_DEPTH = 1
 
 
@@ -778,7 +1010,7 @@ def _call_neighbors(graph: Graph, node_id: str, direction: str, max_depth: int, 
         {"id": node_id, "elimit": edge_limit + 1},
         timeout=DEFAULT_QUERY_TIMEOUT_MS,
     ).result_set
-    edges = [serialize_edge_lean(f, t, ty, p) for f, t, ty, p in edge_rows[:edge_limit]]
+    edges = _add_call_evidence(graph, [serialize_edge_lean(f, t, ty, p) for f, t, ty, p in edge_rows[:edge_limit]])
     return {
         "center": center,
         "direction": direction,
