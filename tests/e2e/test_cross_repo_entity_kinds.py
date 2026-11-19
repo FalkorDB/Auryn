@@ -53,12 +53,12 @@ def test_module_import_heals_cross_repo(falkordb_connection, tmp_path):
         g.delete()
 
 
-def test_reexport_via_init_is_a_known_gap(falkordb_connection, tmp_path):
+def test_reexport_via_init_heals(falkordb_connection, tmp_path):
     # billing exposes charge on its package surface (`from billing.core import charge` in __init__),
-    # so the consumer writes `from billing import charge`. The consumer mints linkage
-    # `billing::charge`, but the real definition is `billing.core::charge` -> no match. A fix needs
-    # the producer's re-export (__init__ IMPORTS edge) to contribute an ALIAS linkage key
-    # (`billing::charge`) onto the real symbol, i.e. multiple linkage keys per node.
+    # so the consumer writes `from billing import charge` and mints linkage `billing::charge`, while
+    # the real definition is `billing.core::charge`. The producer's re-export now contributes an
+    # ALIAS linkage key (`linkage_aliases`) onto the real symbol, so reconcile heals the call
+    # (agent-evidence design section 6; was a known gap).
     billing = tmp_path / "billing"
     _mk_billing(billing, init_body="from billing.core import charge\n")
     webshop = tmp_path / "webshop"
@@ -74,10 +74,7 @@ def test_reexport_via_init_is_a_known_gap(falkordb_connection, tmp_path):
         rows = g.ro_query(
             "MATCH (:Function {name:'place_order'})-[:CALLS]->(c) RETURN c.id, c.resolved"
         ).result_set
-        healed = any(r[0] == "python://billing/module/billing.core.func.charge(amount)" for r in rows)
-        if healed:
-            pytest.fail("re-export now heals -- promote this to a passing assertion")
-        pytest.xfail(f"re-export through __init__.py doesn't heal (placeholder stays billing::charge): {rows}")
+        assert any(r[0] == "python://billing/module/billing.core.func.charge(amount)" for r in rows), rows
     finally:
         g.delete()
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from dataclasses import dataclass
 
 from auryn.core.graph_client import SHARED_NODE_LABEL, GraphWriter
@@ -84,6 +85,7 @@ def collect_linkages(items) -> tuple[list[str], list[str]]:
             placeholder.append(str(n.key["id"]))
         else:
             real.append(str(n.properties["linkage_key"]))
+            real.extend(reexport_alias_keys(n.properties))
     return real, placeholder
 
 
@@ -125,6 +127,149 @@ def _prefix_mismatch(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
     return long[-len(short):] == short
 
 
+def _padded(row, n: int) -> list:
+    """A result row as exactly `n` values (missing trailing columns -> None)."""
+    vals = list(row)[:n]
+    return vals + [None] * (n - len(vals))
+
+
+# Bound on re-export chains followed (pkg -> pkg.sub -> pkg.sub.mod): real chains are 1-2 deep; the
+# bound also stops a cycle.
+_MAX_ALIAS_HOPS = 5
+
+
+def reexport_alias_keys(props: dict) -> list[str]:
+    """The alias linkage keys a Package node answers to: `<its linkage_key>::<Name>` for each
+    `Name=<target>` entry of its `reexports` table (Python package `__init__` re-exports)."""
+    base = props.get("linkage_key")
+    if not base:
+        return []
+    return [f"{base}::{str(e).partition('=')[0]}" for e in props.get("reexports") or () if "=" in str(e)]
+
+
+_PY_EXTERN = "extern://python/"  # only Python packages publish `reexports`
+
+
+def _alias_candidates(writer: GraphWriter, keys: list[str], present, meta: dict) -> dict[str, list]:
+    """alias key -> canonical candidate rows `(id, resolved, defined, origin)` of the definition it
+    re-exports (see _resolve_reexports); fills `meta` for overload collapse. Index seeks only."""
+    alias_target = _resolve_reexports(writer, keys) if keys else {}
+    if not alias_target:
+        return {}
+    targets = sorted(set(alias_target.values()))
+    found: dict[str, list[tuple[str, object, object, object]]] = {}
+    for label in present:
+        rows = writer.ro_query(
+            f"MATCH (n:{label}) WHERE n.linkage_key IN $ls "
+            "RETURN n.linkage_key, n.id, n.resolved, n.defined, n.origin, n.qualified_name, n.decorators",
+            {"ls": targets},
+        ).result_set
+        for row in rows:
+            link, nid, resolved, defined, origin, qname, decorators = _padded(row, 7)
+            if resolved is not False and defined is not False:
+                found.setdefault(str(link), []).append((str(nid), resolved, defined, origin))
+                meta[str(nid)] = (qname, decorators)
+    return {alias: list(found.get(target, ())) for alias, target in alias_target.items() if found.get(target)}
+
+
+def _revalidate_alias_edges(writer: GraphWriter, real_linkages, present) -> None:
+    """Re-check edges healed THROUGH a re-export alias (marked `_via_alias`) whose declaring Python
+    Package was (re)written in this ingest: an alias that now re-exports a different definition
+    moves the edge there; an alias that no longer exists drops the edge -- the same outcome Auryn
+    gives an exact cross-repo link whose definition disappears. Runs only when this ingest touched
+    a Package that is (or was) a re-export source."""
+    pkg_keys = [k for k in set(real_linkages) if k.startswith(_PY_EXTERN) and "::" not in k]
+    if not pkg_keys or "Package" not in present:
+        return
+    touched = {str(r[0]) for r in writer.ro_query(
+        "MATCH (p:Package) WHERE p.linkage_key IN $ls RETURN p.linkage_key", {"ls": sorted(pkg_keys)}
+    ).result_set}
+    if not touched:
+        return
+    rows = writer.ro_query(
+        "MATCH (c)-[e:CALLS]->(t) WHERE e._via_alias IS NOT NULL RETURN c.id, t.id, e._via_alias"
+    ).result_set
+    stale = [(str(c), str(t), str(a)) for c, t, a in rows if str(a).rsplit("::", 1)[0] in touched]
+    if not stale:
+        return
+    meta: dict = {}
+    cands = _alias_candidates(writer, sorted({a for _, _, a in stale}), present, meta)
+    for caller, target, alias in stale:
+        canonical = _collapse_overloads([nid for nid, *_ in cands.get(alias, ())], meta)
+        now = canonical[0] if len(canonical) == 1 else None
+        if now == target:
+            continue
+        if now is not None:
+            writer.query(
+                f"""
+                MATCH (c:{SHARED_NODE_LABEL} {{id: $c}})-[e:CALLS]->(:{SHARED_NODE_LABEL} {{id: $t}})
+                MATCH (n:{SHARED_NODE_LABEL} {{id: $n}})
+                MERGE (c)-[e2:CALLS]->(n)
+                  ON CREATE SET e2 = e
+                DELETE e
+                """,
+                {"c": caller, "t": target, "n": now},
+            )
+        else:
+            writer.query(
+                f"MATCH (:{SHARED_NODE_LABEL} {{id: $c}})-[e:CALLS]->(:{SHARED_NODE_LABEL} {{id: $t}}) "
+                "WHERE e._via_alias = $a DELETE e",
+                {"c": caller, "t": target, "a": alias},
+            )
+
+
+def _resolve_reexports(writer: GraphWriter, links: list[str]) -> dict[str, str]:
+    """alias linkage key -> the linkage key it finally re-exports, for those `links` some Package's
+    `reexports` table declares (following re-export chains). A link `<pkgkey>::<Name>` is looked up
+    on the Package whose `linkage_key` is `<pkgkey>` -- an index seek, never a scan."""
+    resolved: dict[str, str] = {}
+    frontier = {ln: ln for ln in links if "::" in ln}
+    for _ in range(_MAX_ALIAS_HOPS):
+        pkgkeys = sorted({cur.rsplit("::", 1)[0] for cur in frontier.values()})
+        if not pkgkeys:
+            break
+        rows = writer.ro_query(
+            "MATCH (p:Package) WHERE p.linkage_key IN $pk AND p.reexports IS NOT NULL "
+            "RETURN p.linkage_key, p.reexports",
+            {"pk": pkgkeys},
+        ).result_set
+        table: dict[str, str] = {}
+        for row in rows:
+            pk, entries = _padded(row, 2)
+            if not isinstance(entries, (list, tuple)):
+                continue
+            for entry in entries:
+                name, _, target = str(entry).partition("=")
+                if name and target:
+                    table[f"{pk}::{name}"] = target
+        nxt = {}
+        for orig, cur in frontier.items():
+            target = table.get(cur)
+            if target and target != cur and target != orig:
+                resolved[orig] = target
+                nxt[orig] = target
+        frontier = nxt
+    return resolved
+
+
+def _is_overload(decorators) -> bool:
+    return any(str(d).rsplit(".", 1)[-1] == "overload" for d in (decorators or ()))
+
+
+def _collapse_overloads(canonical: list[str], meta: dict) -> list[str]:
+    """Several canonicals that are one function's `@overload` stubs plus its implementation (same
+    `qualified_name`) are ONE symbol: keep the implementation -- the single candidate without an
+    `overload` decorator. Anything else (different qualified names, or not exactly one
+    implementation) is returned unchanged and stays a genuine clash."""
+    if len(canonical) < 2:
+        return canonical
+    qnames = {meta.get(nid, (None, None))[0] for nid in canonical}
+    if len(qnames) != 1 or None in qnames:
+        return canonical
+    impls = [nid for nid in canonical if not _is_overload(meta.get(nid, (None, None))[1])]
+    return impls if len(impls) == 1 else canonical
+
+
 def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> ReconcileStats:
     """Fold, per linkage this ingest touched, every *absorbable* node into the one *canonical*
     definition that shares it. Order-independent, no scan (index-backed `linkage_key IN […]`).
@@ -140,6 +285,7 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
     `placeholder_ids` are just the keys to look at -- their canonical/absorbable roles are decided
     here from the graph, so either ingest order converges."""
     stats = ReconcileStats()
+    pass_token = uuid.uuid4().hex
     linkages = sorted(set(real_linkages) | set(placeholder_ids))
     if not linkages:
         return stats
@@ -147,35 +293,75 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
     # All candidate nodes per linkage: (id, resolved, defined, origin). Per-label (index seek) and
     # only for labels present in this graph, so a label another language owns costs nothing here.
     by_link: dict[str, list[tuple[str, object, object, object]]] = {}
-    for label in _present(writer, LINKABLE_LABELS):
+    meta: dict[str, tuple[object, object]] = {}  # node id -> (qualified_name, decorators)
+    present = _present(writer, LINKABLE_LABELS)
+    for label in present:
         rows = writer.ro_query(
             f"MATCH (n:{label}) WHERE n.linkage_key IN $ls "
-            "RETURN n.linkage_key, n.id, n.resolved, n.defined, n.origin",
+            "RETURN n.linkage_key, n.id, n.resolved, n.defined, n.origin, n.qualified_name, n.decorators",
             {"ls": linkages},
         ).result_set
-        for link, nid, resolved, defined, origin in rows:
+        for row in rows:
+            link, nid, resolved, defined, origin, qname, decorators = _padded(row, 7)
             by_link.setdefault(str(link), []).append((str(nid), resolved, defined, origin))
+            meta[str(nid)] = (qname, decorators)
+
+    # Re-export aliases (a package `__init__` exposing `pkg.Name` for a symbol defined in
+    # `pkg.sub.mod`): consulted ONLY for linkages with no exact-key definition, so an exact match
+    # always wins. Resolved through the declaring Package node's `reexports` table (index seeks on
+    # Package.linkage_key, chains followed) -- exact keys only, no loosening (ADR 0004 decision 6).
+    def _is_canonical(resolved, defined) -> bool:
+        return resolved is not False and defined is not False
+
+    need_alias = [ln for ln in linkages if ln.startswith(_PY_EXTERN)
+                  and not any(_is_canonical(r, d) for _, r, d, _ in by_link.get(ln, ()))]
+    alias_cands = _alias_candidates(writer, need_alias, present, meta) if "Package" in present else {}
+    for alias, cands in alias_cands.items():
+        by_link.setdefault(alias, []).extend(cands)
 
     canonical_links: list[str] = []
-    for link, cands in by_link.items():
-        canonical = [nid for nid, resolved, defined, _ in cands if resolved is not False and defined is not False]
-        absorbable = [nid for nid, resolved, defined, _ in cands if resolved is False or defined is False]
-        if len(canonical) != 1:
-            if len(canonical) > 1:
-                stats.ambiguous.append(link)
-            elif any(resolved is False and str(origin or "external") not in _TERMINAL_ORIGINS
-                     for _, resolved, _, origin in cands):
-                # 0 canonical AND an unresolved placeholder that is NOT a known-terminal builtin/libc
-                # -> a reference expecting a sibling-repo definition that never arrived. Candidate
-                # for the silent-miss diagnostic below.
-                stats.unresolved.append(link)
-            continue  # 0 canonical -> unresolved everywhere; >1 -> genuine clash, leave it
-        canonical_links.append(link)
-        target = canonical[0]
-        for src in absorbable:
-            if src != target:
-                _absorb(writer, absorbable_id=src, canonical_id=target)
-                stats.absorbed += 1
+    absorbed_into: set[str] = set()
+    try:
+        for link, cands in by_link.items():
+            canonical = [nid for nid, resolved, defined, _ in cands if resolved is not False and defined is not False]
+            canonical = _collapse_overloads(canonical, meta)
+            absorbable = [nid for nid, resolved, defined, _ in cands if resolved is False or defined is False]
+            if len(canonical) != 1:
+                if len(canonical) > 1:
+                    stats.ambiguous.append(link)
+                elif any(resolved is False and str(origin or "external") not in _TERMINAL_ORIGINS
+                         for _, resolved, _, origin in cands):
+                    # 0 canonical AND an unresolved placeholder that is NOT a known-terminal builtin/libc
+                    # -> a reference expecting a sibling-repo definition that never arrived. Candidate
+                    # for the silent-miss diagnostic below.
+                    stats.unresolved.append(link)
+                continue  # 0 canonical -> unresolved everywhere; >1 -> genuine clash, leave it
+            canonical_links.append(link)
+            target = canonical[0]
+            via = link if link in alias_cands else None
+            for src in absorbable:
+                if src != target:
+                    _absorb(writer, absorbable_id=src, canonical_id=target, pass_token=pass_token, via_alias=via)
+                    absorbed_into.add(target)
+                    stats.absorbed += 1
+    finally:
+        # The per-pass line-union marker (see _absorb) must not outlive this pass, even on an error:
+        # clear it on the edges into each canonical we absorbed onto (an id seek per canonical, no
+        # scan), sorting the unioned lines so the result equals a fresh build in any ingest order.
+        for canon in sorted(absorbed_into):
+            for caller, rel, lines in writer.ro_query(
+                f"MATCH (c)-[e]->(:{SHARED_NODE_LABEL} {{id: $canon}}) WHERE e._lines_pass IS NOT NULL "
+                "RETURN c.id, type(e), e.lines",
+                {"canon": canon},
+            ).result_set:
+                writer.query(
+                    f"MATCH (:{SHARED_NODE_LABEL} {{id: $c}})-[e:{rel}]->(:{SHARED_NODE_LABEL} {{id: $canon}}) "
+                    "SET e.lines = $lines, e._lines_pass = NULL",
+                    {"c": caller, "canon": canon,
+                     "lines": sorted(set(lines))[:20] if isinstance(lines, list) else lines},
+                )
+
+    _revalidate_alias_edges(writer, real_linkages, present)
 
     # Silent-miss diagnostic (the Gap-2 fix): an unresolved reference whose symbol name matches a
     # real definition emitted in THIS ingest, where the two linkage keys differ ONLY by a leading
@@ -323,11 +509,16 @@ def demote_node(writer: GraphWriter, proj_prefix: str, label: str, node_id: str,
 _OWNED_CHILD_RELS = ("HAS_PARAMETER", "HAS_FIELD")
 
 
-def _absorb(writer: GraphWriter, absorbable_id: str, canonical_id: str) -> None:
+def _absorb(writer: GraphWriter, absorbable_id: str, canonical_id: str, pass_token: str = "",
+            via_alias: str | None = None) -> None:
     """Repoint every reference edge from the absorbable node onto the canonical definition, then
     delete the absorbable node (a placeholder, or a cross-repo declaration) and any children it
     owned. Edge properties carry over; `resolution` becomes 'resolved' (it now targets a real
-    definition). ON CREATE so a pre-existing direct edge isn't clobbered."""
+    definition). ON CREATE so a pre-existing direct edge isn't clobbered -- except its call-site
+    `lines`, which the re-emitted placeholder edge carries fresh from the caller's current source (a
+    re-ingest after the call moved must not leave the healed edge citing the old line). Within ONE
+    reconcile pass (`pass_token`) several placeholders folding onto the same edge (e.g. `from lib
+    import Foo` and `from lib.sub.mod import Foo`) UNION their lines instead of overwriting."""
     for rel in _REF_RELS:
         writer.query(
             f"""
@@ -335,9 +526,16 @@ def _absorb(writer: GraphWriter, absorbable_id: str, canonical_id: str) -> None:
             MATCH (r:{SHARED_NODE_LABEL} {{id: $canon}})
             MERGE (c)-[e2:{rel}]->(r)
               ON CREATE SET e2 = e, e2.resolution = 'resolved'
+              ON MATCH SET e2.lines = CASE
+                WHEN e.lines IS NULL THEN e2.lines
+                WHEN e2._lines_pass = $pass AND e2.lines IS NOT NULL
+                  THEN (e2.lines + [x IN e.lines WHERE NOT x IN e2.lines])[..20]
+                ELSE e.lines END
+            SET e2._lines_pass = CASE WHEN e.lines IS NULL THEN e2._lines_pass ELSE $pass END,
+                e2._via_alias = CASE WHEN $via IS NULL THEN e2._via_alias ELSE $via END
             DELETE e
             """,
-            {"src": absorbable_id, "canon": canonical_id},
+            {"src": absorbable_id, "canon": canonical_id, "pass": pass_token, "via": via_alias},
         )
     for rel in _OWNED_CHILD_RELS:
         writer.query(
