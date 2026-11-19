@@ -69,6 +69,23 @@ def _isolate_cache_home(tmp_path, monkeypatch):
     monkeypatch.setenv("AURYN_CACHE_HOME", str(tmp_path / "auryn_cache"))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_auryn_home(tmp_path, monkeypatch):
+    """Point `~/.auryn` (config + runtime state) at a per-test directory, so a test never reads the
+    developer's real install config or writes into their real `run/`. `home_dir()` reads `$AURYN_HOME`
+    at call time, so this holds regardless of import order; a test that needs its own home still
+    overrides it with its own `setenv`."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "auryn_home"))
+
+
+@pytest.fixture(autouse=True)
+def _embeddings_off_by_default(monkeypatch):
+    """Embeddings are ON by default in production, but the post-ingest pass would otherwise spawn a
+    real background embed daemon (and download a model) on every ingesting test. Force it off for the
+    suite; the embedding tests opt back in with `AURYN_EMBED=1` (or call the worker/daemon directly)."""
+    monkeypatch.setenv("AURYN_EMBED", "0")
+
+
 # Container/SDK-backed fixtures are session/module-scoped and EXPENSIVE -- a database testcontainer
 # (Oracle/PostgreSQL/MySQL) or the published Roslyn extractor. Under the parallel default each xdist
 # worker instantiates session fixtures independently, so the same resource spread across workers spins

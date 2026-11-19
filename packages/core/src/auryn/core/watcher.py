@@ -12,6 +12,7 @@ server_manager's local FalkorDB daemon.
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import logging
 import os
 import signal
@@ -33,13 +34,16 @@ _BASE_EXCLUDED = {".git", "node_modules", "__pycache__", ".venv", "venv", "env",
 
 
 # ── what to watch / react to (from the plugin + repo registries) ─────────────────────────
-def _code_suffixes() -> set[str]:
+def _watch_patterns() -> tuple[str, ...]:
+    """Basename globs of every registered language (union of their `match_patterns`), so the watcher
+    reacts to a changed file by its BASENAME -- catching an extensionless `Dockerfile` (empty
+    `Path.suffix`) and basename variants (`Dockerfile.prod`, `Chart.yaml`) a suffix set could not."""
     from auryn.core.registry import discover_git_languages
 
-    out: set[str] = set()
+    out: dict[str, None] = {}
     for lang in discover_git_languages().values():
-        out.update(s.lower() for s in lang.file_suffixes)
-    return out
+        out.update(dict.fromkeys(lang.match_patterns()))
+    return tuple(out)
 
 
 def _excluded_dirs() -> set[str]:
@@ -88,7 +92,7 @@ def run_watcher(stop_event: threading.Event | None = None,
     from watchdog.events import FileSystemEventHandler
     from watchdog.observers import Observer
 
-    suffixes = _code_suffixes()
+    patterns = _watch_patterns()
     excluded = _excluded_dirs()
     observers: dict[str, object] = {}       # repo_dir -> Observer
     dirty: dict[str, float] = {}            # repo_dir -> last relevant-event monotonic time
@@ -97,7 +101,7 @@ def run_watcher(stop_event: threading.Event | None = None,
 
     def note_change(path: str) -> None:
         p = Path(path)
-        if excluded & set(p.parts) or p.suffix.lower() not in suffixes:
+        if excluded & set(p.parts) or not any(fnmatch.fnmatchcase(p.name, pat) for pat in patterns):
             return
         repo = _owning_repo(path, observers.keys())
         if repo is not None:

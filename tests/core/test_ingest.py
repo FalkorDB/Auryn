@@ -212,6 +212,54 @@ def test_editing_a_file_reingests_with_a_precise_delta(graph, tmp_path):
     assert second.to_dict()["totals"]["nodes_added"] > 0  # the new Name property
 
 
+def test_a_sync_that_dies_mid_apply_is_healed_by_the_next_one(graph, tmp_path, monkeypatch):
+    """End to end: the write of the edges fails (a timeout, a kill, an OOM). The next ingest of the
+    SAME content must finish the job -- it used to find the commit already stamped, report a clean
+    no-op, and leave the graph without its edges for good."""
+    root = tmp_path / "app"
+    _make_dir(root, {"svc.py": "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n"})
+    cache = tmp_path / "cache"
+
+    def killed(self, edges):
+        raise RuntimeError("killed mid-apply")
+
+    with monkeypatch.context() as m:
+        m.setattr(GraphWriter, "merge_edges", killed)
+        broken = ingest.ingest_directory(GraphWriter(graph), str(root), cache_root=cache, deep="off")
+    assert "killed mid-apply" in str(broken.to_dict())  # reported, not swallowed
+
+    ingest.ingest_directory(GraphWriter(graph), str(root), cache_root=cache, deep="off")
+
+    assert graph.query(
+        "MATCH (:Function {name: 'run'})-[r:CALLS]->(:Function {name: 'helper'}) RETURN count(r)"
+    ).result_set == [[1]]
+
+
+def test_a_failed_sync_is_healed_by_going_back_to_the_previous_content(graph, tmp_path, monkeypatch):
+    """The sync to new content fails midway and the tree then goes BACK (a reset, a revert). The
+    failed sync left NO stamp: had it kept the previous commit's, this re-ingest of the previous
+    content would short-circuit over the half-applied change."""
+    root = tmp_path / "app"
+    v1 = "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n"
+    _make_dir(root, {"svc.py": v1})
+    cache = tmp_path / "cache"
+    ingest.ingest_directory(GraphWriter(graph), str(root), cache_root=cache, deep="off")
+
+    def killed(self, edges):
+        raise RuntimeError("killed mid-apply")
+
+    (root / "svc.py").write_text(v1 + "\n\ndef added():\n    return run()\n")
+    with monkeypatch.context() as m:
+        m.setattr(GraphWriter, "merge_edges", killed)
+        ingest.ingest_directory(GraphWriter(graph), str(root), cache_root=cache, deep="off")
+    assert graph.query("MATCH (n:Function {name: 'added'}) RETURN count(n)").result_set == [[1]]  # half-applied
+
+    (root / "svc.py").write_text(v1)
+    ingest.ingest_directory(GraphWriter(graph), str(root), cache_root=cache, deep="off")
+
+    assert graph.query("MATCH (n:Function {name: 'added'}) RETURN count(n)").result_set == [[0]]
+
+
 def test_ingest_directory_missing_path_raises_valueerror(graph, tmp_path):
     with pytest.raises(ValueError, match="does not exist"):
         ingest.ingest_directory(GraphWriter(graph), str(tmp_path / "nope"))

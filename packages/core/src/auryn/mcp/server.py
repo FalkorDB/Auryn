@@ -18,8 +18,10 @@ change-impact / behavioral closure) without reading whole files -- with `run_cyp
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import os
+import threading
 import time
 from typing import Any
 
@@ -36,6 +38,7 @@ from auryn.core import usage
 from auryn.core.embeddings import get_embedder, hybrid_search
 from auryn.core.graph_client import GraphWriter
 from auryn.core.project import resolve_project_root
+from auryn.core.sync_lock import sync_lock
 
 INSTRUCTIONS = """\
 Code-graph tools over FalkorDB (C, C++, C#, Python, Java, Go, Rust, TS/JS, Ruby, PHP, Kotlin,
@@ -98,14 +101,19 @@ def tool_profile(name: str | None = None) -> frozenset[str]:
     return TOOL_PROFILES[name]
 
 
-def create_server(client: FalkorDB, graph_name: str, tools: str | None = None) -> MCPServer:
+def create_server(client: FalkorDB, graph_name: str, tools: str | None = None, *, embed: str | None = None) -> MCPServer:
     """Builds the MCP server with a DEFAULT binding to `graph_name` on `client`.
 
     Graph selection is per-operation: every tool takes an optional `graph` argument naming the
     graph to act on, so one session can query and index across ALL graphs on the instance. `graph`
     omitted -> the session default (initially `graph_name`, changeable with `use_graph`). Graph
     handles are created lazily and cached (a Graph is a thin wrapper, so this just avoids rebuilding
-    it per call)."""
+    it per call).
+
+    `embed` overrides the post-ingest embedding mode for this server's index/ingest tools (see
+    ingest._maybe_embed). The CLI passes "inline" when the server was started against an explicit
+    `--host` -- an ad-hoc connection the background embed daemon (which reconnects via the
+    *configured* backend) couldn't reach, so those ingests must embed inline."""
     default_name = graph_name
     graphs: dict[str, Any] = {default_name: client.select_graph(default_name)}
     state = {"name": default_name}  # the session default; use_graph mutates it
@@ -214,7 +222,22 @@ def create_server(client: FalkorDB, graph_name: str, tools: str | None = None) -
     ) -> dict[str, Any]:
         """Build or update the graph for a LOCAL directory (`path`, default '.'); re-running applies only the delta. Use `graph=` to add a related repo to the same graph (cross-repo calls resolve) or a new name to isolate it. `deep`: 'inline' (default), 'background', or 'off'. `graph` picks the graph (default: the session default)."""
         g, gname = _write_graph(graph)
-        report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep)
+        # Its turn among this repo's hook / watcher syncs, which write the same project subgraph
+        # (core/sync_lock.py).
+        with contextlib.ExitStack() as turn:
+            turn.enter_context(sync_lock(resolve_project_root(path), queue_one=False))
+            others = ingest.deep_threads()  # other repos' background deep passes, still running
+            try:
+                report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep, embed=embed)
+            finally:
+                if deep == "background":
+                    # That pass still writes the subgraph after this call has answered: a thread
+                    # takes the lock over, waits for this call's pass (not the others') and only
+                    # then releases it.
+                    for thread in ingest.deep_threads():
+                        if thread not in others:
+                            turn.callback(thread.join)
+                    threading.Thread(target=turn.pop_all().close, name="unlock-after-deep", daemon=True).start()
         # Shared with the CLI (lifecycle.wire_trigger) so the MCP can't skip the registry/hook
         # setup the CLI does -- honours the install-time [resync].trigger choice.
         resync = lifecycle.wire_trigger(str(resolve_project_root(path)), gname, project_name)
@@ -228,7 +251,7 @@ def create_server(client: FalkorDB, graph_name: str, tools: str | None = None) -
         """Like `index_repository` but clones a git `repo_uri` first (`ref` picks a branch/tag/commit). `graph` picks the graph (default: the session default)."""
         g, gname = _write_graph(graph)
         try:
-            report = ingest.ingest_repository(GraphWriter(g), repo_uri, ref=ref, project_name=project_name, deep=deep)
+            report = ingest.ingest_repository(GraphWriter(g), repo_uri, ref=ref, project_name=project_name, deep=deep, embed=embed)
         except git.GitCommandError as e:
             raise ValueError(f"couldn't access git repository {repo_uri!r}: {e}") from e
         # Parity with the CLI: wire the resync trigger onto a local checkout when the URI is one;

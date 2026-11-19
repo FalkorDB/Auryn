@@ -116,12 +116,18 @@ class _Index:
                 self.add_reexports(m.dotted, getattr(m, "reexports", ()) or ())
         scope_id = _scope_id(self.proj_id, m)
         for fn in m.functions:
-            self.callable_by_qname[f"{m.dotted}.{fn.name}"] = (
-                ids.function_id(scope_id, fn.name, [p.name for p in fn.params]),
-                "Function",
-            )
+            self._index_function(fn, m.dotted, scope_id)
         for cls in m.classes:
             self._index_class(cls, m.dotted, scope_id)
+
+    def _index_function(self, fn: RawFunction, parent_dotted: str, parent_scope_id: str):
+        """Index a function and (recursively) the functions nested in its body. A nested def is
+        scoped under its enclosing function's id/qname (`<module>.outer.inner`)."""
+        qname = f"{parent_dotted}.{fn.name}"
+        fid = ids.function_id(parent_scope_id, fn.name, [p.name for p in fn.params])
+        self.callable_by_qname[qname] = (fid, "Function")
+        for nested in fn.nested:
+            self._index_function(nested, qname, fid)
 
     def add_reexports(self, package: str, reexports) -> None:
         """Record a package's re-exported names (see RawModule.reexports)."""
@@ -143,10 +149,10 @@ class _Index:
         cls_id = ids.class_id(scope_id, cls.name)
         self.class_by_qname[qname] = cls_id
         for method in cls.methods:
-            self.callable_by_qname[f"{qname}.{method.name}"] = (
-                ids.method_id(cls_id, method.name, [p.name for p in method.params]),
-                "Method",
-            )
+            mid = ids.method_id(cls_id, method.name, [p.name for p in method.params])
+            self.callable_by_qname[f"{qname}.{method.name}"] = (mid, "Method")
+            for nested in method.nested:  # a def inside a method is a nested Function scoped under it
+                self._index_function(nested, f"{qname}.{method.name}", mid)
         for nested in cls.nested:
             self._index_class(nested, qname, cls_id)
 
@@ -455,7 +461,7 @@ def _emit_attribute(attr: RawAttribute, cls_id: str, ctx: _ModCtx) -> Iterator[G
 
 
 def _resolve_scope_calls(
-    calls: list[RawCall], caller_label: str, caller_id: str, ctx: _ModCtx
+    calls: list[RawCall], caller_label: str, caller_id: str, ctx: _ModCtx, scope_locals: frozenset = frozenset()
 ) -> tuple[list[GraphEdge], list[GraphNode], list[str]]:
     """Resolve the calls made from one scope -- a function/method body OR a module's top-level
     code -- into CALLS edges originating at `caller_id`, the external placeholder nodes those
@@ -472,7 +478,7 @@ def _resolve_scope_calls(
     external_nodes: list[GraphNode] = []
     unresolved_calls: list[str] = []
     for call in calls:
-        res = _resolve_call(call, ctx)
+        res = _resolve_call(call, ctx, scope_locals)
         if res is None:
             if ctx.oracle is not None and call.is_simple_name:
                 unresolved_calls.append(_call_text(call))
@@ -505,9 +511,15 @@ def _resolve_scope_calls(
 _MAX_CALL_LINES = 20
 
 
-def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotted: str, container_rel: str, container_id: str, container_label: str, ctx: _ModCtx) -> Iterator[GraphNode | GraphEdge]:
+def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotted: str, container_rel: str, container_id: str, container_label: str, ctx: _ModCtx, enclosing_locals: frozenset = frozenset()) -> Iterator[GraphNode | GraphEdge]:
     is_method = container_label == "Class"
     param_names = [p.name for p in fn.params]
+    # Names bound locally in this scope chain: this function's params + its own nested defs, plus the
+    # same from every enclosing function (a nested def closes over them). A simple-name call matching
+    # one of these is a LOCAL / shadowed reference -- it must NOT resolve to a module/import function of
+    # the same name. The ast fallback stays conservative (shadowed -> unresolved, never a WRONG edge);
+    # the jedi engine resolves the real target by inference.
+    scope_locals = enclosing_locals | frozenset(param_names) | frozenset(n.name for n in fn.nested)
     fn_id = ids.method_id(scope_id, fn.name, param_names) if is_method else ids.function_id(scope_id, fn.name, param_names)
     label = "Method" if is_method else "Function"
     annotated_ret = fn.returns is not None
@@ -515,7 +527,7 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
     # Resolve calls first so `unresolved_calls` can ride on the node we're about to emit.
     # A resolved call edges to the project callable; an _External call edges to a placeholder
     # (ADR 0004) -- surfacing stdlib/builtin/third-party and not-yet-ingested sibling symbols.
-    call_edges, external_nodes, unresolved_calls = _resolve_scope_calls(fn.calls, label, fn_id, ctx)
+    call_edges, external_nodes, unresolved_calls = _resolve_scope_calls(fn.calls, label, fn_id, ctx, scope_locals)
 
     props: dict[str, object] = {
         "name": fn.name,
@@ -536,6 +548,13 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
     }
     if is_method:
         props.update(kind=_method_kind(fn), is_abstract=_method_is_abstract(fn), overrides=None)
+    if container_rel == "HAS_NESTED_FUNCTION":
+        # A nested def is TWO containment hops from its Module (Module -> outer -> nested), but impact's
+        # symbols_in_ranges does only a SINGLE hop for Python -- so carry file_path on the node itself,
+        # which its direct-file strategy uses. Without it an edit to a nested def maps to its parent and
+        # impact_of_diff misses the nested function (and its callers). Top-level funcs need no file_path
+        # (the single hop reaches them).
+        props["file_path"] = ctx.module_path
     yield GraphNode(label, {"id": fn_id}, props)
     yield from external_nodes
     yield GraphEdge(container_rel, container_label, {"id": container_id}, label, {"id": fn_id})
@@ -556,6 +575,16 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
             yield GraphEdge("RETURNS", label, {"id": fn_id}, "Class", {"id": target[1]}, {"resolution": "resolved"})
 
     yield from call_edges
+
+    # Nested functions (closures, factory-/decorator-registered handlers) are first-class nodes, so
+    # calls inside them aren't lost and `who_calls` finds them. Each is scoped under this function's
+    # id/qname and emitted as a Function (never a Method) regardless of whether this scope is a
+    # function or a method -- so the container is this node via HAS_NESTED_FUNCTION.
+    for nested in fn.nested:
+        yield from _emit_function(
+            nested, fn_id, f"{qual_prefix}.{fn.name}", scope_dotted,
+            "HAS_NESTED_FUNCTION", fn_id, label, ctx, scope_locals,
+        )
 
 
 # -- resolution helpers ------------------------------------------------------------
@@ -621,21 +650,29 @@ def _external_or_none(qualifier: str, name: str, ctx: _ModCtx) -> _External | No
 
 
 def _constructor_call(class_qname: str, ctx: _ModCtx) -> _Call | None:
-    """Instantiating a project class runs its constructor: redirect the call to the class's own
-    `__init__` method when it defines one. A class with no local `__init__` (a default or purely
-    inherited constructor) has no node to point at, so no edge is drawn -- matching the no-edge
-    convention for a call the model can't name. `resolution="constructor"` marks the edge as
-    object construction (not a literal textual call to `__init__`); `receiver_type` is the class's
-    simple name, mirroring a receiver-typed method call."""
+    """Instantiating a project class runs its constructor. Redirect the call to the class's own
+    `__init__` method when it defines one; otherwise (a default constructor, or one purely inherited
+    from a base -- no local `__init__` to name) edge to the CLASS node itself, so that every
+    project-class instantiation (`raise SomeError(...)`, `Topology()`, a subclass that only inherits
+    `__init__`) is still captured for `who_calls`/`impact_of`. `resolution="constructor"` marks the
+    edge as object construction (not a literal textual call to `__init__`); `receiver_type` is the
+    class's simple name, mirroring a receiver-typed method call."""
+    simple = class_qname.rsplit(".", 1)[-1]
     ctor = ctx.idx.callable_by_qname.get(f"{class_qname}.__init__")
-    if ctor is None:
+    if ctor is not None:
+        return _Call(ctor[0], ctor[1], "constructor", simple)
+    cls_id = ctx.idx.class_by_qname.get(class_qname)
+    if cls_id is None:  # not a known project class (shouldn't happen -- callers gate on class_by_qname)
         return None
-    return _Call(ctor[0], ctor[1], "constructor", class_qname.rsplit(".", 1)[-1])
+    return _Call(cls_id, "Class", "constructor", simple)
 
 
-def _resolve_call(call: RawCall, ctx: _ModCtx) -> _Call | _External | None:
+def _resolve_call(call: RawCall, ctx: _ModCtx, scope_locals: frozenset = frozenset()) -> _Call | _External | None:
     """Resolve a call. Returns a _Call (bound to a project callable), an _External (nameable but
-    not defined in this ingest -> a placeholder node, ADR 0004), or None (dynamic / unnameable)."""
+    not defined in this ingest -> a placeholder node, ADR 0004), or None (dynamic / unnameable).
+    `scope_locals` are the names bound locally in this/enclosing scopes (params + nested defs) -- a
+    call through one of them is a local/shadowed reference and must not bind to a module/import
+    function of the same name."""
     if ctx.oracle is not None:
         full_name = ctx.oracle.resolve_call(ctx.module_path, call.line, call.col)
         if not full_name:
@@ -660,6 +697,13 @@ def _resolve_call(call: RawCall, ctx: _ModCtx) -> _Call | _External | None:
 
     # ast path: import-bound or same-module direct name calls -> project functions first.
     if call.is_simple_name:
+        # A name bound locally in this or an enclosing scope -- a parameter, or a nested def (so a call
+        # to a sibling/enclosing/recursive nested function) -- is a LOCAL / shadowed reference. The ast
+        # fallback leaves it UNRESOLVED rather than binding it to a same-named module/import function
+        # (`def run(helper): helper()`; or `outer` defining both `helper` and the caller): never a WRONG
+        # edge. The default jedi engine resolves the real nested target by inference.
+        if call.name in scope_locals:
+            return None
         if call.name in ctx.import_map:
             hit = ctx.idx.callable_by_qname.get(ctx.import_map[call.name].target)
             if hit and hit[1] == "Function":

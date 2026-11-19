@@ -36,8 +36,9 @@ def stitch(writer: GraphWriter) -> dict | None:
     # to the SAME route-keyed APIEndpoint (core.http_seam), so they arrive already merged -- one node,
     # no duplicate. This pass only has to (a) reach the endpoints that DON'T converge by id: MVC
     # `/Controller/Action` conventions and `/api/x/5` -> `api/x/{id}` templates; (b) set every
-    # endpoint's `resolved` from whether a handler exposes it; (c) GC endpoints left with neither a
-    # caller nor a handler (e.g. a route deleted from the code).
+    # endpoint's `resolved` from whether a handler exposes it; (c) GC endpoints left with no caller, no
+    # handler, AND no deployment exposure (SERVES, a k8s Ingress -- ADR 0007) -- e.g. a route deleted
+    # from the code and from every manifest.
     if not writer.ro_query("MATCH (e:APIEndpoint) RETURN e.id LIMIT 1").result_set:
         # No endpoints remain -- but if the LAST route was just removed from the code, this layer's
         # EXPOSES_ENDPOINT/INVOKES edges are now stale. Returning here without clearing would leave
@@ -143,16 +144,16 @@ def _recompute_resolved(writer: GraphWriter) -> None:
 
 
 def _gc_orphan_endpoints(writer: GraphWriter) -> int:
-    """Delete route-keyed endpoints left with neither a caller (CALLS_API) nor a handler
-    (EXPOSES_ENDPOINT, from any node kind). These are the residue of a removed route or a removed
-    call: the `extern://http/` node lives outside any single project's id-prefix, so a project resync
-    can't reclaim it -- this does. Scoped to `extern://http/` so it never touches a project-scoped
-    endpoint another ingestor owns (e.g. pyframework's `Function`-exposed routes, which that ingestor's
-    own resync manages). An endpoint that is merely uncalled (declared, no caller) keeps its EXPOSES
-    and is NOT an orphan."""
+    """Delete route-keyed endpoints left with no referrer at all: no caller (CALLS_API), no handler
+    (EXPOSES_ENDPOINT), and no deployment exposure (SERVES, a k8s Ingress -- ADR 0007). These are the
+    residue of a removed route/call/Ingress: the `extern://http/` node lives outside any single
+    project's id-prefix, so a project resync can't reclaim it -- this does. Scoped to `extern://http/`
+    so it never touches a project-scoped endpoint another ingestor owns (e.g. pyframework's
+    `Function`-exposed routes). An endpoint that is merely uncalled (declared, or Ingress-served, with
+    no caller) keeps its EXPOSES/SERVES and is NOT an orphan."""
     orphans = writer.ro_query(
         "MATCH (e:APIEndpoint) WHERE e.id STARTS WITH 'extern://http/' "
-        "AND NOT ()-[:EXPOSES_ENDPOINT]->(e) AND NOT ()-[:CALLS_API]->(e) "
+        "AND NOT ()-[:EXPOSES_ENDPOINT]->(e) AND NOT ()-[:CALLS_API]->(e) AND NOT ()-[:SERVES]->(e) "
         "RETURN e.id"
     ).result_set
     if orphans:

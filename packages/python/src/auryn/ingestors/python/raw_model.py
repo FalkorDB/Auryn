@@ -82,6 +82,7 @@ class RawFunction:
     self_attrs: list[RawAttribute] = field(default_factory=list)  # methods only: self.x = ... targets
     source: str = ""  # the def's source text (shared `source` property, as C/C#/PL-SQL store it)
     doc: str = ""  # shared `doc` property: leading `#` comment block above the def, cleaned
+    nested: list["RawFunction"] = field(default_factory=list)  # defs declared inside this def's body
 
 
 @dataclass
