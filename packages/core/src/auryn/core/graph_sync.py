@@ -213,7 +213,7 @@ def stream_apply(
     with phase("write"):
         # Pass 1 -- nodes. Pop each target node's key out of node_fps: hit -> compare
         # fingerprints (unchanged/updated), miss -> new. Leftover node_fps = removals.
-        marker: GraphNode | None = None  # the node carrying SYNC_MARKER -- written last, see below
+        marker: GraphNode | None = None  # the node carrying SYNC_MARKER -- written last
         batch: list[GraphNode] = []
         updated_pairs: list[tuple[str, str]] = []  # (label, id) of content-changed nodes
         for item in make_target():

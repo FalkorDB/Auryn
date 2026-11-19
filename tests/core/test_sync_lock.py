@@ -84,7 +84,7 @@ def test_a_waiting_sync_says_what_it_is_waiting_for(tmp_path, monkeypatch, caplo
         assert not done.is_set()
     assert done.wait(timeout=10)
     t.join(timeout=10)
-    assert len(caplog.records) == 1  # an uncontended lock says nothing: see the tests above
+    assert len(caplog.records) == 1  # our own, uncontended lock said nothing
 
 
 def test_another_repo_is_not_held_up(tmp_path, monkeypatch):

@@ -237,10 +237,8 @@ def test_a_sync_that_dies_mid_apply_is_healed_by_the_next_one(graph, tmp_path, m
 
 def test_a_failed_sync_is_healed_by_going_back_to_the_previous_content(graph, tmp_path, monkeypatch):
     """The sync to new content fails midway and the tree then goes BACK (a reset, a revert). The
-    graph still holds the stamp of... nothing: had it kept the previous commit's, this re-ingest
-    of the previous content would short-circuit over the half-applied change. (This one passes
-    on the old stamp-first order too; it pins down the alternative of keeping the OLD stamp
-    until the end, which an earlier version of this change did.)"""
+    failed sync left NO stamp: had it kept the previous commit's, this re-ingest of the previous
+    content would short-circuit over the half-applied change."""
     root = tmp_path / "app"
     v1 = "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n"
     _make_dir(root, {"svc.py": v1})
