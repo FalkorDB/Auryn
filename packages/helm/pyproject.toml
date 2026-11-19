@@ -1,7 +1,7 @@
 [project]
 name = "auryn-helm"
 dynamic = ["version"]
-description = "Helm-chart plugin for Auryn (deployment & infrastructure tier, ADR 0007). Render-free: parses Chart.yaml/values.yaml/templates into a Resource (the chart/release) that DEPENDS_ON its chart dependencies and DEPLOYS the Service workloads its templates declare; each workload RUNS_IMAGE the shared Image hub, with the image resolved from values.yaml. Composes with auryn-docker/auryn-compose/auryn-k8s/auryn-terraform onto the same hub. Depends on auryn-core and PyYAML."
+description = "Helm-chart plugin for Auryn (deployment & infrastructure tier, ADR 0007). Render-free static parse: Chart.yaml + values.yaml become a Resource (the chart/release) that DEPENDS_ON its chart dependencies (in-repo chart else a placeholder), RUNS_IMAGE the shared Image hub for each values.yaml image, and MOUNTS the chart's notable ConfigValues. A deploy-helm enrichment runs the shared image lifecycle. Composes with docker/compose/k8s/terraform onto the same hub. Depends on auryn-core and PyYAML."
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
