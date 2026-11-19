@@ -46,17 +46,20 @@ This is the spine that answers concern **(2)** and shapes the rest.
   source**: parsed by the code/deployment-tier sync, not the provenance sync. Only CI *runs* are
   provenance. (See §A.)
 
-## Policy (current): do NOT pull any data from a private repo
+## Policy: public repos only, opt-in, via the GitHub CLI
 
-To avoid data leakage, **Auryn does not pull any information from a private GitHub/GitLab repo for the
-time being.** This is a hard constraint, not just a default:
-- The networked axes (**C** — PRs/issues/reviews — and **CI runs**) are **deferred**; when eventually
-  built they must be **public-repo-only**, detecting visibility from repo metadata and **refusing a
-  private repo** until this policy is explicitly revisited.
-- The **recommended v1 is unaffected** because it is **entirely local** (CI config from the checkout,
-  ownership rollup from `git log`) — it pulls from *no* repo, public or private.
-
-The rest of this section/ADR describes the eventual networked design (gated by the policy above).
+To avoid data leakage, **Auryn never pulls from a private GitHub/GitLab repo.** The networked github
+data — axis **C** (Issues/PRs/reviews) and **CI runs** — is collected **only when the user explicitly
+asks** (opt-in: an `auryn github-sync` command / MCP tool / config flag) and **only for public repos**:
+- **Via the user's GitHub CLI** (`gh`; `glab` for GitLab) — Auryn shells out to it, so the CLI owns
+  authentication and **Auryn stores, sees, and logs no token** of its own.
+- **Public-repo gate:** before any content pull, check visibility (`gh repo view <o>/<r> --json
+  isPrivate`, or the GitLab equivalent) and **refuse a private repo** (log why). Public data carries no
+  leakage risk.
+- **Never automatic:** not triggered by `ingest`, a commit hook, the save-watcher, or a branch switch
+  (the separate-trigger rule) — the user initiates it.
+- The **recommended v1 is unaffected** — it is **entirely local** (CI config + ownership rollup from the
+  checkout + `git log`) and pulls from no repo at all.
 
 ## Automatic? No — network egress is opt-in and explicit
 
@@ -71,18 +74,16 @@ The rest of this section/ADR describes the eventual networked design (gated by t
 - Private data that lands in the graph is governed by the PII / no-client-data rule below (redact/hash
   identities; never in a shared/public/demo graph).
 
-## (1) Connecting to the remote (for C, and CI runs)
+## (1) Connecting to the remote (for C, and CI runs) — via the CLI
 
 - **Identify the repo** from the checkout's `origin` remote (git_sync already carries `repo_uri`) →
-  `(host, owner, repo)`; pick the GitHub vs GitLab client from the host. No manual config in the common
-  case.
-- **Auth, in precedence order** (zero-config first): the **`gh`/`glab` CLI token** if installed
-  (`gh auth token`) → an **`AURYN_GITHUB_TOKEN`/`AURYN_GITLAB_TOKEN`** env var or config entry →
-  unauthenticated (public repos only, 60 req/hr — enough to *try*, with a clear "set a token for
-  private repos / higher limits" log). A GitHub App is a later option for orgs.
-- **Graceful degradation:** a non-GitHub/GitLab remote, or no token for a private repo, **skips axis C
-  and logs why** — it never blocks the code ingest. The token is read from the existing connection/config
-  path and **never written into the graph or logs**.
+  `(host, owner, repo)`; pick `gh` (GitHub) vs `glab` (GitLab) from the host.
+- **Auth is delegated to the CLI.** Auryn shells out to `gh`/`glab` (e.g. `gh api
+  repos/{owner}/{repo}/issues --paginate`), so the CLI's existing login is used and **Auryn never sees,
+  stores, or logs a token.** If the CLI is absent / not logged in, the github-data step is **skipped
+  with a clear log** — it never blocks the code ingest.
+- **Public-only gate:** `gh repo view <o>/<r> --json isPrivate` (or the GitLab equivalent) must report
+  **public** before any content is pulled; a private repo is **refused** (policy above).
 
 ## (2′) Keeping provenance out of the code sync — summary
 
@@ -144,9 +145,9 @@ deployment (push-based, real-time) — not the default.
   `DEPLOYS`/`NEEDS`; the `deploy-ci` arm runs the shared `core.deploy` image lifecycle.
 - **B. History / ownership** — **rollup-by-default** (props on `File`/`Function`), full
   `Commit`/`Contributor` graph opt-in + bounded; local `git log`, append-by-SHA, no auth; **PII-gated**.
-- **C. GitHub platform** — `PullRequest`/`Issue`/`Review`/`Owner` (CODEOWNERS) via the API; separate
-  subgraph, poll-based, auth per (1); joins to `Commit`/`File`/`Package` by stable key; **PII-gated**.
-  **Deferred, and public-repo-only when built (no private-repo pulls — see Policy).**
+- **C. GitHub platform** — `PullRequest`/`Issue`/`Review`/`Owner` (CODEOWNERS) via the **`gh`/`glab`
+  CLI**; separate subgraph, poll-based, joins to `Commit`/`File`/`Package` by stable key; **PII-gated**.
+  **Opt-in and public-repo-only (no private-repo pulls — see Policy).**
 
 ## Cross-cutting: PII & the public-repo rule
 
@@ -165,17 +166,23 @@ Both are **entirely local — no GitHub API, no egress, no token, nothing pulled
 Everything else — full commit graph, PR/issue/review graph (C), CI runs — is **opt-in later**, each
 ratified in its own ADR (C especially: auth + rate-limit + poll model + PII).
 
-## Open questions for the reviewer
+## Decided (this ADR)
 
-1. **Agree with the separate-subgraph + separate-trigger model** (provenance never touched by a branch
-   switch; synced on-demand/scheduled, not by the commit hook)?
-2. **Ownership as a ROLLUP (props on File/Function) by default**, full commit graph opt-in — or do you
-   want commit-level nodes from the start (memory cost)?
-3. **PII posture:** redact/hash identities by default, opt-in to real (recommended)?
-4. **Polling (no webhooks) for v1** — agreed, with webhooks reserved for a hosted deployment?
-5. **CI = config now, runs deferred** — agreed? (Config is the ADR-0007 loop-closer.)
-6. **Connection/auth:** derive repo from the remote; `gh`/`glab` token → env/config → unauth-public,
-   with graceful skip — acceptable default?
+- **Private repos: never pulled.** Networked github data is **public-repo-only**, **opt-in** (explicit,
+  never automatic), and fetched **via the user's `gh`/`glab` CLI** (no token handled by Auryn).
+- **Provenance is a separate subgraph** (own labels, own trigger/cadence, repo-scoped ids,
+  churn-tolerant joins) → a branch/commit switch never touches it, and it never fires on a code ingest.
+- **No webhooks** (poll on-demand/scheduled; webhooks only for a future hosted deployment).
+
+## Still open for the reviewer
+
+1. **History granularity:** ownership **ROLLUP** (props on File/Function) by default, with a full
+   `Commit`/`Contributor` graph opt-in + bounded — or commit-level nodes from the start (memory cost)?
+2. **PII of public data:** author names in public PRs/issues/commits are low-stakes, but still —
+   redact/hash by default, or keep real identities for public repos?
+3. **Sequencing / appetite:** is the near-term build the **public github-data collector** (C + CI runs
+   via `gh`, opt-in) — the "real value" you flagged — the **local v1** (CI config + ownership rollup),
+   or both?
 
 ## Consequences
 
