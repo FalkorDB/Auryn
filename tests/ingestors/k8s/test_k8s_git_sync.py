@@ -73,7 +73,7 @@ def test_resync_removes_deleted_workload(graph, tmp_path):
 
 
 def test_resync_after_an_interrupted_sync_removes_the_last_workload(graph, tmp_path):
-    q = _ingest(graph, tmp_path, {"k8s/deploy.yaml": _MANIFEST})
+    _ingest(graph, tmp_path, {"k8s/deploy.yaml": _MANIFEST})
     graph.query("MATCH (p:Project) SET p.commit_sha = NULL")  # what a sync that died mid-apply leaves
     (tmp_path / "k8s" / "deploy.yaml").unlink()
     q = _ingest(graph, tmp_path, {})

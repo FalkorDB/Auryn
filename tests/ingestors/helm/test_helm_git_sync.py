@@ -87,7 +87,7 @@ def test_resync_removes_deleted_chart(graph, tmp_path):
 
 
 def test_resync_after_an_interrupted_sync_removes_the_last_chart(graph, tmp_path):
-    q = _ingest(graph, tmp_path, _CHART_FILES)
+    _ingest(graph, tmp_path, _CHART_FILES)
     graph.query("MATCH (p:Project) SET p.commit_sha = NULL")  # what a sync that died mid-apply leaves
     import shutil
     shutil.rmtree(tmp_path / "charts")
