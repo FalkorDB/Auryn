@@ -171,6 +171,14 @@ def main() -> None:
             "RETURN c.name, i.ref ORDER BY i.ref"):
             print(f"  chart {chart:6}  RUNS  {img}  (resolved from values.yaml)")
 
+        section("11. KUSTOMIZE  (render-free: an overlay DEPENDS_ON its base + RUNS the SAME hub image)")
+        for overlay, base in rows(g,
+            "MATCH (o:Resource {kind:'kustomization'})-[:DEPENDS_ON]->(b:Resource) RETURN o.name, b.name ORDER BY o.name"):
+            print(f"  overlay {overlay:14}  DEPENDS_ON  {base}")
+        for overlay, img in rows(g,
+            "MATCH (o:Resource {kind:'kustomization'})-[:RUNS_IMAGE]->(i:Image) RETURN o.name, i.ref ORDER BY i.ref"):
+            print(f"  overlay {overlay:14}  RUNS  {img}  (from the images: transformer)")
+
         # The most-shared hub image and how many producers reach it (1 builder + N runners) -- derived
         # from the graph, not a hard-coded ref.
         top = rows(g, "MATCH (n)-[:BUILDS_IMAGE|RUNS_IMAGE]->(i:Image) WITH i, count(DISTINCT n) AS c "

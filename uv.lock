@@ -25,6 +25,7 @@ members = [
     "auryn-julia",
     "auryn-k8s",
     "auryn-kotlin",
+    "auryn-kustomize",
     "auryn-oracle",
     "auryn-orm",
     "auryn-php",
@@ -176,6 +177,7 @@ all = [
     { name = "auryn-julia" },
     { name = "auryn-k8s" },
     { name = "auryn-kotlin" },
+    { name = "auryn-kustomize" },
     { name = "auryn-oracle", extra = ["live"] },
     { name = "auryn-orm" },
     { name = "auryn-php" },
@@ -237,6 +239,9 @@ k8s = [
 ]
 kotlin = [
     { name = "auryn-kotlin" },
+]
+kustomize = [
+    { name = "auryn-kustomize" },
 ]
 llm = [
     { name = "anthropic" },
@@ -313,6 +318,8 @@ requires-dist = [
     { name = "auryn-k8s", marker = "extra == 'k8s'", editable = "packages/k8s" },
     { name = "auryn-kotlin", marker = "extra == 'all'", editable = "packages/kotlin" },
     { name = "auryn-kotlin", marker = "extra == 'kotlin'", editable = "packages/kotlin" },
+    { name = "auryn-kustomize", marker = "extra == 'all'", editable = "packages/kustomize" },
+    { name = "auryn-kustomize", marker = "extra == 'kustomize'", editable = "packages/kustomize" },
     { name = "auryn-oracle", marker = "extra == 'oracle'", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'all'", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'oracle-live'", editable = "packages/oracle" },
@@ -343,7 +350,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.2,<2.1" },
     { name = "tomli-w", specifier = ">=1.0" },
 ]
-provides-extras = ["llm", "embedded", "python", "typescript", "java", "go", "rust", "c", "cpp", "cuda", "csharp", "php", "ruby", "kotlin", "swift", "julia", "bash", "sql", "sql-all", "oracle", "oracle-live", "http", "orm", "grpc", "events", "docker", "compose", "k8s", "terraform", "helm", "all"]
+provides-extras = ["llm", "embedded", "python", "typescript", "java", "go", "rust", "c", "cpp", "cuda", "csharp", "php", "ruby", "kotlin", "swift", "julia", "bash", "sql", "sql-all", "oracle", "oracle-live", "http", "orm", "grpc", "events", "docker", "compose", "k8s", "terraform", "helm", "kustomize", "all"]
 
 [[package]]
 name = "auryn-cpp"
@@ -540,6 +547,21 @@ requires-dist = [
     { name = "auryn-core", editable = "packages/core" },
     { name = "tree-sitter", specifier = ">=0.26.0" },
     { name = "tree-sitter-kotlin", specifier = ">=1.1.0" },
+]
+
+[[package]]
+name = "auryn-kustomize"
+version = "0.1.0"
+source = { editable = "packages/kustomize" }
+dependencies = [
+    { name = "auryn-core" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "auryn-core", editable = "packages/core" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]
@@ -1204,6 +1226,7 @@ dependencies = [
     { name = "auryn-julia" },
     { name = "auryn-k8s" },
     { name = "auryn-kotlin" },
+    { name = "auryn-kustomize" },
     { name = "auryn-oracle" },
     { name = "auryn-orm" },
     { name = "auryn-php" },
@@ -1250,6 +1273,7 @@ dev = [
     { name = "auryn-julia" },
     { name = "auryn-k8s" },
     { name = "auryn-kotlin" },
+    { name = "auryn-kustomize" },
     { name = "auryn-oracle", extra = ["live"] },
     { name = "auryn-orm" },
     { name = "auryn-php" },
@@ -1288,6 +1312,7 @@ requires-dist = [
     { name = "auryn-julia", editable = "packages/julia" },
     { name = "auryn-k8s", editable = "packages/k8s" },
     { name = "auryn-kotlin", editable = "packages/kotlin" },
+    { name = "auryn-kustomize", editable = "packages/kustomize" },
     { name = "auryn-oracle", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'all'", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'oracle-live'", editable = "packages/oracle" },
@@ -1324,6 +1349,7 @@ dev = [
     { name = "auryn-julia", editable = "packages/julia" },
     { name = "auryn-k8s", editable = "packages/k8s" },
     { name = "auryn-kotlin", editable = "packages/kotlin" },
+    { name = "auryn-kustomize", editable = "packages/kustomize" },
     { name = "auryn-oracle", extras = ["live"], editable = "packages/oracle" },
     { name = "auryn-orm", editable = "packages/orm" },
     { name = "auryn-php", editable = "packages/php" },
