@@ -112,3 +112,13 @@ def test_reserved_root_dir_is_skipped(graph, tmp_path):
     })
     assert q("MATCH (r:Resource) RETURN count(r)") == [[1]]
     assert q("MATCH (r:Resource) WHERE r.id = 'kustomize://shop/_root' RETURN r.namespace") == [["real-root"]]
+
+
+def test_absolute_base_path_does_not_resolve(graph, tmp_path):
+    # an absolute `resources: [/base]` is not an in-repo relative dir -> no DEPENDS_ON (it must not
+    # wrongly resolve to the sibling `base/` kustomization)
+    q = _ingest(graph, tmp_path, {
+        "base/kustomization.yaml": "kind: Kustomization\n",
+        "overlays/prod/kustomization.yaml": "kind: Kustomization\nresources:\n  - /base\n",
+    })
+    assert q("MATCH (:Resource {name:'overlays/prod'})-[:DEPENDS_ON]->() RETURN count(*)") == [[0]]

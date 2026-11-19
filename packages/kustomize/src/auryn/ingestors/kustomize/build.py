@@ -24,6 +24,9 @@ def _resolve_base(kustomization_dir: str, entry: str) -> str:
     `""`. A remote/URL entry normalizes to something that matches nothing -- and is therefore ignored."""
     joined = posixpath.join(kustomization_dir, entry) if kustomization_dir else entry
     norm = posixpath.normpath(joined).replace(chr(92), "/")
+    if norm.startswith("/"):
+        return norm  # an absolute entry (`/base`) is not an in-repo relative dir -- keep the leading
+        #              `/` so it matches no `by_dir` key (which are all relative), i.e. no DEPENDS_ON
     return "" if norm == "." else norm.strip("/")
 
 
