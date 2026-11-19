@@ -83,3 +83,11 @@ def test_resync_removes_deleted_resource(graph, tmp_path):
     assert q("MATCH (:Resource)-[:DEPENDS_ON]->() RETURN count(*)") == [[0]]
     assert q("MATCH (d:Database) RETURN count(d)") == [[0]]
     assert q("MATCH (r:Registry) RETURN count(r)") == [[0]]  # the ecr Registry node was removed too
+
+
+def test_resync_after_an_interrupted_sync_removes_the_last_resource(graph, tmp_path):
+    q = _ingest(graph, tmp_path, {"main.tf": _TF})
+    graph.query("MATCH (p:Project) SET p.commit_sha = NULL")  # what a sync that died mid-apply leaves
+    (tmp_path / "main.tf").unlink()
+    q = _ingest(graph, tmp_path, {})
+    assert q("MATCH (r:Resource) RETURN count(r)") == [[0]]  # no stamp is not "never ingested"

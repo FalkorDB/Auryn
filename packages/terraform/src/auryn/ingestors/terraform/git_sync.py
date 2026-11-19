@@ -60,7 +60,8 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
         if parsed.blocks:
             files.append((path, parsed))
 
-    if not files and prior_sha is None:
+    # (a Project node without a stamp is a sync that died mid-apply, not "never ingested")
+    if not files and prior_sha is None and not writer.node_exists("Project", proj_id):
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
     project_node = GraphNode(
