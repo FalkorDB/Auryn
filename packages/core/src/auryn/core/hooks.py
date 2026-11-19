@@ -62,16 +62,21 @@ def _block(sync_cmd: list[str]) -> str:
 
 
 def _strip_block(text: str) -> str:
-    out, skip = [], False
+    """`text` without our block. A begin marker whose end marker is gone (deleted by hand) bounds
+    nothing, so what follows it is kept: the block sits ahead of the user's body, and reading on
+    to the end of the file would take the user's own lines out with it."""
+    out, block = [], None  # block: the lines since a begin marker whose end marker is still to come
     for ln in text.splitlines(keepends=True):
         s = ln.strip()
-        if s == _BEGIN:
-            skip = True
-        elif s == _END:
-            skip = False
-        elif not skip:
+        if s == _BEGIN and block is None:
+            block = [ln]
+        elif s == _END and block is not None:
+            block = None
+        elif block is not None:
+            block.append(ln)
+        else:
             out.append(ln)
-    return "".join(out)
+    return "".join(out + (block or []))
 
 
 def owns_hooks_dir(local_dir) -> bool:
@@ -180,6 +185,8 @@ def uninstall(local_dir) -> None:
         if text is None or _BEGIN not in text:
             continue
         stripped = _strip_block(text)
+        if stripped == text:  # a begin marker without its end: no block to take out
+            continue
         try:
             if stripped.strip() in _BARE:
                 path.unlink()

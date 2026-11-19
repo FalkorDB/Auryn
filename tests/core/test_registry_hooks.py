@@ -120,6 +120,27 @@ def test_a_wait_in_the_users_hook_does_not_wait_for_the_resync(tmp_path):
     assert time.monotonic() - started < 3, "the commit waited for the resync"
 
 
+def test_a_block_without_its_end_marker_does_not_take_the_users_lines_with_it(tmp_path):
+    """The end marker deleted by hand: everything after the begin marker read as our block. With
+    the block ahead of the user's body that is the user's own code -- uninstall saw a bare
+    `#!/bin/sh` left over and deleted the hook. A begin marker with no end bounds nothing now: the
+    hook is left as it is, and a re-install adds one whole block without dropping a line."""
+    repo = _init_repo(tmp_path / "r")
+    hook = hooks.hooks_dir(repo) / "post-commit"
+    broken = "#!/bin/sh\n# >>> auryn resync >>>\n(true >/dev/null 2>&1 &)\necho user-code\n"
+    hook.write_text(broken)
+    hook.chmod(0o755)
+
+    hooks.uninstall(repo)
+    assert hook.read_text() == broken
+
+    hooks.install(repo, ["true"])
+    hooks.install(repo, ["true"])
+    assert hook.read_text().count("# <<< auryn resync <<<") == 1 and "echo user-code" in hook.read_text()
+    hooks.uninstall(repo)
+    assert hook.read_text() == broken
+
+
 def test_install_leaves_a_non_shell_hook_and_a_disabled_hook_as_they_are(tmp_path):
     """A shell line appended to a Python hook is a SyntaxError that also stops the USER's hook;
     and `chmod 755` on a hook the user had switched off switches it back on. Neither is ours to
