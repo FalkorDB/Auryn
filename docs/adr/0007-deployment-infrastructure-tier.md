@@ -177,11 +177,13 @@ The same two-role split as `http`/`orm`, so each half stays simple and the join 
   `PACKAGES`, `SERVES`, `CONNECTS_TO`, `SHIPS`, the `resolved` flag, and image-node GC — so any ingest
   order converges and a resync self-corrects.
 
-One small, additive core change this tier needs: `GitLanguage` matches by `path.endswith(suffix)`,
-which can't express `Dockerfile` / `Dockerfile.prod` / `*.tf` / `values.yaml` basename detection.
-Add an optional `filename_matches` predicate to `GitLanguage` (and the two `Source.list_files` call
-sites); it is a no-op for the suffix-only languages and lets every IaC producer register a basename
-matcher cleanly.
+One small, additive core change this tier needs — **SHIPPED**: `GitLanguage` matched only by
+`path.endswith(suffix)`, which can't express `Dockerfile` / `Dockerfile.prod` / `values.yaml` basename
+detection. `GitLanguage.file_globs` (basename fnmatch, unioned with the suffixes via `match_patterns`)
+plus `Source.list_files_glob` now carry it: detection and the save-watcher match basenames, so docker
+catches the `Dockerfile.*`/`Containerfile` family, compose the overlay variants, terraform `*.tofu`,
+and **helm anchors on `Chart.yaml`** (fires only on real charts instead of being woken by every
+`.yaml`). It is a no-op for the suffix-only code languages (a suffix `s` ≡ the glob `*s`).
 
 ### 8. Provenance
 

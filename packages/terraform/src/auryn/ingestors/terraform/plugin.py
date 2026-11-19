@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
-from auryn.core.registry import GitLanguage, register_git_language
+from auryn.core.registry import GitLanguage, match_patterns, register_git_language
 
 LANGUAGE = "terraform"
 FILE_SUFFIXES = (".tf",)
+FILE_GLOBS = ("*.tofu",)  # OpenTofu, the Terraform fork; identical HCL
+MATCH_PATTERNS = match_patterns(FILE_SUFFIXES, FILE_GLOBS)
 EXCLUDED_DIR_NAMES = frozenset({".git", "node_modules", "vendor", "dist", ".idea", ".vscode", ".terraform"})
 
 
@@ -17,5 +19,6 @@ def _sync(*args, **kwargs):
 
 
 register_git_language(
-    GitLanguage(language=LANGUAGE, file_suffixes=FILE_SUFFIXES, excluded_dir_names=EXCLUDED_DIR_NAMES, sync=_sync)
+    GitLanguage(language=LANGUAGE, file_suffixes=FILE_SUFFIXES, file_globs=FILE_GLOBS,
+                excluded_dir_names=EXCLUDED_DIR_NAMES, sync=_sync)
 )
