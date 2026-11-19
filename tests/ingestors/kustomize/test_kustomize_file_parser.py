@@ -67,6 +67,28 @@ def test_regex_name_is_not_a_concrete_image():
     assert _p("images:\n  - name: \"^nginx$\"\n    newTag: \"1.0\"\n").images == ()
 
 
+# ── tag/digest precedence (faithful to Kustomize's imagetag updater) ───────────
+def test_rename_keeps_the_matched_digest():
+    # a `name` carrying both a tag and a digest, renamed -> the digest (stronger identity) is kept
+    p = _p("images:\n  - name: nginx:1.27@sha256:abc123\n    newName: acme/nginx\n")
+    assert p.images == ("acme/nginx@sha256:abc123",)
+
+
+def test_newtag_clears_the_matched_digest():
+    p = _p("images:\n  - name: nginx@sha256:abc123\n    newTag: \"2.0\"\n")
+    assert p.images == ("nginx:2.0",)
+
+
+def test_digest_wins_over_newtag():
+    p = _p("images:\n  - name: nginx\n    newTag: \"2.0\"\n    digest: sha256:xyz\n")
+    assert p.images == ("nginx@sha256:xyz",)
+
+
+def test_tag_suffix_is_a_noop_on_a_digest():
+    p = _p("images:\n  - name: nginx@sha256:abc123\n    tagSuffix: -stable\n")
+    assert p.images == ("nginx@sha256:abc123",)
+
+
 def test_bare_name_is_a_noop_and_skipped():
     # a match target with no override asserts nothing concrete -> not an image
     p = _p("images:\n  - name: nginx\n")

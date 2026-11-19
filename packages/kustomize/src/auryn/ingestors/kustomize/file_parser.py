@@ -59,11 +59,12 @@ def _split_ref(ref: str) -> tuple[str, str, str]:
 
 
 def _resolve_image(entry: dict) -> str | None:
-    """A single `images:` entry -> the concrete ref the overlay deploys, or None. Precedence follows
-    Kustomize: `newName` replaces the repository, `newTag`/`digest` replace the tag/digest, and a rename
-    with no new tag KEEPS the tag/digest carried by the matched `name`. Only an entry that ASSERTS a
-    concrete ref is emitted -- a no-op `{name: x}`, or a `newName`-only rename whose base tag is unknown
-    render-free, is skipped (materializing `:latest` would be a false hub join)."""
+    """A single `images:` entry -> the concrete ref the overlay deploys, or None. Faithful to Kustomize's
+    `imagetag` updater (one tag-OR-digest slot): `newName` replaces the repository; the matched `name`'s
+    tag/digest is the starting point; `newTag` replaces the tag (clearing any digest); `digest` replaces
+    the digest and WINS over `newTag` (clearing the tag); `tagSuffix` appends to a tag only (a no-op on a
+    digest). Only an entry that yields a concrete ref is emitted -- a no-op `{name: x}`, or a `newName`
+    rename whose base tag is unknown render-free, is skipped (materializing `:latest` is a false hub join)."""
     if not isinstance(entry, dict):
         return None
     name, new_name = _scalar(entry.get("name")), _scalar(entry.get("newName"))
@@ -71,18 +72,20 @@ def _resolve_image(entry: dict) -> str | None:
     tag_suffix = _scalar(entry.get("tagSuffix"))
     if not (new_name or new_tag or new_digest or tag_suffix):
         return None  # a no-op entry -- just a match target, asserts nothing
-    name_repo, name_tag, name_digest = _split_ref(name) if name else ("", "", "")
+    name_repo, tag, digest = _split_ref(name) if name else ("", "", "")
     repo = new_name or name_repo  # a tagged `name` contributes only its repository here
     if not repo:
         return None
+    if new_tag:
+        tag, digest = new_tag, ""       # newTag replaces the tag and clears any digest
     if new_digest:
-        ref = f"{repo}@{new_digest}"           # a digest is the exact identity; `tagSuffix` is tag-only
-    elif new_tag:
-        ref = f"{repo}:{new_tag}{tag_suffix}"   # newTag overrides; `tagSuffix` appends (empty when unset)
-    elif name_tag:
-        ref = f"{repo}:{name_tag}{tag_suffix}"  # renamed, tag kept from the matched name
-    elif name_digest:
-        ref = f"{repo}@{name_digest}"           # renamed, matched by digest -- no tag to suffix
+        digest, tag = new_digest, ""    # digest replaces and WINS over newTag, clearing the tag
+    if tag_suffix and tag:
+        tag += tag_suffix               # tagSuffix appends to a tag (no-op on a digest)
+    if digest:
+        ref = f"{repo}@{digest}"        # a digest present is the stronger identity
+    elif tag:
+        ref = f"{repo}:{tag}"
     else:
         return None  # renamed but the base's tag is unknown statically -- don't guess `:latest`
     return ref if _plausible_image(ref) else None
