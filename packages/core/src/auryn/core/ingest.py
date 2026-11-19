@@ -737,11 +737,11 @@ def _graph_has_prefix(writer: GraphWriter, id_prefix: str) -> bool:
 
 
 def _detect(source: Source, target_sha: str, lang: GitLanguage) -> int:
-    """How many of this language's files are present at `target_sha`. Each suffix
-    identifies a disjoint set of files (a path ends with exactly one), so summing is
-    correct."""
+    """How many of this language's files are present at `target_sha`, by basename glob
+    (`match_patterns` unions the suffixes and `file_globs`). One glob pass, so a file
+    matching several patterns is counted once (globs, unlike disjoint suffixes, can overlap)."""
     excluded = set(lang.excluded_dir_names)
-    return sum(len(source.list_files(target_sha, suffix, excluded)) for suffix in lang.file_suffixes)
+    return len(source.list_files_glob(target_sha, lang.match_patterns(), excluded))
 
 
 def _autoinstall_missing(

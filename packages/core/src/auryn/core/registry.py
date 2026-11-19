@@ -82,6 +82,14 @@ class GitLanguage:
     file_suffixes: tuple[str, ...]
     excluded_dir_names: frozenset[str]
     sync: Callable[..., Any]
+    file_globs: tuple[str, ...] = ()
+    """Basename GLOB patterns (fnmatch, case-sensitive) that identify this language's files, for the
+    cases a bare `endswith` suffix can't express: a prefix/infix variant (`Dockerfile.*`,
+    `compose.*.yml`) or an exact-basename anchor that fires only when present (`Chart.yaml`, so Helm
+    isn't woken by every `.yaml`). ADDITIVE to `file_suffixes` (each suffix `s` is equivalent to the
+    glob `*s`); detection and the save-watcher match on the UNION (see `match_patterns`). Overlapping
+    patterns across languages (Helm `Chart.yaml` vs k8s `*.yaml`) are NOT exclusive ownership -- each
+    producer's `sync` still content-sniffs to decide what it actually owns (ADR 0007 §7)."""
     deep_sync: Callable[..., Any] | None = None
     """Optional second, deeper pass for two-phase (dynamic) languages. When set, the
     ingestion endpoint runs `sync` first (fast, e.g. Python's stdlib-`ast` engine) so the
@@ -92,6 +100,21 @@ class GitLanguage:
 
     def is_two_phase(self) -> bool:
         return self.deep_sync is not None
+
+    def match_patterns(self) -> tuple[str, ...]:
+        """The basename globs that identify this language's files: each `file_suffixes` entry `s` as the
+        glob `*s` (so `.cs` -> `*.cs`, `Dockerfile` -> `*Dockerfile`, preserving the old `endswith`
+        semantics), unioned with `file_globs`, de-duplicated. The single source of truth for both
+        detection and the save-watcher."""
+        return match_patterns(self.file_suffixes, self.file_globs)
+
+
+def match_patterns(file_suffixes: tuple[str, ...], file_globs: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Basename globs for a `(file_suffixes, file_globs)` pair: each suffix `s` becomes `*s` (preserving
+    the old `endswith` semantics), unioned with `file_globs`, order-preserving de-duplicated. The one
+    place the union is computed -- `GitLanguage.match_patterns` and every plugin's git_sync call it, so
+    detection and ingestion can never match different files."""
+    return tuple(dict.fromkeys((*(f"*{s}" for s in file_suffixes), *file_globs)))
 
 
 def register_git_language(language: GitLanguage) -> None:

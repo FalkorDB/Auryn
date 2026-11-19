@@ -28,7 +28,7 @@ from auryn.ingestors.helm.build import build_graph
 from auryn.ingestors.helm.file_parser import parse_chart
 from auryn.ingestors.helm.ids import project_id
 from auryn.ingestors.helm.plugin import EXCLUDED_DIR_NAMES as _EXCLUDED_DIR_NAMES
-from auryn.ingestors.helm.plugin import FILE_SUFFIXES as _FILE_SUFFIXES
+from auryn.ingestors.helm.plugin import CHART_GLOBS as _CHART_GLOBS
 from auryn.ingestors.helm.schema import NODE_SCHEMAS, OWNED_LABELS
 
 logger = logging.getLogger(__name__)
@@ -53,10 +53,9 @@ def _collect_charts(source, target_sha: str) -> dict[str, tuple]:
     `Chart.yaml`. Only the chart's own `Chart.yaml` + sibling `values.yaml` are kept -- v1 reads no
     templates. A repo YAML file that isn't a `Chart.yaml` (and isn't a chart's `values.yaml`) is
     dropped, so a plain k8s manifest or a compose file never anchors a helm chart."""
-    yaml_files: dict[str, str] = {}
-    for suffix in _FILE_SUFFIXES:
-        for path, blob_sha in source.list_files(target_sha, suffix, set(_EXCLUDED_DIR_NAMES)):
-            yaml_files.setdefault(path, blob_sha)
+    yaml_files: dict[str, str] = {}  # only Chart.yaml + values.yaml, not every repo YAML
+    for path, blob_sha in source.list_files_glob(target_sha, _CHART_GLOBS, set(_EXCLUDED_DIR_NAMES)):
+        yaml_files.setdefault(path, blob_sha)
 
     chart_dirs: dict[str, str] = {}
     for p in yaml_files:

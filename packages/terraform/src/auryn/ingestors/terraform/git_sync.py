@@ -16,7 +16,7 @@ from auryn.ingestors.terraform.build import build_graph
 from auryn.ingestors.terraform.file_parser import parse_source
 from auryn.ingestors.terraform.ids import project_id
 from auryn.ingestors.terraform.plugin import EXCLUDED_DIR_NAMES as _EXCLUDED_DIR_NAMES
-from auryn.ingestors.terraform.plugin import FILE_SUFFIXES as _FILE_SUFFIXES
+from auryn.ingestors.terraform.plugin import MATCH_PATTERNS as _MATCH_PATTERNS
 from auryn.ingestors.terraform.schema import NODE_SCHEMAS, OWNED_LABELS
 
 logger = logging.getLogger(__name__)
@@ -46,9 +46,8 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
     seen: dict[str, str] = {}
-    for suffix in _FILE_SUFFIXES:
-        for path, blob_sha in source.list_files(target_sha, suffix, set(_EXCLUDED_DIR_NAMES)):
-            seen.setdefault(path, blob_sha)
+    for path, blob_sha in source.list_files_glob(target_sha, _MATCH_PATTERNS, set(_EXCLUDED_DIR_NAMES)):
+        seen.setdefault(path, blob_sha)
 
     files = []
     for path, blob_sha in sorted(seen.items()):
