@@ -2,6 +2,7 @@
 name = "auryn-swift"
 version = "0.1.0"
 description = "Swift language plugin for Auryn: a fast tree-sitter-swift engine extracting classes/structs/enums/protocols/functions/methods/initializers/properties/params/cases, the type hierarchy (EXTENDS/IMPLEMENTS from superclass + protocol conformance, including via extensions), imports, and calls. A deep pass (SourceKit-LSP symbol resolution) is the planned second phase."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }

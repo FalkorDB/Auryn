@@ -93,6 +93,13 @@ def test_plugin_to_plugin_dependencies_are_pinned_to_the_same_release():
                 assert requirement.split("#")[0].strip() == f"{dep}=={version}", (name, requirement)
 
 
+def test_every_summary_fits_pypi():
+    # PyPI rejects an upload whose summary (the `description` field) is over 512 characters.
+    projects = [_project(ROOT / "pyproject.toml"), *_members().values()]
+    too_long = {p["name"]: len(p["description"]) for p in projects if len(p["description"]) > 512}
+    assert not too_long, too_long
+
+
 def test_no_plugin_requires_the_umbrella():
     for project in _members().values():
         requirements = project.get("dependencies", []) + [

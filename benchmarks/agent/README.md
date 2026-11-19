@@ -48,11 +48,11 @@ alternative is.**
 | | Arm A (no graph) | Arm B (code graph) |
 |---|---|---|
 | **Round 1** (easy, greppable Qs) | 210K tok · $0.19 · 33s · cov 1.00 | 282K · $0.28 · 35s · cov 1.00 |
-| **Round 2** (transitive closures / impact) | 466K · $0.48 · 208s · **cov 0.22** | 355K · $0.38 · **70s** · **cov 0.92** |
+| **Round 2** (transitive closures / impact) | 466K · $0.72 · 208s · **cov 0.22** | 355K · $0.38 · **70s** · **cov 0.92** |
 
 - **Round 1:** graph *lost* — on trivial questions grep is nearly free, so the MCP's fixed
   context overhead outweighed any saving, and accuracy tied at the ceiling.
-- **Round 2:** graph *won decisively* — ~24% fewer tokens, ~21% cheaper, **3× faster, 4×
+- **Round 2:** graph *won decisively* — ~24% fewer tokens, ~47% cheaper, **3× faster, 4×
   more accurate**. Poster child (HT1, `reverse`'s full call closure): the no-graph agent
   burned **1.1M tokens / $1.08 / ~4 min reading 22 files and still failed (0.0)**; the graph
   agent answered correctly in **19s for $0.24** with one `behavioral_inventory` call. On HT2

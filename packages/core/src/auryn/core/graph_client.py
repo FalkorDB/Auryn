@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -21,7 +22,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # annotations only (module has `from __future__ import annotations`) -- see connect_client
     from falkordb import FalkorDB, Graph
-from redis.exceptions import ResponseError
+from redis.exceptions import RedisError, ResponseError
 
 from auryn.core.graph_model import GraphEdge, GraphNode, NodeSchema
 from auryn.core.graph_sync import (
@@ -117,6 +118,21 @@ redis.Redis client, which pools connections and is safe for concurrent use acros
 threads (confirmed empirically). Capped rather than one-worker-per-label since
 FalkorDB is a single server process -- more threads than this stopped helping in
 testing and just adds contention."""
+
+_INDEX_BUILD_TIMEOUT_S = 300.0
+"""How long await_indexes() waits for FalkorDB to finish building an index it just created.
+The build runs in the background after CREATE INDEX returns, and a search against the index
+meanwhile returns NOTHING. That gap is why a search right after an embed pass came back empty --
+on a loaded CI runner even for three nodes. Measured with the tests' small fake vectors it builds
+about 14k nodes a second on a laptop (~6 ms for 300 nodes, ~0.4 s for 6,000); real 384- or
+768-dimension vectors build slower. Five minutes is headroom, not a guarantee: past it the pass
+reports the index as still building."""
+
+_INDEX_POLL_INTERVAL_S = 0.02
+_INDEX_POLL_MAX_INTERVAL_S = 1.0
+"""await_indexes() looks every 20 ms at first -- a small index is built within a look or two --
+and doubles the pause up to a second, so a long build costs a few hundred `db.indexes()` calls
+rather than thousands."""
 
 _WRITE_BATCH_SIZE = 2000
 """One UNWIND-based write per this many entities rather than one query per entity --
@@ -367,7 +383,9 @@ class GraphWriter:
         try:
             self._graph.create_node_vector_index(label, prop, dim=dim, similarity_function=similarity)
             logger.debug("Created vector index on :%s(%s) dim=%d %s", label, prop, dim, similarity)
-        except ResponseError:
+        except ResponseError as e:
+            if "already" not in str(e).lower():  # a real failure, not the idempotent "already indexed"
+                raise  # don't swallow it -- a missing index must not be reported as ready (await_indexes)
             logger.debug("Vector index on :%s(%s) already exists", label, prop)
 
     def drop_vector_index(self, label: str, prop: str) -> None:
@@ -387,8 +405,38 @@ class GraphWriter:
         try:
             self._graph.create_node_fulltext_index(label, *props)
             logger.debug("Created full-text index on :%s(%s)", label, ", ".join(props))
-        except ResponseError:
+        except ResponseError as e:
+            if "already" not in str(e).lower():  # a real failure, not the idempotent "already indexed"
+                raise  # don't swallow it -- a missing index must not be reported as ready (await_indexes)
             logger.debug("Full-text index on :%s already exists", label)
+
+    def await_indexes(self, label: str, timeout: float = _INDEX_BUILD_TIMEOUT_S) -> bool:
+        """Block until every node index on :label is built: True once they all are, False if
+        `timeout` seconds ran out first -- or if the label has no index at all (nothing is
+        building, so nothing will become ready), or its state can't be read. FalkorDB returns
+        from CREATE INDEX at once and populates the index in the background; until `db.indexes()`
+        reports it OPERATIONAL, a vector or full-text query against it comes back EMPTY -- not
+        partial (see _INDEX_BUILD_TIMEOUT_S)."""
+        deadline = time.monotonic() + timeout
+        pause = _INDEX_POLL_INTERVAL_S
+        while True:
+            try:
+                rows = self._graph.ro_query(
+                    "CALL db.indexes() YIELD label, entitytype, status "
+                    "WHERE label = $label AND entitytype = 'NODE' RETURN status", {"label": label}
+                ).result_set
+            except RedisError as e:  # a server whose db.indexes() reports no status, a dropped connection
+                logger.warning("Can't read the state of the indexes on :%s (%s)", label, e)
+                return False
+            if not rows:
+                return False
+            if all(status == "OPERATIONAL" for (status,) in rows):
+                return True
+            if time.monotonic() >= deadline:
+                logger.warning("Indexes on :%s still building after %.0fs", label, timeout)
+                return False
+            time.sleep(max(0.0, min(pause, deadline - time.monotonic())))  # never past the deadline
+            pause = min(pause * 2, _INDEX_POLL_MAX_INTERVAL_S)
 
     def query(self, cypher: str, params: dict | None = None):
         """Escape hatch for passes that need arbitrary Cypher (reads, or targeted
