@@ -83,3 +83,15 @@ def test_end_to_end_no_k8s_double_ingest(graph, tmp_path):
     assert _q(graph, "MATCH (n) WHERE n.id STARTS WITH 'k8s://' RETURN count(n)") == [[0]]
     assert _q(graph, "MATCH (s:Service) RETURN count(s)") == [[0]]
     assert _q(graph, "MATCH (:Resource)-[:RUNS_IMAGE]->(:Image {ref:'docker.io/shop/api:1.0'}) RETURN count(*)") == [[1]]
+
+
+def test_whole_chart_removal_cleans_up_via_ingest(graph, tmp_path):
+    # removing the entire chart leaves helm with 0 detected files -- but its prior `helm://` graph
+    # triggers a cleanup resync (core.ingest) that recomputes to empty and removes the stale subgraph
+    import shutil
+    _write_chart(tmp_path)
+    ingest.ingest_directory(GraphWriter(graph), str(tmp_path), project_name="shop")
+    assert _q(graph, "MATCH (n) WHERE n.id STARTS WITH 'helm://' RETURN count(n)")[0][0] >= 1
+    shutil.rmtree(tmp_path / "charts")
+    ingest.ingest_directory(GraphWriter(graph), str(tmp_path), project_name="shop")
+    assert _q(graph, "MATCH (n) WHERE n.id STARTS WITH 'helm://' RETURN count(n)") == [[0]]

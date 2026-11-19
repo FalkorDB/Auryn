@@ -22,6 +22,7 @@ Two deliberate choices keep the delta/caching machinery correct without a commit
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import logging
 import os
@@ -120,6 +121,25 @@ class LocalDirectorySource:
             if excluded_dir_names & set(dir_parts):
                 continue
             if not self._filter.allows(rel):  # user include/exclude (dirs + suffixes)
+                continue
+            out.append((rel, content_hash))
+        return out
+
+    def list_files_glob(
+        self, sha: str, patterns: tuple[str, ...], excluded_dir_names: set[str]
+    ) -> list[tuple[str, str]]:
+        """Every file whose BASENAME matches any of `patterns` (fnmatch, case-sensitive), with the same
+        dir-exclusion and user-filter rules as `list_files`. The glob-aware counterpart (basename
+        variants + exact anchors a bare suffix can't express) used by detection and the ingestors."""
+        self._walk()
+        out: list[tuple[str, str]] = []
+        for rel, content_hash in self._entries:
+            base = rel.rsplit("/", 1)[-1]
+            if not any(fnmatch.fnmatchcase(base, pat) for pat in patterns):
+                continue
+            if excluded_dir_names & set(rel.split("/")[:-1]):
+                continue
+            if not self._filter.allows(rel):
                 continue
             out.append((rel, content_hash))
         return out

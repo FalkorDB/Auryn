@@ -426,14 +426,12 @@ def _ingest_from_source(
         elif lang.language == "cpp":
             files_detected += cpp_header_n      # ...and the C++ ingestor claims them
         if files_detected <= 0:
-            # A header that flips C<->C++ can drop its old language to zero files. Skipping it would
-            # strand that language's prior nodes next to the new owner's graph (incremental != full). So
-            # if the C/C++ pair has NO files now but DOES have nodes already in the graph, still run its
-            # sync -- it re-walks (0 owned files) / diffs the flipped header away and deletes the stale
-            # subgraph. A fresh or genuinely-absent language has no such nodes, so it still skips (no
-            # wasted engine import). Scheme check is scoped to the ambiguous pair the orchestrator already
-            # special-cases above.
-            scheme = {"c": "c://", "cpp": "cpp://"}.get(lang.language)
+            # A header that flips C<->C++ can drop its old language to zero files; removing the last
+            # `Chart.yaml`/`values.yaml` drops helm to zero. Skipping would strand that language's prior
+            # nodes (incremental != full). So if it has NO files now but DOES have nodes already in the
+            # graph, still run its sync -- it recomputes to empty and deletes the stale subgraph. A fresh
+            # or genuinely-absent language has no such nodes, so it still skips (no wasted engine import).
+            scheme = {"c": "c://", "cpp": "cpp://", "helm": "helm://"}.get(lang.language)
             has_stale = bool(scheme) and _graph_has_prefix(writer, scheme)
             if not has_stale:
                 logger.info("No %s files in this source -- skipping", lang.language)
@@ -743,11 +741,11 @@ def _graph_has_prefix(writer: GraphWriter, id_prefix: str) -> bool:
 
 
 def _detect(source: Source, target_sha: str, lang: GitLanguage) -> int:
-    """How many of this language's files are present at `target_sha`. Each suffix
-    identifies a disjoint set of files (a path ends with exactly one), so summing is
-    correct."""
+    """How many of this language's files are present at `target_sha`, by basename glob
+    (`match_patterns` unions the suffixes and `file_globs`). One glob pass, so a file
+    matching several patterns is counted once (globs, unlike disjoint suffixes, can overlap)."""
     excluded = set(lang.excluded_dir_names)
-    return sum(len(source.list_files(target_sha, suffix, excluded)) for suffix in lang.file_suffixes)
+    return len(source.list_files_glob(target_sha, lang.match_patterns(), excluded))
 
 
 def _autoinstall_missing(
