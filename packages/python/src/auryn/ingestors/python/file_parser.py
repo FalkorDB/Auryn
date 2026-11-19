@@ -84,6 +84,9 @@ def _line_starts(data: bytes) -> list[int]:
     return starts
 
 
+_MAX_SITE_CODE = 200  # chars of a module-scope call's source line kept for its CALLS edge
+
+
 class _Source:
     """A file's text prepared once for cheap, repeated source extraction.
 
@@ -130,6 +133,9 @@ def parse_module(source: bytes | str, path: str, package_dirs: frozenset[str] | 
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     module.functions.append(_function(node, src))
             module.calls = _module_calls(tree)
+            for call in module.calls:  # module-scope callers store no source: keep each call's line
+                if 0 < call.line <= len(src._lines):
+                    call.code = src._lines[call.line - 1].strip()[:_MAX_SITE_CODE]
             if module.is_package:
                 module.reexports = _reexports(tree, dotted)
         return module

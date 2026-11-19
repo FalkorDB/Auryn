@@ -103,6 +103,7 @@ class _Index:
         # _emit_one_package) -- owned by the __init__ that declares them, so an incremental resync
         # that re-emits that __init__ refreshes them exactly as a full recompute would.
         self.reexports: dict[str, dict[str, str]] = {}
+        self.package_paths: dict[str, str] = {}  # package dotted -> its __init__.py path
         for m in modules:
             self.add_module(m)
 
@@ -114,6 +115,7 @@ class _Index:
             if m.is_package:
                 self.packages.add(m.dotted)
                 self.add_reexports(m.dotted, getattr(m, "reexports", ()) or ())
+                self.package_paths[m.dotted] = m.path
         scope_id = _scope_id(self.proj_id, m)
         for fn in m.functions:
             self._index_function(fn, m.dotted, scope_id)
@@ -295,6 +297,9 @@ def _emit_one_package(idx: _Index, dotted: str) -> Iterator[GraphNode | GraphEdg
     # stopped being emitted would survive, leaving a removed re-export live after an incremental
     # resync. Setting it to null deletes it, matching a full recompute.
     props["reexports"] = [f"{name}={target}" for name, target in sorted(table.items())] if table else None
+    # The package's __init__.py, so its top-level calls (the Package is their caller) and the
+    # old-graph file fallback can cite a file; None for a namespace package with no __init__.
+    props["file_path"] = idx.package_paths.get(dotted)
     yield GraphNode("Package", {"id": pkg_id}, props)
     parent = idx.container_package(dotted)
     if parent:
@@ -475,6 +480,7 @@ def _resolve_scope_calls(
     # call to a target decides its position); the props of the LAST call to a target win, matching
     # the MERGE last-write behaviour of emitting one edge per call.
     by_target: dict[tuple[str, str], tuple[dict, set[int]]] = {}
+    codes: dict[tuple[str, str], dict[int, str]] = {}  # module-scope callers: line -> code
     external_nodes: list[GraphNode] = []
     unresolved_calls: list[str] = []
     for call in calls:
@@ -497,18 +503,24 @@ def _resolve_scope_calls(
         _, lines = by_target.get(target, (None, set()))
         if isinstance(call.line, int):
             lines.add(call.line)
+            if call.code:
+                codes.setdefault(target, {})[call.line] = call.code
         by_target[target] = (props, lines)
-    call_edges = [
-        GraphEdge("CALLS", caller_label, {"id": caller_id}, to_label, {"id": to_id},
-                  {**props, "lines": sorted(lines)[:_MAX_CALL_LINES]})
-        for (to_label, to_id), (props, lines) in by_target.items()
-    ]
+    call_edges = []
+    for (to_label, to_id), (props, lines) in by_target.items():
+        kept = sorted(lines)[:_MAX_CALL_LINES]
+        edge_props = {**props, "lines": kept}
+        site_code = codes.get((to_label, to_id))
+        if site_code:  # a Module/Package caller has no `source` to cut sites from: carry them here
+            edge_props["site_code"] = [f"{ln}:{site_code[ln]}" for ln in kept if ln in site_code][:_MAX_SITE_CODES]
+        call_edges.append(GraphEdge("CALLS", caller_label, {"id": caller_id}, to_label, {"id": to_id}, edge_props))
     return call_edges, external_nodes, unresolved_calls
 
 
 # Cap on call-site lines stored per CALLS edge: enough to cite every site of a normal call
 # relationship, bounded so a generated/huge function can't bloat one edge.
 _MAX_CALL_LINES = 20
+_MAX_SITE_CODES = 3  # module-scope call sites with code stored per edge (matches the sites shown)
 
 
 def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotted: str, container_rel: str, container_id: str, container_label: str, ctx: _ModCtx, enclosing_locals: frozenset = frozenset()) -> Iterator[GraphNode | GraphEdge]:

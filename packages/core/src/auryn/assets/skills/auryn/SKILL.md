@@ -22,8 +22,9 @@ X", "what does this endpoint/handler do end to end", "list the public API / entr
    deferred — call the `ToolSearch` tool (query "auryn", or
    `select:mcp__auryn__locate,mcp__auryn__who_calls,mcp__auryn__impact_of`) to load them first.
 1. **`locate(name=...)`** — find the symbol; or **`search_code(query=...)`** when you don't
-   know its name. Each result already has `file_path`, `line_start`/`line_end` and
-   `signature`, plus the `id` every other tool takes.
+   know its name. A `locate` result already has `file_path`, `line_start`/`line_end` and
+   `signature`, plus the `id` every other tool takes. A `search_code` hit has the `id`,
+   `qualified_name` and a `snippet` only: call `get_context(id)` before citing its location.
 2. Answer with the smallest tool that fits:
    - **`who_calls(id)`** / **`callees(id)`** — callers / callees. Every edge carries the call
      `lines` and `sites` (`{line, code}`) in the caller's `file`: that is your file:line

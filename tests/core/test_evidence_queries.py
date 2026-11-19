@@ -211,3 +211,62 @@ def test_context_neighbors_carry_relationship_and_skip_calls(graph):
     rels = {(n["name"], n["rel"], n["dir"]) for n in view["neighbors"]}
     assert rels == {("mod", "HAS_FUNCTION", "in"), ("x", "HAS_PARAMETER", "out")}
     assert view["callees"][0]["to"] == "b" and view["callees"][0]["sites"] == [{"line": 2, "code": "len(x)"}]
+
+
+def test_locate_falls_back_through_nested_classes(graph):
+    graph.query(
+        """
+        CREATE (m:Module {id: 'm', name: 'mod', file_path: 'pkg/mod.py'}),
+               (o:Class {id: 'o', name: 'Outer'}), (i:Class {id: 'i', name: 'Inner'}),
+               (f:Method {id: 'f', name: 'deep'})
+        CREATE (m)-[:HAS_CLASS]->(o), (o)-[:HAS_NESTED_CLASS]->(i), (i)-[:HAS_METHOD]->(f)
+        """
+    )
+    assert gq.search_nodes(graph, "Method", "deep")[0]["properties"]["file_path"] == "pkg/mod.py"
+
+
+def test_context_reports_truncated_call_edges(graph):
+    graph.query("CREATE (:Function {id: 'c', name: 'caller', line_start: 1, source: 'def caller():\\n    pass'})")
+    for i in range(6):
+        graph.query(
+            f"MATCH (c:Function {{id: 'c'}}) CREATE (t:Function {{id: 't{i}', name: 't{i}'}}), "
+            "(c)-[:CALLS {lines: [2]}]->(t), (c)-[:CALLS {lines: [3]}]->(t)"
+        )
+    assert gq.context_view(graph, "c")["truncated"] is True
+
+
+def test_module_caller_sites_come_from_the_edge(graph):
+    graph.query(
+        "CREATE (m:Module {id: 'm', name: 'mod', file_path: 'pkg/mod.py'}), (t:Function {id: 't', name: 't'}) "
+        "CREATE (m)-[:CALLS {lines: [5, 7], site_code: ['5:t()', '7:t(1)']}]->(t)"
+    )
+    edge = gq.callers(graph, "t")["edges"][0]
+    assert edge["sites"] == [{"line": 5, "code": "t()"}, {"line": 7, "code": "t(1)"}]
+    assert edge["file"] == "pkg/mod.py" and "_site_code" not in edge
+
+
+def test_file_path_is_normalised_across_ingestors(graph):
+    graph.query(
+        "CREATE (:Method {id: 'cs', name: 'Run', file: 'src/App.cs'}), "
+        "(f:File {id: 'gf', name: 'a.go', path: 'pkg/a.go'})-[:DEFINES]->(:Function {id: 'go', name: 'Do'})"
+    )
+    assert gq.search_nodes(graph, "Method", "Run")[0]["properties"]["file_path"] == "src/App.cs"
+    assert gq.search_nodes(graph, "Function", "Do")[0]["properties"]["file_path"] == "pkg/a.go"
+
+
+def test_unnumbered_source_still_gets_a_preview(graph):
+    graph.query("CREATE (:Method {id: 'm', name: 'M', source: 'void M() {\\n  x();\\n}'})")
+    view = gq.context_view(graph, "m")
+    assert view["preview"][0] == {"code": "void M() {"} and "no line numbers" in view["preview_note"]
+
+
+def test_neighbors_keep_every_relationship_and_survive_many_calls(graph):
+    graph.query(
+        "CREATE (p:Procedure {id: 'p', name: 'proc'}), (t:Table {id: 't', name: 'orders'}), "
+        "(x:Parameter {id: 'x', name: 'arg'}) "
+        "CREATE (p)-[:READS]->(t), (p)-[:WRITES]->(t), (p)-[:HAS_PARAMETER]->(x)"
+    )
+    for i in range(30):
+        graph.query(f"MATCH (p {{id: 'p'}}) CREATE (p)-[:CALLS]->(:Function {{id: 'c{i}', name: 'c{i}'}})")
+    rels = {(n["name"], n["rel"]) for n in gq.context_view(graph, "p")["neighbors"]}
+    assert {("orders", "READS"), ("orders", "WRITES"), ("arg", "HAS_PARAMETER")} <= rels

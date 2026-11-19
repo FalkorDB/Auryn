@@ -221,6 +221,7 @@ def test_incremental_reexport_change_matches_full_recompute(falkordb_connection,
     ({"lib/__init__.py": "from .sub.other import Foo\n"}, "lib.sub.other.class.foo"),   # retargeted
     ({"lib/__init__.py": "x = 1\n"}, None),                                                # removed
     ({"lib/__init__.py": "from .sub import Foo\n", "lib/sub/__init__.py": ""}, None),      # chain broken
+    ({"lib/sub/__init__.py": "from .other import Foo\n"}, "lib.sub.other.class.foo"),  # middle hop changed
 ])
 def test_alias_healed_edge_follows_reexport_changes(falkordb_connection, tmp_path, change, expect):
     from uuid import uuid4
@@ -255,5 +256,118 @@ def test_alias_healed_edge_follows_reexport_changes(falkordb_connection, tmp_pat
         assert "python://libproj/module/lib.sub.mod.class.foo" not in ids, "stale link survived"
         if expect:
             assert f"python://libproj/module/{expect}" in ids
+        else:  # demoted, not dropped: the call stays as a retryable `lib::Foo` placeholder
+            assert "extern://python/lib::Foo" in ids
     finally:
         g.delete()
+
+
+def _sync_lib(falkordb_connection, tmp_path, files):
+    from uuid import uuid4
+
+    from auryn.ingestors.python.git_sync import GitPythonProjectConfig, sync
+
+    root = tmp_path / "lib"
+    repo = _git_repo(root, files)
+    g = falkordb_connection.select_graph(f"rx_{uuid4().hex}")
+    cfg = GitPythonProjectConfig(repo_uri=str(root), project_name="libproj")
+
+    def resync(change: dict[str, str]):
+        for rel, text in change.items():
+            (root / rel).write_text(text)
+        repo.git.add(A=True)
+        repo.index.commit("change")
+        sync(GraphWriter(g), cfg, "main", cache_root=tmp_path / "c", engine="ast")
+
+    sync(GraphWriter(g), cfg, "main", cache_root=tmp_path / "c", engine="ast")
+    return g, resync
+
+
+_CHAIN = {
+    "lib/__init__.py": "from .sub import Foo\n",
+    "lib/sub/__init__.py": "from .mod import Foo\n",
+    "lib/sub/mod.py": "class Foo:\n    pass\n",
+}
+
+
+def _run_targets(g) -> list[tuple[str, object]]:
+    return [(t[0], t[1]) for t in g.ro_query(
+        "MATCH (:Function {name: 'run'})-[r:CALLS]->(t) RETURN t.id, r.lines").result_set]
+
+
+def test_removed_reexport_heals_again_when_restored(falkordb_connection, tmp_path):
+    g, resync = _sync_lib(falkordb_connection, tmp_path, _CHAIN)
+    try:
+        _ingest(g, _write(tmp_path / "approot", {"app/main.py": "from lib import Foo\ndef run():\n    Foo()\n"}), "appproj")
+        resync({"lib/__init__.py": "x = 1\n"})
+        assert _run_targets(g) == [("extern://python/lib::Foo", [3])]
+        resync({"lib/__init__.py": "from .sub import Foo\n"})
+        assert _run_targets(g) == [("python://libproj/module/lib.sub.mod.class.foo", [3])]
+    finally:
+        g.delete()
+
+
+def test_reexport_replaced_by_own_definition_moves_the_call(falkordb_connection, tmp_path):
+    g, resync = _sync_lib(falkordb_connection, tmp_path, _CHAIN)
+    try:
+        _ingest(g, _write(tmp_path / "approot", {"app/main.py": "from lib import Foo\ndef run():\n    Foo()\n"}), "appproj")
+        resync({"lib/__init__.py": "class Foo:\n    pass\n"})
+        [(tid, lines)] = _run_targets(g)
+        qname = g.ro_query("MATCH (t {id: $id}) RETURN t.qualified_name", {"id": tid}).result_set[0][0]
+        assert qname == "lib.Foo" and lines == [3]
+    finally:
+        g.delete()
+
+
+def test_definition_added_after_its_reexport_still_links(falkordb_connection, tmp_path):
+    g, resync = _sync_lib(falkordb_connection, tmp_path, {
+        "lib/__init__.py": "from .impl import f\n",
+        "lib/other.py": "x = 1\n",
+    })
+    try:
+        _ingest(g, _write(tmp_path / "approot", {"app/main.py": "from lib import f\ndef run():\n    f()\n"}), "appproj")
+        assert _run_targets(g)[0][0] == "extern://python/lib::f"
+        resync({"lib/impl.py": "def f():\n    return 1\n"})  # only the definer file is new
+        [(tid, _)] = _run_targets(g)
+        assert not tid.startswith("extern://"), tid
+    finally:
+        g.delete()
+
+
+def test_exact_definition_wins_at_every_hop(graph, tmp_path):
+    # lib re-exports lib.bridge.Foo; lib.bridge imports another Foo, then defines its own class Foo
+    # (the later binding wins in Python): the chain must stop at bridge's own Foo.
+    lib = _write(tmp_path / "libroot", {
+        "lib/__init__.py": "from .bridge import Foo\n",
+        "lib/bridge/__init__.py": "from .other import Foo\nclass Foo:\n    pass\n",
+        "lib/bridge/other.py": "class Foo:\n    pass\n",
+    })
+    app = _write(tmp_path / "approot", {"app/main.py": "from lib import Foo\ndef run():\n    Foo()\n"})
+    _ingest(graph, lib, "libproj")
+    _ingest(graph, app, "appproj")
+    tid, _ = _call_targets(graph)["Foo"]
+    qname = graph.ro_query("MATCH (t {id: $id}) RETURN t.qualified_name", {"id": tid}).result_set[0][0]
+    assert qname == "lib.bridge.Foo"
+
+
+def test_direct_and_alias_calls_share_an_edge_and_split_when_the_alias_goes(graph, tmp_path):
+    # run() calls app.core.f directly (line 4) and through facade's re-export of it (line 6).
+    facade = _write(tmp_path / "facaderoot", {"facade/__init__.py": "from app.core import f\n"})
+    app = _write(tmp_path / "approot", {
+        "app/__init__.py": "",
+        "app/core.py": "def f():\n    return 1\n",
+        "app/main.py": "from app.core import f\nfrom facade import f as g\ndef run():\n    f()\n    x = 1\n    g()\n",
+    })
+    _ingest(graph, facade, "facadeproj")
+    _ingest(graph, app, "appproj")
+    rows = graph.ro_query(
+        "MATCH (:Function {name: 'run'})-[r:CALLS]->(t:Function {name: 'f'}) RETURN t.id, r.lines").result_set
+    assert len(rows) == 1 and sorted(rows[0][1]) == [4, 6], rows  # direct lines kept, alias lines added
+    direct = rows[0][0]
+
+    (facade / "facade/__init__.py").write_text("x = 1\n")  # the re-export goes away
+    _ingest(graph, facade, "facadeproj")
+    got = dict((tid, sorted(lines or [])) for tid, lines in graph.ro_query(
+        "MATCH (:Function {name: 'run'})-[r:CALLS]->(t) RETURN t.id, r.lines").result_set)
+    assert got.get(direct) == [4], got           # the exact call stays where it was
+    assert got.get("extern://python/facade::f") == [6], got  # only the alias call is demoted

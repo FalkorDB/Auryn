@@ -211,6 +211,8 @@ def serialize_edge_lean(from_id: str, to_id: str, rel_type: str, rel_props) -> d
         edge["via"] = props["via"]
     if props.get("lines"):
         edge["lines"] = sorted(props["lines"])  # cross-repo heals may union lines out of order
+    if props.get("site_code"):
+        edge["_site_code"] = props["site_code"]  # consumed by _add_call_evidence, never returned
     return edge
 
 
@@ -220,7 +222,10 @@ def serialize_edge_lean(from_id: str, to_id: str, rel_type: str, rel_props) -> d
 # read): line N of a node is `source.splitlines()[N - line_start]`.
 
 _MAX_SITES = 3  # call sites shown with code per edge (all line numbers stay in `lines`)
-_CONTAINS = "HAS_FUNCTION|HAS_METHOD|HAS_CLASS"
+# Containment edges walked up to the defining Module/Package (old-graph file fallback), including
+# nested classes and functions; bounded so a pathological nesting chain can't run away.
+_CONTAINS = "HAS_FUNCTION|HAS_METHOD|HAS_CLASS|HAS_NESTED_CLASS|HAS_NESTED_FUNCTION"
+_CONTAINS_DEPTH = 8
 
 
 def _source_line(source, line_start, line) -> str | None:
@@ -248,20 +253,24 @@ def _sites(source, line_start, lines) -> list[dict]:
 
 
 def _file_paths(graph: Graph, node_ids: list[str]) -> dict[str, str]:
-    """`file_path` per node id: the node's own property, else the nearest containing Module/Package
-    (a node ingested before definitions carried `file_path` -- the old-graph fallback)."""
+    """`file_path` per node id, normalised across ingestors: the node's own `file_path` (Python and
+    most others) or `file` (Roslyn C#); else the `path` of the File that DEFINES it (Go); else the
+    nearest containing Module/Package with a `file_path` (a Python node ingested before definitions
+    carried one -- the old-graph fallback, nested classes/functions included)."""
     if not node_ids:
         return {}
     rows = graph.ro_query(
         "MATCH (n:Entity) WHERE n.id IN $ids "
-        f"OPTIONAL MATCH (n)<-[:{_CONTAINS}*1..3]-(m) WHERE m.file_path IS NOT NULL "
-        "RETURN n.id, n.file_path, head(collect(m.file_path))",
+        "OPTIONAL MATCH (f:File)-[:DEFINES]->(n) "
+        "WITH n, head(collect(f.path)) AS defined_in "
+        f"OPTIONAL MATCH (n)<-[:{_CONTAINS}*1..{_CONTAINS_DEPTH}]-(m) WHERE m.file_path IS NOT NULL "
+        "RETURN n.id, coalesce(n.file_path, n.file), defined_in, head(collect(m.file_path))",
         {"ids": list(node_ids)},
         timeout=DEFAULT_QUERY_TIMEOUT_MS,
     ).result_set
     out = {}
-    for nid, own, inherited in rows:
-        path = own or inherited
+    for nid, own, defined_in, inherited in rows:
+        path = own or defined_in or inherited
         if path:
             out[str(nid)] = str(path)
     return out
@@ -296,6 +305,12 @@ def _add_call_evidence(graph: Graph, edges: list[dict]) -> list[dict]:
             e["file"] = files[e["from"]]
         source, line_start = src.get(e["from"], (None, None))
         sites = _sites(source, line_start, e.get("lines"))
+        stored = e.pop("_site_code", None)
+        if not sites and stored:  # a Module/Package caller: the sites were stored on the edge
+            for item in stored[:_MAX_SITES]:
+                ln, _, code = str(item).partition(":")
+                if ln.isdigit():
+                    sites.append({"line": int(ln), "code": code})
         if sites:
             e["sites"] = sites
     return edges
@@ -949,6 +964,15 @@ def context_view(graph: Graph, node_id: str, lines: str | None = None) -> dict |
             if total > _PREVIEW_LINES:
                 out["preview_note"] = (f"first {_PREVIEW_LINES} of {total} lines; pass lines='a-b' "
                                        "for any other range")
+    elif isinstance(source, str) and source:
+        # Source without an absolute line origin (e.g. the fast C# ingestor): still show it, unnumbered.
+        rows_ = source.splitlines()
+        out["source_lines_total"] = len(rows_)
+        out["preview"] = [{"code": r} for r in rows_[:_PREVIEW_LINES]]
+        out["preview_note"] = "this node stores no line numbers; the preview is unnumbered"
+        if rng is not None:
+            out["lines"] = []
+            out["range_note"] = "this node has no stored line numbers, so a line range can't be cut"
     elif rng is not None:
         out["lines"] = []
         out["range_note"] = "this node has no stored source with line numbers"
@@ -958,25 +982,40 @@ def context_view(graph: Graph, node_id: str, lines: str | None = None) -> dict |
     out["callers"] = calls_in.get("edges", [])
     out["callees"] = calls_out.get("edges", [])
 
-    # Non-call neighbours (parameters, the containing class/module, endpoints, tables...) in the
-    # minimal list shape, each with its relationship inline -- callers/callees above already cover
-    # CALLS/INVOKES, so they are not repeated here, and no separate long-id edge list is returned.
-    hood = neighbors(graph, node_id, limit=_CONTEXT_NEIGHBORS) or {}
-    rel_of: dict[str, tuple[str, str]] = {}
-    for e in hood.get("edges", []):
-        if e.get("type") in ("CALLS", "INVOKES"):
-            continue
-        other, direction = (e["to"], "out") if e["from"] == node_id else (e["from"], "in")
-        rel_of.setdefault(other, (e["type"], direction))
-    out["neighbors"] = [
-        {"id": n["id"], "label": n["label"], "name": n["name"], "rel": rel_of[n["id"]][0],
-         "dir": rel_of[n["id"]][1],
-         "properties": {k: v for k, v in _lean_props(n["properties"]).items()
-                        if k not in _COMPACT_DROP_KEYS and v not in ("", [], {}, None)}}
-        for n in hood.get("nodes", []) if n["id"] in rel_of
-    ]
-    out["truncated"] = bool(hood.get("truncated") or calls_in.get("truncated") or calls_out.get("truncated"))
+    # Non-call neighbours (parameters, the containing class/module, endpoints, tables...), one entry
+    # per relationship and direction (a procedure that reads AND writes one table lists both).
+    # CALLS/INVOKES are filtered in the query, before the limit, since callers/callees cover them.
+    hood = _context_neighbors(graph, node_id, _CONTEXT_NEIGHBORS)
+    out["neighbors"] = hood["neighbors"]
+    out["truncated"] = bool(hood["truncated"]
+                            or any(c.get("truncated") or c.get("edges_truncated") for c in (calls_in, calls_out)))
     return out
+
+
+def _context_neighbors(graph: Graph, node_id: str, limit: int) -> dict:
+    """Non-call 1-hop neighbours of `node_id` for get_context: `{neighbors, truncated}`, each entry
+    `{id, label, name, rel, dir, properties}` -- one per relationship and direction, each direction
+    bounded at `limit` AFTER CALLS/INVOKES are excluded."""
+    entries: list[dict] = []
+    truncated = False
+    for direction, pattern in (("out", "-[r]->"), ("in", "<-[r]-")):
+        rows = graph.ro_query(
+            f"MATCH (n:Entity {{id: $id}}){pattern}(m) WHERE NOT type(r) IN ['CALLS', 'INVOKES'] "
+            "RETURN type(r), m LIMIT $limit",
+            {"id": node_id, "limit": limit + 1},
+            timeout=DEFAULT_QUERY_TIMEOUT_MS,
+        ).result_set
+        if len(rows) > limit:
+            truncated = True
+            rows = rows[:limit]
+        for rel_type, m in rows:
+            n = serialize_node(m)
+            entries.append({
+                "id": n["id"], "label": n["label"], "name": n["name"], "rel": rel_type, "dir": direction,
+                "properties": {k: v for k, v in _lean_props(n["properties"]).items()
+                               if k not in _COMPACT_DROP_KEYS and v not in ("", [], {}, None)},
+            })
+    return {"neighbors": entries, "truncated": truncated}
 
 
 DEFAULT_CALL_DEPTH = 1

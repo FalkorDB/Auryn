@@ -66,6 +66,9 @@ class RawCall:
     is_simple_name: bool  # True when the callee is a bare Name (not an attribute access)
     line: int = 0  # position of the callee name, for the Jedi oracle
     col: int = 0
+    # The stripped source line of a MODULE-scope call (its caller, a Module/Package node, stores no
+    # `source`), kept so the CALLS edge can carry citable code; None for calls inside a def.
+    code: str | None = None
 
 
 @dataclass

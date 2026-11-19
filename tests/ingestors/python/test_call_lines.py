@@ -65,3 +65,21 @@ def test_definitions_carry_their_file_path():
     defs = [n for n in items if isinstance(n, GraphNode) and n.label in ("Class", "Method", "Function")]
     assert {n.label for n in defs} == {"Class", "Method", "Function"}
     assert all(n.properties["file_path"] == "pkg/m.py" for n in defs)
+
+
+def test_module_scope_calls_carry_their_code_and_packages_their_init_path():
+    items = _resolve({
+        "pkg/__init__.py": "from .m import b\nb()\n",
+        "pkg/m.py": "def b():\n    pass\n\n\nb()\nx = 1\nb()\n",
+    })
+    mod = [e for e in _calls(items) if e.from_key["id"].endswith("pkg.m") and ".b(" in e.to_key["id"]]
+    assert len(mod) == 1 and mod[0].properties["lines"] == [5, 7]
+    assert mod[0].properties["site_code"] == ["5:b()", "7:b()"]
+    pkg = next(i for i in items if isinstance(i, GraphNode) and i.label == "Package")
+    assert pkg.properties["file_path"] == "pkg/__init__.py"
+
+
+def test_calls_inside_a_def_store_no_site_code():
+    items = _resolve({"pkg/m.py": "def b():\n    pass\n\n\ndef a():\n    b()\n"})
+    edge = [e for e in _calls_from(items, "a") if ".b(" in e.to_key["id"]][0]
+    assert "site_code" not in edge.properties  # the caller's own `source` gives the sites

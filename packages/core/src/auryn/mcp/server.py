@@ -47,7 +47,9 @@ who calls X, what does X call, what breaks if X changes, what does this endpoint
 
 How to use:
   1. Start with `locate(name=...)` (or `search_code(query=...)` if you don't know the name).
-     Results already give `file_path`, `line_start`/`line_end` and `signature`.
+     `locate` results give `file_path`, `line_start`/`line_end` and `signature`; a `search_code`
+     hit gives `id`, `qualified_name` and a `snippet` -- call `get_context` on its `id` before
+     citing a location.
   2. Pivot on the returned `id`: `who_calls` / `callees` (each edge carries call `lines` and
      `sites` = {line, code}), `get_context` (compact view; `lines='a-b'` for exact source lines),
      `find_path`, `impact_of`, `trace_entrypoint`.
