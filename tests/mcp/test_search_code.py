@@ -130,7 +130,7 @@ def test_run_cypher_strips_embedding_from_returned_entities(falkordb_connection,
         "CREATE (:Function {id:'f1', name:'connect', source:'def connect(): ...', "
         "embedding:[0.1, 0.2, 0.3], _fingerprint:'abc'})"
     )
-    server = create_server(falkordb_connection, graph.name)
+    server = create_server(falkordb_connection, graph.name, tools="all")
 
     content = _call_tool(server, "run_cypher", {"query": "MATCH (n:Function) RETURN n"}).structured_content
     node = next(n for n in content["nodes"] if n["id"] == "f1")
