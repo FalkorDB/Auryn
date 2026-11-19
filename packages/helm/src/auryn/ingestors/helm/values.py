@@ -1,65 +1,89 @@
-"""Resolve a Helm template image reference against a chart's `values.yaml`.
+"""Extract the container images and notable config values a chart's `values.yaml` declares -- the
+STATIC, render-free seam (ADR 0007). Pure, no graph.
 
-A template names an image like `image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"`; the
-concrete repository/tag live in `values.yaml`. We substitute each `{{ .Values.<path> }}` with its
-value from values (a dotted lookup) and keep only a FULLY, UNAMBIGUOUSLY resolved ref -- the common
-case that lets the chart's workload converge on the shared `Image` hub. Anything we can't resolve to a
-single concrete ref is NOT materialized (returns None):
-  * an action that isn't a bare `.Values.<path>` -- `.Release.Name`, an `include`, or a pipeline/
-    function such as `{{ .Values.tag | upper }}` (we do NOT evaluate pipelines, so taking the raw
-    value would be WRONG);
-  * a `.Values` path missing from values, or whose value is a map/list or the empty string;
-  * a result that still carries a `{{...}}`, a shell `${VAR}`/`$VAR`, whitespace, or an empty
-    component (a trailing `:` -> `core.image_ref` would silently force `:latest`, a false edge).
-This is render-free and best-effort -- no `helm template`."""
+Images follow the common Helm conventions: an `image:` MAPPING with `repository` (+ optional
+`registry`/`tag`), or a bare `image: "repo:tag"` STRING, at the top level or nested under any
+sub-chart/component key (`primary.image.repository`, ...). The concrete ref is handed to
+`core.image_ref`, so a chart's image converges on the same `Image` hub node docker/compose/k8s/tf key.
+
+Config values are the scalar leaves down to a bounded depth -- the chart's notable static config, NOT
+every leaf (deep maps and lists are skipped, keeping the node count sensible)."""
 
 from __future__ import annotations
 
-import re
-
-# A Go-template action `{{ ... }}` / `{{- ... -}}` (whitespace-trim markers included), non-greedy.
-_ACTION = re.compile(r"\{\{-?\s*(.*?)\s*-?\}\}", re.S)
-# A bare `.Values.<dotted.path>` at the START of an action's expression.
-_VALUES_REF = re.compile(r"^\.Values\.([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)")
+# Top-level + one nested level: captures `replicaCount`, `service.port`, `image.repository`/`image.tag`
+# (the "top-level config keys and image-related keys"), while deeper trees (`resources.limits.cpu`,
+# `ingress.annotations.*`) stay out -- a sensible config slice, not an exhaustive flatten.
+_MAX_CONFIG_DEPTH = 2
 
 
-def lookup(values: dict, dotted: str):
-    """Walk a dotted path (`image.repository`) into the values tree; None if any step is missing."""
-    cur = values
-    for part in dotted.split("."):
-        if not isinstance(cur, dict) or part not in cur:
-            return None
-        cur = cur[part]
-    return cur
+def _scalar(v) -> str | None:
+    """A YAML scalar as a string (bools lowercased `true`/`false`), or None for a map/list/null."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (str, int, float)):
+        return str(v)
+    return None
 
 
-def resolve_image(raw: str, values: dict) -> str | None:
-    """`raw` image string from a template -> a fully concrete ref, or None if it can't be resolved.
-
-    Substitutes every action that is EXACTLY `{{ .Values.<path> }}` with its value from `values`. An
-    action with a pipeline/function or any trailing expression (`{{ .Values.tag | upper }}`), a
-    non-`.Values` action, a missing/empty/complex value -- all leave the action verbatim, which trips
-    the unresolved guard below. A literal image with no actions passes through (still validated)."""
-    unresolved = False
-
-    def repl(m: re.Match) -> str:
-        nonlocal unresolved
-        expr = m.group(1).strip()
-        ref = _VALUES_REF.match(expr)
-        # Only a BARE `.Values.<path>` (nothing trailing -- no pipeline, no function, no ops) is
-        # substitutable; `expr[ref.end():]` must be empty, else we'd wrongly ignore e.g. `| upper`.
-        if ref is not None and expr[ref.end():].strip() == "":
-            val = lookup(values, ref.group(1))
-            if val is not None and not isinstance(val, (dict, list)) and str(val) != "":
-                return str(val)
-        unresolved = True
-        return m.group(0)  # keep the action verbatim so the `{{` check below trips
-
-    out = _ACTION.sub(repl, raw).strip().strip("\"'").strip()
-    if unresolved or "{{" in out or "$" in out or not out:
+def _assemble_image(img: dict) -> str | None:
+    """`{repository, tag?, registry?}` -> a concrete ref (`ghcr.io/acme/api:1.2`), or None without a
+    `repository`. Tag/registry are optional; `core.image_ref` applies the registry/`latest` defaults."""
+    repository = _scalar(img.get("repository"))
+    if not repository:
         return None
-    if any(c.isspace() for c in out):  # a real image ref has no whitespace (filters prose `image:` keys)
-        return None
-    if out[0] in ":/@" or out[-1] in ":/@" or "//" in out:  # empty name/tag/digest component
-        return None
-    return out
+    registry = _scalar(img.get("registry"))
+    tag = _scalar(img.get("tag"))
+    ref = f"{registry.rstrip('/')}/{repository}" if registry else repository
+    return f"{ref}:{tag}" if tag else ref
+
+
+def extract_images(values: dict) -> tuple[str, ...]:
+    """Every container image ref declared under `values`, de-duplicated in first-seen order. Walks the
+    whole tree: wherever a mapping has an `image` key (a `repository` sub-map, or a bare `repo:tag`
+    string) a ref is collected."""
+    out: dict[str, None] = {}
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            img = node.get("image")
+            if isinstance(img, str):
+                ref = img.strip()
+                if ref:
+                    out.setdefault(ref, None)
+            elif isinstance(img, dict):
+                ref = _assemble_image(img)
+                if ref:
+                    out.setdefault(ref, None)
+            for k, v in node.items():
+                if k != "image":  # the `image` block itself holds only scalars -- no images nested within
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(values)
+    return tuple(out)
+
+
+def extract_config_values(values: dict) -> tuple[tuple[str, str], ...]:
+    """`(dotted-name, value)` for the scalar leaves of `values` down to `_MAX_CONFIG_DEPTH` levels --
+    the chart's notable static config (`replicaCount`, `service.port`, `image.tag`, ...). Lists and
+    deeper maps are skipped so the node count stays sensible, not every leaf (ADR 0007)."""
+    out: list[tuple[str, str]] = []
+
+    def walk(node: dict, prefix: str, depth: int) -> None:
+        if depth > _MAX_CONFIG_DEPTH:
+            return
+        for k, v in node.items():
+            name = f"{prefix}.{k}" if prefix else str(k)
+            s = _scalar(v)
+            if s is not None:
+                out.append((name, s))
+            elif isinstance(v, dict):
+                walk(v, name, depth + 1)
+            # lists / nulls: skipped
+
+    if isinstance(values, dict):
+        walk(values, "", 1)
+    return tuple(out)
