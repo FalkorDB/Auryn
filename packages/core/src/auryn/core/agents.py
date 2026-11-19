@@ -58,7 +58,10 @@ def _remove_skill(dest: Path) -> None:
     itself if that leaves it empty. A file the user put in that folder is theirs, and stays.
     Best-effort, like the rmtree it replaces: a file that can't be removed is left behind rather
     than aborting the rest of uninstall."""
-    if dest.is_symlink():  # the user pointed the skill at a folder of their own: none of it is ours
+    try:
+        if dest.is_symlink():  # the user pointed the skill at a folder of their own: none of it is ours
+            return
+    except OSError:  # a folder we cannot even look into is left as it is
         return
     src = _skill_source()
     for item in sorted(src.rglob("*"), reverse=True):  # children before their directory

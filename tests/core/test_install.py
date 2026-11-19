@@ -151,9 +151,11 @@ def test_claudecode_never_reaches_through_a_symlinked_skill_dir(tmp_path):
     assert (theirs / "SKILL.md").read_text() == "mine"
 
 
-def test_claudecode_deregister_carries_on_past_a_file_it_cannot_remove(tmp_path, monkeypatch):
-    # Best-effort, as the rmtree(ignore_errors=True) it replaced: an unremovable skill file must
-    # not raise out of deregister and strand the agents and the manifest after it.
+@pytest.mark.parametrize("denied_call", ["unlink", "is_symlink"])
+def test_claudecode_deregister_carries_on_past_a_file_it_cannot_remove(tmp_path, monkeypatch, denied_call):
+    # Best-effort, as the rmtree(ignore_errors=True) it replaced: an unremovable skill file -- or a
+    # skills folder it cannot even look into -- must not raise out of deregister and strand the
+    # agents and the manifest after it.
     from pathlib import Path
 
     from auryn.core.agents import ClaudeCode
@@ -164,7 +166,7 @@ def test_claudecode_deregister_carries_on_past_a_file_it_cannot_remove(tmp_path,
     def denied(self, *a, **k):
         raise PermissionError("read-only")
 
-    monkeypatch.setattr(Path, "unlink", denied)
+    monkeypatch.setattr(Path, denied_call, denied)
     cc.deregister(reg)  # does not raise
 
 
