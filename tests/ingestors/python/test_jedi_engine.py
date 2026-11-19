@@ -311,6 +311,40 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
     assert [callee.rsplit("::", 1)[-1] for callee in top_level] == ["object"]  # `object()`, nothing else
 
 
+def test_fallback_steps_aside_for_a_name_the_module_binds_twice(tmp_path):
+    """The ast rules don't look at order: `def helper` followed by `from missing_lib import helper`
+    reads as the module's own function, and `from pkg import core` wins over a `from otherlib
+    import core` under an `if`. Where Jedi found nothing the deep pass has no edge to add there:
+    a name with two module-level bindings stays unresolved, as on main."""
+    modules = _materialize(tmp_path, {
+        "src/pkg/__init__.py": "",
+        "src/pkg/core.py": "def helper():\n    return 1\n",
+        "tests/test_core.py": (
+            "import sys\n"
+            "from pkg import core\n"
+            "\n"
+            "\n"
+            "def helper():\n"
+            "    return 0\n"
+            "\n"
+            "\n"
+            "from missing_lib import helper\n"
+            "\n"
+            "if sys.platform == 'win32':\n"
+            "    from otherlib import core\n"
+            "\n"
+            "\n"
+            "def test_it():\n"
+            "    helper()\n"
+            "    core.helper()\n"
+        ),
+    })
+    items = list(resolution.resolve(modules, _PROJ, oracle=JediOracle(str(tmp_path), modules)))
+
+    assert not [e for e in _edges_of(items, "CALLS")
+                if e.from_key["id"] == "python://demo/module/tests.test_core.func.test_it()"]
+
+
 def test_collect_queries_includes_module_scope_calls():
     # a top-level (module-scope) call -- e.g. a module-level lambda's body -- must be in the jedi query
     # set, else the precomputed oracle returns no target for it during deep ingestion (#785 review)

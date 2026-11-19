@@ -412,11 +412,14 @@ def _local_names(body: list[ast.stmt], *, module_scope: bool = False) -> list[st
     class and an `import`. There such a name is that local, whatever the module imports or
     defines under the same name (see the jedi engine's fallback in resolution._resolve_call).
     At `module_scope` a def, a class and an import ARE the module's names -- what the ast rules
-    resolve to -- so only a name the top-level code rebinds counts (`db = make()` after
-    `from pkg import db`). Nested def/class/lambda bodies are their own scopes, as in
-    _calls_in_body; a comprehension's targets are counted although they end with it -- a call
-    through one, inside it, is just as dynamic."""
+    resolve to -- so only a name the top-level code rebinds counts: `db = make()` after
+    `from pkg import db`, or a second def / class / import of a name one of them already bound
+    (`def helper` then `from lib import helper`; `from pkg import db` and, under an `if` or a
+    `try`, `from otherlib import db`) -- the rules don't know which of the two is live. Nested
+    def/class/lambda bodies are their own scopes, as in _calls_in_body; a comprehension's targets
+    are counted although they end with it -- a call through one, inside it, is just as dynamic."""
     names: set[str] = set()
+    bound: dict[str, object] = {}  # module scope: what a def / class / import first bound a name to
 
     def visit(n: ast.AST) -> None:
         nested_scope = isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
@@ -426,10 +429,16 @@ def _local_names(body: list[ast.stmt], *, module_scope: bool = False) -> list[st
             names.add(n.name)
         elif isinstance(n, ast.MatchMapping) and n.rest:
             names.add(n.rest)
-        elif nested_scope and not module_scope:
-            names.add(n.name)
-        elif isinstance(n, (ast.Import, ast.ImportFrom)) and not module_scope:
-            names.update((alias.asname or alias.name).split(".")[0] for alias in n.names)
+        elif nested_scope:
+            if not module_scope or bound.setdefault(n.name, n) is not n:
+                names.add(n.name)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for alias in n.names:
+                local = (alias.asname or alias.name).split(".")[0]
+                # `import a.b` and `import a.c` both bind `a`, to the same package: no rebinding
+                to = local if isinstance(n, ast.Import) and not alias.asname else (getattr(n, "module", None), getattr(n, "level", 0), alias.name)
+                if not module_scope or bound.setdefault(local, to) != to:
+                    names.add(local)
         if not (nested_scope or isinstance(n, ast.Lambda)):
             for child in ast.iter_child_nodes(n):
                 visit(child)

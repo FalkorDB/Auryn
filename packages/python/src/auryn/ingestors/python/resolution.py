@@ -714,7 +714,10 @@ def _resolve_call_ast(call: RawCall, ctx: _ModCtx, scope_locals: frozenset = fro
         # method keys on the class qname, both == the import target. So we do NOT gate on
         # `is_module` (which is False for every `from X import Y`, the common `from pkg import
         # submodule; submodule.fn()` idiom that otherwise goes undetected -> no cross-repo edge).
-        target_dotted = ctx.import_map[call.receiver].target
+        imp = ctx.import_map[call.receiver]
+        # ...except a dotted `import pkg.core`: it binds `pkg`, the package, so `pkg.helper()` is
+        # the package's own `helper`, not `pkg.core.helper`.
+        target_dotted = imp.local if imp.is_module and imp.target.startswith(f"{imp.local}.") else imp.target
         full = f"{target_dotted}.{call.name}"
         hit = ctx.idx.callable_by_qname.get(full)
         if hit and hit[1] == "Function":
