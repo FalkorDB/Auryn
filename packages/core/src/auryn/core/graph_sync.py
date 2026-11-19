@@ -147,6 +147,19 @@ class DeltaStats:
 _MISSING = object()
 
 
+SYNC_MARKER = "commit_sha"
+"""The property a sync short-circuits on ("is the Project node already at `target_sha`?"). It is
+cleared before a sync's first mutation and written LAST -- a sync that dies mid-apply leaves no
+stamp, so the next one, to any commit, recomputes in full rather than short-circuiting."""
+
+
+def unstamped(node: GraphNode) -> GraphNode:
+    """A copy of `node` with its SYNC_MARKER cleared (a None value removes the property): written
+    before anything else changes -- it also brings a brand-new Project node into existence for its
+    edges."""
+    return GraphNode(node.label, node.key, {**node.properties, SYNC_MARKER: None})
+
+
 def stream_apply(
     writer,
     id_prefix: str,
@@ -200,12 +213,15 @@ def stream_apply(
     with phase("write"):
         # Pass 1 -- nodes. Pop each target node's key out of node_fps: hit -> compare
         # fingerprints (unchanged/updated), miss -> new. Leftover node_fps = removals.
+        marker: GraphNode | None = None  # the node carrying SYNC_MARKER -- written last
+        marker_seen = False  # whether the target has yielded that node yet, changed or not
         batch: list[GraphNode] = []
         updated_pairs: list[tuple[str, str]] = []  # (label, id) of content-changed nodes
         for item in make_target():
             if not isinstance(item, GraphNode):
                 continue
             props = item.properties
+            marker_seen |= SYNC_MARKER in props
             if "linkage_key" in props:  # cross-repo linkage (see linkage.collect_linkages)
                 if props.get("resolved") is False:
                     placeholders.append(str(item.key["id"]))
@@ -221,8 +237,25 @@ def stream_apply(
                 updated_pairs.append((item.label, str(item.key["id"])))
             else:
                 continue  # unchanged -- already popped, so it won't be counted a removal
+            if SYNC_MARKER in props:
+                # Clear the stamp right now, before anything else is written, and hold the real
+                # one back until everything is applied (see SYNC_MARKER). Most engines' targets
+                # LEAD with their Project node, so this is the first write of the sync.
+                marker = item
+                writer.merge_nodes([unstamped(item)])
+                continue
             batch.append(item)
             if len(batch) >= _STREAM_BATCH_SIZE:
+                if not marker_seen:
+                    # A target that yields its Project node later (compose, k8s): fetch it now, so
+                    # the stamp the graph holds is cleared before this first batch is written.
+                    marker_seen = True
+                    late = next(
+                        (n for n in make_target() if isinstance(n, GraphNode) and SYNC_MARKER in n.properties), None
+                    )
+                    if late is not None and node_key(late) in node_fps:
+                        marker = late
+                        writer.merge_nodes([unstamped(late)])
                 writer.merge_nodes(batch)
                 batch.clear()
         if batch:
@@ -275,6 +308,8 @@ def stream_apply(
         if node_fps:
             writer.delete_nodes([(label, dict(k)) for (label, k) in node_fps])
             stats.nodes_removed += len(node_fps)
+        if marker is not None:
+            writer.merge_nodes([marker])  # every node, edge and removal is in: stamp the commit
 
     return stats, reals, placeholders
 

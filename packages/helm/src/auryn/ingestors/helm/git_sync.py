@@ -97,8 +97,9 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
             continue
 
     # Don't stamp a phantom `helm://<project>` on a repo that has no charts at all. Still proceed when a
-    # prior helm subgraph exists, so removing the last chart cleans it (recompute-to-empty).
-    if not parsed_charts and prior_sha is None:
+    # prior helm subgraph exists, so removing the last chart cleans it (recompute-to-empty) -- its
+    # Project node, not its stamp: a sync that died mid-apply leaves the node without one.
+    if not parsed_charts and prior_sha is None and not writer.node_exists("Project", proj_id):
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
     project_node = GraphNode(

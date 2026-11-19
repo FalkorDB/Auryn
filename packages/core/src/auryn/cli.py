@@ -588,19 +588,32 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
     import dataclasses
 
     from auryn.core.app_config import get_repo
-    from auryn.core.ingest import ingest_directory
+    from auryn.core.ingest import ingest_directory, join_deep_phase
     from auryn.core.project import default_graph_name, resolve_project_root
+    from auryn.core.sync_lock import sync_lock
 
     root = resolve_project_root(path)
-    reg = get_repo(str(root))
-    graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
-    project = reg.project_name if reg else None
-    config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
-    # An explicit --host is an ad-hoc connection the background daemon (which reconnects via the
-    # configured backend) might not match, so embed inline there; otherwise let it resolve to the
-    # default (background).
-    report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
-                              deep=deep, auto_install=False, embed=("inline" if host else None))
+    # One sync per repo at a time: the git hooks fire a burst of these (a rebase starts one per
+    # commit) and overlapping syncs of one project corrupt its subgraph. See core/sync_lock.py.
+    # Only the plain hook-shaped sync may step aside for a queued one -- a deep pass or another
+    # server is work the queued sync won't do, so that request waits for its own turn.
+    plain = deep == "off" and not any((host, port, username, password, ssl))
+    with sync_lock(root, queue_one=plain) as my_turn:
+        if not my_turn:
+            click.echo(f"A sync of {root} is already queued; it will pick up this change.")
+            return
+        reg = get_repo(str(root))
+        graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
+        project = reg.project_name if reg else None
+        config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
+        try:
+            # An explicit --host is an ad-hoc connection the background daemon (which reconnects via
+            # the configured backend) might not match, so embed inline there; otherwise let it
+            # resolve to the default (background).
+            report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
+                                      deep=deep, auto_install=False, embed=("inline" if host else None))
+        finally:
+            join_deep_phase()  # `--deep background` writers are still this sync: hold the lock for them
     _echo_ingest_report(report)
 
 
@@ -911,19 +924,26 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
     from auryn.core import ingest
     from auryn.core.app_config import load_config
     from auryn.core.project import default_graph_name, resolve_project_root
+    from auryn.core.sync_lock import sync_lock
 
     _validate_hook_names(only_hooks + skip_hooks)
     graph = ctx.obj["graph_name"] or default_graph_name(resolve_project_root(path))
     writer = _ingest_writer(ctx, graph)
     try:
-        report = ingest.ingest_directory(
-            writer, path, project_name=project_name, solution_name=solution_name, deep=deep,
-            # Explicit --host is an ad-hoc connection the background daemon may not match -> inline.
-            embed=("inline" if ctx.obj.get("host") else None),
-            include_dirs=include_dirs, exclude_dirs=exclude_dirs,
-            include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
-            enrichment_only=only_hooks, enrichment_skip=skip_hooks,
-        )
+        # Its turn among this repo's hook / watcher syncs, which write the same project subgraph
+        # (core/sync_lock.py) -- e.g. a deep re-ingest while a commit hook fires.
+        with sync_lock(resolve_project_root(path), queue_one=False):
+            try:
+                report = ingest.ingest_directory(
+                    writer, path, project_name=project_name, solution_name=solution_name, deep=deep,
+                    # Explicit --host is an ad-hoc connection the background daemon may not match -> inline.
+                    embed=("inline" if ctx.obj.get("host") else None),
+                    include_dirs=include_dirs, exclude_dirs=exclude_dirs,
+                    include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
+                    enrichment_only=only_hooks, enrichment_skip=skip_hooks,
+                )
+            finally:
+                ingest.join_deep_phase()  # `--deep background` writers: hold the lock for them, as `sync` does
     except ValueError as e:  # missing path / not a directory -- a clean CLI error, not a traceback
         raise click.ClickException(str(e)) from e
     _echo_ingest_report(report)
