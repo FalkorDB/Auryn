@@ -441,7 +441,6 @@ requires-dist = [{ name = "auryn-core", editable = "packages/core" }]
 
 [[package]]
 name = "auryn-helm"
-version = "0.1.0"
 source = { editable = "packages/helm" }
 dependencies = [
     { name = "auryn-core" },
@@ -682,7 +681,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-terraform"
-version = "0.1.0"
 source = { editable = "packages/terraform" }
 dependencies = [
     { name = "auryn-core" },
