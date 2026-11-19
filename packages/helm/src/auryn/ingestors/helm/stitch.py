@@ -1,7 +1,7 @@
-"""The `deploy-helm` stitch (ADR 0007): the Helm producer emits its own DEPENDS_ON / DEPLOYS /
-RUNS_IMAGE edges, so this arm only runs the shared image lifecycle -- recompute each `Image`'s
-`resolved` (a chart workload running an image that docker also builds flips internal) and GC orphan
-images -- so a Helm-only repo still gets correct image state."""
+"""The `deploy-helm` stitch (ADR 0007): the Helm producer emits its own DEPENDS_ON / RUNS_IMAGE /
+MOUNTS edges, so this arm only runs the shared image lifecycle -- recompute each `Image`'s `resolved`
+(a chart running an image that docker also builds flips internal) and GC orphan images -- so a
+Helm-only repo still gets correct image state."""
 
 from __future__ import annotations
 
