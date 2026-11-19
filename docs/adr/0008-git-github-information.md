@@ -2,141 +2,156 @@
 
 Status: **Proposed (design only — no code yet).** Date: 2026-11-19.
 
-Builds on ADR 0007 (the image-keyed deployment tier), ADR 0004 (external references as upgradable
-placeholder nodes), and the [cross-ingestor schema contract](../graph-model.md).
+Builds on ADR 0007 (image-keyed deployment tier), ADR 0004 (external references as upgradable
+placeholder nodes), ADR 0002/0003 (incremental resync + triggers), and the
+[cross-ingestor schema contract](../graph-model.md).
 
 ## Context
 
-The graph models two things well today: **code structure** (modules, classes, functions, calls,
-imports — per language) and, since ADR 0007, the **deployment tier** (code → image → service across
-Docker/Compose/k8s/Terraform/Helm). What it does *not* model is the **provenance** around that code —
-how the artifacts get built and shipped, who wrote and owns the code, and the process that changed it.
-That is "git & GitHub information", and it is three genuinely different things with three different
-data sources and ingestion modes. This ADR scopes them, picks join keys to the existing graph, and
-recommends a sequencing. It deliberately decides *nothing to build yet* — it exists so we commit to a
-contract before the first producer, as ADR 0007 did for the deployment tier.
+The graph models **code structure** (per-language) and, since ADR 0007, the **deployment tier**
+(code → image → service). It does not model the **provenance** around the code: how artifacts are
+built/shipped, who wrote and owns it, and the process that changed it. That is "git & GitHub
+information" — three axes with different sources, ingestion modes, costs, and value:
 
-The three axes:
+| Axis | Answers | Source | Mode | Auth? |
+|---|---|---|---|---|
+| **A. CI** | what builds & deploys this image/service? | workflow YAML (**in-repo**) + optionally the runs API | static parse (config) / API (runs) | no (config) / yes (runs) |
+| **B. History / ownership** | who wrote / last touched / how hot is this? | `git log` (local) | append-by-commit | no |
+| **C. GitHub platform** | which PR/issue/review changed this; who owns this path? | GitHub/GitLab API | networked, cursor-paged | yes |
 
-| Axis | Answers | Data source | Ingestion mode |
-|---|---|---|---|
-| **A. CI pipelines** | "what builds & deploys this image / service?" | workflow YAML in the repo | static file parse (like every ingestor) |
-| **B. Git history / ownership** | "who wrote / last touched / how volatile is this?" | `git log` | temporal, append-by-commit-range |
-| **C. GitHub platform** | "which PR/issue/review changed this; who owns this path?" | GitHub REST/GraphQL API | networked, auth'd, rate-limited |
+The decisions below are driven by five concerns the reviewer raised: **(1)** how we connect to the
+remote to pull PRs/issues, **(2)** keeping this *out* of the branch-/commit-switched code sync,
+**(3)** which fields to index, **(4)** webhooks vs polling, **(5)** whether to track CI — all under a
+**memory-vs-value** lens and "how the user sets it up".
 
-## Decision (sequencing)
+## The architectural decision: provenance is a SEPARATE subgraph with its own lifecycle
 
-Build **A first**, then **B**, then **C** — increasing distance from the existing static-parse model
-and increasing infrastructure cost. A extends ADR 0007 directly; B and C each warrant their own ADR
-when we take them on (this one records the intent and the contract sketch).
+This is the spine that answers concern **(2)** and shapes the rest.
 
----
+- **Separate labels.** Provenance nodes (`Commit`, `Contributor`, `PullRequest`, `Issue`, `Review`,
+  `CIRun`, …) use labels that are **not in any code engine's `OWNED_LABELS`**. The code's scoped
+  incremental resync (`stream_apply(proj_id, <code labels>, …)`, ADR 0002/0005) is label-scoped, so a
+  **branch switch / commit / save-watcher re-ingest never touches provenance** — and vice-versa.
+- **Separate trigger & cadence.** Code triggers (commit hook, save watcher, branch checkout) must
+  **not** fire a remote pull — it's expensive, rate-limited, and repo-level-invariant. Provenance syncs
+  on its own cadence: **on-demand** (`auryn github-sync` / an MCP tool) and an **optional scheduled
+  refresh**. Switching branches re-syncs only code.
+- **Repo-scoped keys, not commit-scoped.** PRs/issues/commits key on the **repo + their own id**
+  (`github://<owner>/<repo>/pull/<n>`, `git://<repo>/<sha>`), so they persist across checkouts.
+- **Joins tolerate code churn.** Provenance→code edges reference code by **stable key** (file path,
+  symbol `linkage_key`/qname, commit SHA). When the current branch lacks a referenced `File`/`Function`,
+  the edge simply has no in-branch target (or targets an ADR-0004-style placeholder that *heals* when
+  the code node exists). Neither sync deletes the other's nodes.
+- **One exception — CI *config* is code.** Workflow YAML lives in the checkout, so it is **branch-tied
+  source**: parsed by the code/deployment-tier sync, not the provenance sync. Only CI *runs* are
+  provenance. (See §A.)
 
-## A. CI pipelines — the build/deploy producer (extends ADR 0007)
+## (1) Connecting to the remote (for C, and CI runs)
 
-ADR 0007 already **reserves** this row (`ci (follow-up) | ci-job Resource, Image, Registry | …`). The
-deployment tier models `code → image → service` but not *who builds and ships the image* — CI is that
-missing glue, and it closes the loop: a `BUILDS_IMAGE` from a CI job to the same shared `Image` hub a
-Dockerfile stage targets, and a `DEPLOYS` to the k8s/compose/Helm `Service` that runs it.
+- **Identify the repo** from the checkout's `origin` remote (git_sync already carries `repo_uri`) →
+  `(host, owner, repo)`; pick the GitHub vs GitLab client from the host. No manual config in the common
+  case.
+- **Auth, in precedence order** (zero-config first): the **`gh`/`glab` CLI token** if installed
+  (`gh auth token`) → an **`AURYN_GITHUB_TOKEN`/`AURYN_GITLAB_TOKEN`** env var or config entry →
+  unauthenticated (public repos only, 60 req/hr — enough to *try*, with a clear "set a token for
+  private repos / higher limits" log). A GitHub App is a later option for orgs.
+- **Graceful degradation:** a non-GitHub/GitLab remote, or no token for a private repo, **skips axis C
+  and logs why** — it never blocks the code ingest. The token is read from the existing connection/config
+  path and **never written into the graph or logs**.
 
-**Producer:** a new `auryn-ci` GitLanguage (static parse, no render), detecting:
-- GitHub Actions — `.github/workflows/*.yml`,
-- GitLab CI — `.gitlab-ci.yml`,
-- (later) CircleCI / Jenkins / Azure Pipelines.
+## (2′) Keeping provenance out of the code sync — summary
 
-**Nodes** (join the ADR 0007 contract; the `Image` hub is the one global key):
+Covered by the separate-subgraph spine above: distinct labels (not resync-scoped), distinct triggers
+(no remote pull on branch switch), repo-scoped ids, churn-tolerant joins. Net effect the reviewer asked
+for: **switching branches/commits re-ingests code only; PR/issue/history/CI-run data is untouched.**
 
-| Label | What | Id |
+## (3) Which fields to index — and memory
+
+Follow the schema.py rule: **index only join/lookup keys and `WHERE`-clause fields; store the rest as
+unindexed properties.** High-cardinality free text (PR/issue titles & bodies, commit messages) is
+**not** indexed unless a feature needs full-text over it — and a full-text index is a real memory cost
+(ADR 0007/embeddings), so it's opt-in.
+
+| Node | Indexed | Stored (unindexed) |
 |---|---|---|
-| `Pipeline` | one workflow file | `ci://<project>/<path>` |
-| `CIJob` (a `Resource`, classified `ci-job`) | a job/step group | `ci://<project>/<path>/<job>` |
-| `Image` | shared hub, via `core.image_ref` | `image://<normalized-ref>` |
-| `Registry` | shared, via `core.image_ref` registry key (ADR 0007 §note: producer-scoped in v1) | per ADR 0007 |
+| `Commit` | `sha` | message, date, insertions/deletions |
+| `Contributor` | `identity` (normalized, **hashed by default** — see PII) | display name (opt-in) |
+| `PullRequest`/`Issue` | `number`, `merge_commit_sha`/`head_sha` (join to `Commit`) | title, state, labels |
+| `CIRun` | `commit_sha`, image ref via the shared `image://` key | status, started_at |
 
-**Edges** (reuse the ADR 0007 relationships):
+**Memory is the dominant design lever for history (B).** A busy repo has 10⁵+ commits; a full
+`Commit` + `CHANGED`-edge graph can **dwarf the code graph**. So B defaults to an **ownership ROLLUP**,
+not a history graph: aggregate `git log` into **properties on the existing `File`/`Function` nodes** —
+`last_author`, `last_changed`, `commit_count`/`churn`, `author_count`. That delivers ~all the *value*
+(ownership, recency, hotspots, reviewer suggestion) at a **tiny fraction of the memory** (no node/edge
+explosion, nothing new to index — the props are read on an already-located node). The full
+`Commit`/`Contributor` graph is **opt-in and bounded** (last-N / since-date) for users who want
+commit-level traversal. History is immutable → the rollup/append sync is cheap and incremental-by-SHA.
 
-| Edge | From → To | Recognized from |
-|---|---|---|
-| `HAS_JOB` | `Pipeline` → `CIJob` | workflow structure |
-| `BUILDS_IMAGE` | `CIJob` → `Image` | a `docker build -t X` / `docker/build-push-action` step (the tag the Dockerfile stage didn't name — ADR 0007 docker row) |
-| `STORED_IN` | `Image` → `Registry` | a `docker push` / registry-login step |
-| `DEPLOYS` | `CIJob` → `Service`/`Resource` | a `kubectl apply` / `helm upgrade` / compose-up step (matched to the workload by image or name) |
-| `NEEDS` | `CIJob` → `CIJob` | `needs:` / stage ordering |
+## (4) Webhooks vs polling
 
-**Stitch:** a `deploy-ci` enrichment runs the shared `core.deploy` image lifecycle (like every other
-tier arm), so a CI-built image flips `resolved/internal` and reaches a function's blast radius.
+**Polling, not webhooks, for v1.** Webhooks need a **public HTTPS endpoint** to receive GitHub's POSTs
+plus per-repo webhook setup and secret handling — infrastructure a **local-first** tool doesn't have
+and shouldn't require a user to stand up. Instead: **on-demand + optional scheduled pull**, using
+**conditional requests (ETag / `If-Modified-Since`) and `since`/cursor pagination** so a refresh is
+cheap and rate-limit-friendly. Webhooks remain a reasonable *later* option for a **hosted/server**
+deployment (push-based, real-time) — not the default.
 
-**v1 scope:** GitHub Actions + GitLab CI; recognize `docker build/push` and `kubectl/helm` deploy
-steps by a small command-pattern matcher (not a shell interpreter). Everything else is a `CIJob` with
-no tier edge — safe. **Effort: low-med; risk: low** (same pattern as the 5 shipped producers).
+## (5) Do we track CI? — split config vs runs
 
-## B. Git history / ownership — a new temporal axis (own ADR when taken)
+**Yes to CI config; defer CI runs.**
 
-Ingest `git log` into the graph: **who** changed **what**, **when**, and **how often**.
+- **CI config (static, in-repo) — build now, highest value/cost ratio.** Parsing `.github/workflows/*`
+  / `.gitlab-ci.yml` needs **no auth**, is **branch-tied source** (synced with code/deployment tier,
+  not provenance), and **completes the ADR 0007 loop**: a `CIJob` `BUILDS_IMAGE` → the shared `Image`
+  hub, `STORED_IN` → `Registry`, `DEPLOYS` → the k8s/compose/Helm `Service`. (ADR 0007 already reserved
+  this `ci` row.) Recognize `docker build/push` and `kubectl/helm` steps with a small command-pattern
+  matcher (not a shell interpreter). Low memory, low risk.
+- **CI runs (dynamic, API) — provenance, defer.** Run history / pass-fail / which-commit-deployed is
+  API-based (auth, rate limits) and more *operational* than *structural* — lower value for a code graph
+  and unbounded memory (run history grows forever). Opt-in later if demanded; keep only a bounded recent
+  window.
 
-**Nodes:** `Commit` (`git://<project>/<sha>`, with message/date), `Contributor`
-(`git://<project>/author/<normalized-identity>`).
+## The three axes (now informed by the above)
 
-**Edges:** `AUTHORED` (`Contributor` → `Commit`), `CHANGED` (`Commit` → `File`), and — if we go
-function-granular — `CHANGED` (`Commit` → `Function`/`Method` via the diff's line ranges mapped through
-`impact.symbols_in_ranges`, the same machinery `impact_of_diff` uses). Derived properties: `last_changed`,
-`change_count`/`churn`, `author_count` on File/Function nodes.
+- **A. CI** — config as a code/deployment-tier producer (`auryn-ci`, extends ADR 0007); runs deferred.
+  Nodes `Pipeline`/`CIJob` (a classified `Resource`); edges `HAS_JOB`/`BUILDS_IMAGE`/`STORED_IN`/
+  `DEPLOYS`/`NEEDS`; the `deploy-ci` arm runs the shared `core.deploy` image lifecycle.
+- **B. History / ownership** — **rollup-by-default** (props on `File`/`Function`), full
+  `Commit`/`Contributor` graph opt-in + bounded; local `git log`, append-by-SHA, no auth; **PII-gated**.
+- **C. GitHub platform** — `PullRequest`/`Issue`/`Review`/`Owner` (CODEOWNERS) via the API; separate
+  subgraph, poll-based, auth per (1); joins to `Commit`/`File`/`Package` by stable key; **PII-gated**.
 
-**Why it's powerful:** combined with the code graph it answers "who owns / last touched X", "what's the
-riskiest (highest-churn) code in this blast radius", "who should review a change to Y" — an ownership/
-recency axis the structural graph can't express.
+## Cross-cutting: PII & the public-repo rule
 
-**Open design decisions (for its ADR):**
-- **Granularity:** file-level (cheap, robust) vs function-level (needs per-commit line-range → symbol
-  mapping; much richer, more compute, and line ranges drift as code moves).
-- **Incremental model:** append new commits since the stored HEAD (history is immutable → pure append,
-  no diff-reconcile), but handle force-push/rebase (SHAs change).
-- **PII:** author names/emails are personal data. The project's hard rule is **no client/prospect data
-  in the public repo**; author identities in a shared graph need an explicit decision — redact/hash by
-  default, opt-in to real identities, and never for a public-repo demo graph. **This is the gating call.**
+B and C introduce **human identities**. The hard rule is **no client/prospect data in the public repo**.
+So identities are **redacted/hashed by default**, real identities are **opt-in**, and **never** in a
+public/demo graph. This is the gating decision for B and C.
 
-**Effort: medium; risk: medium** (new ingestion mode + the PII decision).
+## Recommended v1 (best value per memory, least setup)
 
-## C. GitHub platform — code↔process (own ADR; API-based)
+1. **CI config** (A) — extends ADR 0007, no auth, branch-tied, completes the build→deploy loop.
+2. **Ownership rollup** (B-lite) — props on `File`/`Function` from `git log`, bounded, redacted; big
+   value (ownership/recency/hotspots) at near-zero memory.
 
-PRs, issues, reviews, and `CODEOWNERS` via the GitHub API — tying code to the process around it.
-
-**Nodes:** `PullRequest`, `Issue`, `Review`, `Owner` (a team/user from CODEOWNERS).
-**Edges:** PR `MERGED_AS` `Commit`; PR/Issue `TOUCHES`/`REFERENCES` `File`; `Review` `BY` `Contributor`;
-`Owner` `OWNS` a path glob → `File`/`Package`.
-
-**Why last:** it's the only axis that needs **network + auth** (a GitHub token), is **rate-limited**,
-and isn't reproducible from a plain checkout — a different operational model from every current
-producer. Its incremental sync is API-cursor-based, not git-based.
-
-**Effort: high; risk: med-high** (auth, rate limits, API pagination, token scope/secrets handling).
-
-## Cross-cutting
-
-- **Join keys:** all three join the existing graph on nodes we already emit — `File`/`Module`/
-  `Function`/`Method` (code), and for A the shared `Image`/`Service`/`Resource` (ADR 0007). No new
-  global key is introduced (A reuses the `image://` hub; B/C key on `File` path + symbol line ranges).
-- **PII & the public-repo rule:** B and C introduce human identities. Default to redacted/hashed
-  identities; real identities are opt-in and never in a public/demo graph. (See the public-repo
-  no-client-data rule.)
-- **Auth & secrets:** only C needs a token; it must use the same connection/config path as the rest,
-  never embed a token in the graph or logs.
-- **Incremental:** A is a normal file-delta (ADR 0002/0005). B is append-by-SHA (immutable history).
-  C is API-cursor — each needs its own resync story, defined in its ADR.
+Everything else — full commit graph, PR/issue/review graph (C), CI runs — is **opt-in later**, each
+ratified in its own ADR (C especially: auth + rate-limit + poll model + PII).
 
 ## Open questions for the reviewer
 
-1. **Scope of "git/GitHub information" you actually want** — is the near-term goal the CI producer
-   (completing the ADR 0007 tier), the ownership/history axis, or the PR/issue process layer?
-2. **Git-history granularity** — file-level to start, or commit to the function-level line-range mapping?
-3. **PII posture** — redact/hash identities by default (recommended), or ingest real identities with an
-   opt-in?
-4. **Is CI worth a full `auryn-ci` producer now**, or should it stay a reserved ADR-0007 row until a
-   demo repo with a real container-building workflow exists to validate it against?
+1. **Agree with the separate-subgraph + separate-trigger model** (provenance never touched by a branch
+   switch; synced on-demand/scheduled, not by the commit hook)?
+2. **Ownership as a ROLLUP (props on File/Function) by default**, full commit graph opt-in — or do you
+   want commit-level nodes from the start (memory cost)?
+3. **PII posture:** redact/hash identities by default, opt-in to real (recommended)?
+4. **Polling (no webhooks) for v1** — agreed, with webhooks reserved for a hosted deployment?
+5. **CI = config now, runs deferred** — agreed? (Config is the ADR-0007 loop-closer.)
+6. **Connection/auth:** derive repo from the remote; `gh`/`glab` token → env/config → unauth-public,
+   with graceful skip — acceptable default?
 
 ## Consequences
 
-- Picking the contract now (as ADR 0007 did) lets any of the three land without re-keying later.
-- A is a natural, low-risk extension that finishes the deployment-tier story; B and C are larger, newer
-  axes gated on the PII decision (B) and the auth/rate-limit model (C) — each to be ratified in its own
-  ADR before code.
+- Committing to the separate-subgraph contract now lets any axis land without re-keying, and guarantees
+  the code graph stays branch-correct while provenance stays repo-stable.
+- The rollup-first choice for history makes the highest-value ownership signal essentially free on
+  memory; the full history/PR/issue/run graphs are deliberately opt-in behind their memory/auth costs.
