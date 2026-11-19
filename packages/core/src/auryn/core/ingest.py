@@ -431,7 +431,7 @@ def _ingest_from_source(
             # nodes (incremental != full). So if it has NO files now but DOES have nodes already in the
             # graph, still run its sync -- it recomputes to empty and deletes the stale subgraph. A fresh
             # or genuinely-absent language has no such nodes, so it still skips (no wasted engine import).
-            scheme = {"c": "c://", "cpp": "cpp://", "helm": "helm://"}.get(lang.language)
+            scheme = {"c": "c://", "cpp": "cpp://", "helm": "helm://", "kustomize": "kustomize://"}.get(lang.language)
             has_stale = bool(scheme) and _graph_has_prefix(writer, scheme)
             if not has_stale:
                 logger.info("No %s files in this source -- skipping", lang.language)
