@@ -46,6 +46,18 @@ This is the spine that answers concern **(2)** and shapes the rest.
   source**: parsed by the code/deployment-tier sync, not the provenance sync. Only CI *runs* are
   provenance. (See §A.)
 
+## Policy (current): do NOT pull any data from a private repo
+
+To avoid data leakage, **Auryn does not pull any information from a private GitHub/GitLab repo for the
+time being.** This is a hard constraint, not just a default:
+- The networked axes (**C** — PRs/issues/reviews — and **CI runs**) are **deferred**; when eventually
+  built they must be **public-repo-only**, detecting visibility from repo metadata and **refusing a
+  private repo** until this policy is explicitly revisited.
+- The **recommended v1 is unaffected** because it is **entirely local** (CI config from the checkout,
+  ownership rollup from `git log`) — it pulls from *no* repo, public or private.
+
+The rest of this section/ADR describes the eventual networked design (gated by the policy above).
+
 ## Automatic? No — network egress is opt-in and explicit
 
 **Auryn never auto-pulls from a (private or public) GitHub repo as a side-effect of ingesting code.**
@@ -134,6 +146,7 @@ deployment (push-based, real-time) — not the default.
   `Commit`/`Contributor` graph opt-in + bounded; local `git log`, append-by-SHA, no auth; **PII-gated**.
 - **C. GitHub platform** — `PullRequest`/`Issue`/`Review`/`Owner` (CODEOWNERS) via the API; separate
   subgraph, poll-based, auth per (1); joins to `Commit`/`File`/`Package` by stable key; **PII-gated**.
+  **Deferred, and public-repo-only when built (no private-repo pulls — see Policy).**
 
 ## Cross-cutting: PII & the public-repo rule
 
