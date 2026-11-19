@@ -471,6 +471,43 @@ def test_index_repository_takes_its_turn_with_the_repos_syncs(falkordb_connectio
     assert events == [("lock", resolve_project_root(str(root)), False), "ingest", "unlock"]
 
 
+def test_index_repository_keeps_the_lock_until_a_background_deep_pass_is_done(falkordb_connection, graph, tmp_path, monkeypatch):
+    """With `deep="background"` the tool answers on the fast graph while a thread still deepens it.
+    That thread writes the same project subgraph, so the lock outlives the call: it is released
+    only once the deep pass is joined."""
+    import contextlib
+    import threading
+    from types import SimpleNamespace
+
+    from auryn.core import ingest
+
+    events, deep_done, unlocked = [], threading.Event(), threading.Event()
+
+    @contextlib.contextmanager
+    def recorded(local_dir, *, queue_one=True):
+        yield True
+        events.append("unlock")
+        unlocked.set()
+
+    def join_deep_phase():
+        deep_done.wait(timeout=10)
+        events.append("join")
+
+    monkeypatch.setattr("auryn.mcp.server.sync_lock", recorded)
+    monkeypatch.setattr(ingest, "ingest_directory", lambda *a, **k: SimpleNamespace(to_dict=dict))
+    monkeypatch.setattr(ingest, "join_deep_phase", join_deep_phase)
+
+    result = _call_tool(
+        create_server(falkordb_connection, graph.name), "index_repository", {"path": str(tmp_path), "deep": "background"}
+    )
+
+    assert result.is_error is False
+    assert events == []  # the tool has answered; the deep pass is still running and the lock still held
+    deep_done.set()
+    assert unlocked.wait(timeout=10)
+    assert events == ["join", "unlock"]
+
+
 def test_index_repository_bad_path_surfaces_as_a_tool_error(falkordb_connection, graph, tmp_path):
     server = create_server(falkordb_connection, graph.name)
 

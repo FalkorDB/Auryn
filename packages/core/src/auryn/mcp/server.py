@@ -18,7 +18,9 @@ change-impact / behavioral closure) without reading whole files -- with `run_cyp
 
 from __future__ import annotations
 
+import contextlib
 import functools
+import threading
 import time
 from typing import Any
 
@@ -254,8 +256,16 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         g, gname = _write_graph(graph)
         # Its turn among this repo's hook / watcher syncs, which write the same project subgraph
         # (core/sync_lock.py).
-        with sync_lock(resolve_project_root(path), queue_one=False):
-            report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep, embed=embed)
+        with contextlib.ExitStack() as turn:
+            turn.enter_context(sync_lock(resolve_project_root(path), queue_one=False))
+            try:
+                report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep, embed=embed)
+            finally:
+                if deep == "background":
+                    # That pass still writes the subgraph after this call has answered: a thread
+                    # takes the lock over, waits for the pass and only then releases it.
+                    turn.callback(ingest.join_deep_phase)
+                    threading.Thread(target=turn.pop_all().close, name="unlock-after-deep", daemon=True).start()
         # Shared with the CLI (lifecycle.wire_trigger) so the MCP can't skip the registry/hook
         # setup the CLI does -- honours the install-time [resync].trigger choice.
         resync = lifecycle.wire_trigger(str(resolve_project_root(path)), gname, project_name)

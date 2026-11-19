@@ -8,8 +8,8 @@ tree as it is then, so a single queued sync already covers every trigger that ar
 meantime.
 
 `auryn ingest dir` and the MCP `index_repository` tool write the same subgraph, so they take
-their turn under this lock too (`queue_one=False`). `auryn ingest repo` (a ref, read through the
-clone cache) and a background deep pass that outlives its command do not.
+their turn under this lock too (`queue_one=False`), and keep it until a background deep pass
+they started is done. `auryn ingest repo` (a ref, read through the clone cache) does not.
 """
 
 from __future__ import annotations
