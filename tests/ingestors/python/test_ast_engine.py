@@ -256,13 +256,152 @@ def test_same_module_instantiation_edges_to_constructor():
     assert ctor_edge.properties["receiver_type"] == "Service"
 
 
-def test_instantiation_without_init_draws_no_edge():
-    # A class with no local __init__ has no node to point at -> no constructor edge (and no stray
-    # external placeholder either): a default/inherited ctor keeps the no-edge convention.
+def test_instantiation_without_init_edges_to_the_class_node():
+    # A class with no local __init__ has no __init__ method to point at, so the constructor edge
+    # targets the CLASS node itself -- the instantiation is still captured for who_calls/impact (#785).
     m = _module("class Bare:\n    def run(self):\n        pass\n\nBare()\n")
     items = list(resolution.resolve([m], "python://demo"))
-    assert [e for e in _edges_of(items, "CALLS") if e.properties["resolution"] == "constructor"] == []
-    assert _calls_from(items, "python://demo/module/m") == set()
+    ctor = [e for e in _edges_of(items, "CALLS") if e.properties["resolution"] == "constructor"]
+    assert len(ctor) == 1
+    assert ctor[0].to_label == "Class"
+    assert str(ctor[0].to_key["id"]) == "python://demo/module/m.class.bare"
+    assert ctor[0].properties["receiver_type"] == "Bare"
+
+
+def test_inherited_constructor_edges_to_class_node():
+    # a subclass that only INHERITS __init__ has no local one -> the constructor edge targets the
+    # subclass's Class node (previously no edge at all) (#785)
+    m = _module("class Base:\n    def __init__(self):\n        pass\n\nclass Derived(Base):\n    pass\n\nDerived()\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    ctor = [e for e in _edges_of(items, "CALLS") if e.properties["resolution"] == "constructor"]
+    assert [(e.to_label, str(e.to_key["id"])) for e in ctor] == [("Class", "python://demo/module/m.class.derived")]
+
+
+def test_raise_of_project_exception_edges_to_class_node():
+    # `raise Refused(...)` instantiates a project class with no local __init__ -> edge to its Class node (#785)
+    m = _module("class Refused(Exception):\n    pass\n\ndef deny():\n    raise Refused('no')\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    assert ("python://demo/module/m.class.refused", "constructor") in _calls_from(items, "python://demo/module/m.func.deny()")
+
+
+# -- lambdas & nested functions (#785) -------------------------------------------
+
+
+def test_lambda_body_calls_attributed_to_enclosing_function():
+    # a call inside a lambda (`observe(lambda: helper())`) is anonymous -> attributed to the enclosing
+    # function, not dropped (#785)
+    m = _module(
+        "def helper():\n    return 1\n\n"
+        "def observe(fn):\n    return fn()\n\n"
+        "def in_lambda():\n    return observe(lambda: helper())\n"
+    )
+    items = list(resolution.resolve([m], "python://demo"))
+    targets = {tid for tid, _ in _calls_from(items, "python://demo/module/m.func.in_lambda()")}
+    assert "python://demo/module/m.func.helper()" in targets      # the lambda's helper() isn't lost
+    assert "python://demo/module/m.func.observe(fn)" in targets
+
+
+def test_nested_function_is_a_node_and_its_calls_resolve():
+    # a nested `def` is a first-class Function node; its calls originate there (who_calls finds it),
+    # not in the enclosing function (#785)
+    m = _module(
+        "def helper():\n    return 1\n\n"
+        "def outer():\n    def tool():\n        return helper()\n    return tool\n"
+    )
+    items = list(resolution.resolve([m], "python://demo"))
+    outer_id = "python://demo/module/m.func.outer()"
+    tool_id = "python://demo/module/m.func.outer().func.tool()"
+    tool = _node(items, tool_id)
+    assert tool.label == "Function"
+    assert tool.properties["qualified_name"] == "m.outer.tool"
+    assert any(e.from_key["id"] == outer_id and e.to_key["id"] == tool_id
+               for e in _edges_of(items, "HAS_NESTED_FUNCTION"))
+    assert ("python://demo/module/m.func.helper()", "resolved") in _calls_from(items, tool_id)
+    assert "python://demo/module/m.func.helper()" not in {t for t, _ in _calls_from(items, outer_id)}
+
+
+def test_ast_engine_leaves_nested_sibling_calls_unresolved():
+    # The ast FALLBACK does no enclosing-scope resolution (it would risk shadowing false edges): a
+    # nested def's call to a SIBLING nested def is left UNRESOLVED (never a WRONG edge) -- the default
+    # jedi engine resolves those by inference. A call to a MODULE-level function still resolves.
+    m = _module(
+        "def helper():\n    return 1\n\n"
+        "def outer():\n"
+        "    def sibling():\n        return 1\n"
+        "    def run():\n        return sibling() + helper()\n"
+        "    return run\n"
+    )
+    items = list(resolution.resolve([m], "python://demo"))
+    targets = {t for t, _ in _calls_from(items, "python://demo/module/m.func.outer().func.run()")}
+    assert "python://demo/module/m.func.helper()" in targets                      # module fn -> resolved
+    assert "python://demo/module/m.func.outer().func.sibling()" not in targets    # sibling -> unresolved
+
+
+def test_nested_call_shadowed_by_enclosing_def_is_not_bound_to_module():
+    # the module has `helper` AND `outer` defines a nested `helper`; a call to `helper()` in a sibling
+    # nested def is shadowed by outer's helper -> NOT bound to the module helper (no WRONG edge) (#786 review)
+    m = _module(
+        "def helper():\n    return 1\n\n"
+        "def outer():\n"
+        "    def helper():\n        return 2\n"
+        "    def run():\n        return helper()\n"
+        "    return run\n"
+    )
+    items = list(resolution.resolve([m], "python://demo"))
+    assert "python://demo/module/m.func.helper()" not in {
+        t for t, _ in _calls_from(items, "python://demo/module/m.func.outer().func.run()")
+    }
+
+
+def test_lambda_param_shadowing_a_module_function_is_not_an_edge():
+    # a lambda arg named like a module function: `lambda helper: helper()` calls the ARG, not the
+    # function -> no false CALLS edge (#786 review)
+    m = _module("def helper():\n    return 1\n\ndef use():\n    f = lambda helper: helper()\n    return f\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    assert "python://demo/module/m.func.helper()" not in {
+        t for t, _ in _calls_from(items, "python://demo/module/m.func.use()")
+    }
+
+
+def test_lambda_param_receiver_shadowing_an_import_is_not_an_edge():
+    # `lambda client: client.send()` calls through the lambda arg, not the imported `client` module
+    # (receiver is lambda-bound) -> no false edge (#786 review)
+    m = _module("import services as client\n\ndef use():\n    f = lambda client: client.send()\n    return f\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    assert _calls_from(items, "python://demo/module/m.func.use()") == set()
+
+
+def test_param_shadows_sibling_function_no_false_edge():
+    # `run`'s parameter `helper` shadows the sibling nested `helper` -- the call is the local param, so
+    # no false CALLS edge to outer.helper (#786 review)
+    m = _module(
+        "def outer():\n"
+        "    def helper():\n        return 1\n"
+        "    def run(helper):\n        return helper()\n"
+        "    return run\n"
+    )
+    items = list(resolution.resolve([m], "python://demo"))
+    run_id = "python://demo/module/m.func.outer().func.run(helper)"
+    helper_id = "python://demo/module/m.func.outer().func.helper()"
+    assert helper_id not in {t for t, _ in _calls_from(items, run_id)}
+
+
+def test_param_shadows_module_function_no_false_edge():
+    # a module-level param shadowing a module function: `f(helper)` calling `helper()` is the param
+    m = _module("def helper():\n    return 1\n\ndef f(helper):\n    return helper()\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    assert "python://demo/module/m.func.helper()" not in {
+        t for t, _ in _calls_from(items, "python://demo/module/m.func.f(helper)")
+    }
+
+
+def test_nested_function_carries_file_path_for_impact():
+    # nested Function nodes carry file_path so impact's single-containment-hop symbols_in_ranges can
+    # reach them directly (#786 review)
+    m = _module("def outer():\n    def tool():\n        return 1\n    return tool\n")
+    items = list(resolution.resolve([m], "python://demo"))
+    tool = _node(items, "python://demo/module/m.func.outer().func.tool()")
+    assert tool.properties["file_path"] == "m.py"
 
 
 def test_import_bound_instantiation_resolves_to_constructor():

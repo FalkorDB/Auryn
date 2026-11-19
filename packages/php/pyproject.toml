@@ -2,6 +2,7 @@
 name = "auryn-php"
 version = "0.1.0"
 description = "PHP language plugin for Auryn: a fast tree-sitter-php engine extracting namespaces/classes/interfaces/traits/enums/functions/methods/properties/constants/params, the type hierarchy (EXTENDS/IMPLEMENTS/USES_TRAIT), and calls. A deep pass (full name-resolution: use-statement aliasing, autoloading, inherited-member calls) is the planned second phase."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }

@@ -191,9 +191,21 @@ def embed(
     graph = connect_client(config).select_graph(graph_name or default_graph_name())
     run = reembed_all if reembed else embed_graph
     stats = run(GraphWriter(graph), get_embedder(model))
+    # `index_ready` is False both when nothing was embedded (the index wasn't touched) and when the
+    # build couldn't be confirmed (it outlasted the wait, or its state can't be read -- see
+    # GraphWriter.await_indexes). `--reembed` DROPS the index up front, so "unchanged" would be wrong
+    # even with zero embeds -- the index is gone until a later run rebuilds it.
+    if reembed and not stats.embedded:
+        index = "reset -- dropped, and no nodes to rebuild it from"
+    elif not stats.embedded:
+        index = "unchanged"
+    elif stats.index_ready:
+        index = "ready"
+    else:
+        index = "not ready yet -- searches may return nothing until it is"
     click.echo(
         f"Embedded {stats.embedded} node(s) ({stats.scanned} scanned) with {stats.model_id} "
-        f"(dim={stats.dim}); vector index {'ready' if stats.index_ready else 'unchanged'}."
+        f"(dim={stats.dim}); vector index {index}."
     )
 
 
