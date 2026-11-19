@@ -93,6 +93,12 @@ def test_another_repo_is_not_held_up(tmp_path, monkeypatch):
         assert (a, b) == (True, True)
 
 
+def test_a_very_long_directory_name_still_fits_a_lock_file_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    with sync_lock(tmp_path / ("r" * 240)) as my_turn:  # with "sync-", the hash and ".queued": over 255 bytes
+        assert my_turn
+
+
 @pytest.mark.parametrize("args, may_step_aside", [([], True), (["--deep", "inline"], False), (["--port", "6400"], False)])
 def test_sync_command_steps_aside_only_for_a_plain_sync(tmp_path, monkeypatch, args, may_step_aside):
     """A redundant plain `auryn sync` (what a hook runs) says so and exits before it resolves --

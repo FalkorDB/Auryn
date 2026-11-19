@@ -43,7 +43,8 @@ def sync_lock(local_dir: Path, *, queue_one: bool = True) -> Iterator[bool]:
         yield True
         return
     run_dir().mkdir(parents=True, exist_ok=True)
-    stem = run_dir() / f"sync-{default_graph_name(local_dir)}"  # basename + a hash of the path
+    # basename + a hash of the path -- its tail, so a very long basename still fits a file name
+    stem = run_dir() / f"sync-{default_graph_name(local_dir)[-200:]}"
     with open(f"{stem}.queued", "w") as queued, open(f"{stem}.lock", "w") as running:
         if queue_one:
             try:
