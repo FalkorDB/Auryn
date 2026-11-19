@@ -98,6 +98,11 @@ class _Index:
         self.callable_by_qname: dict[str, tuple[str, str]] = {}  # qname -> (id, "Function"|"Method")
         self.parents: dict[str, list[str]] = {}
         self.emitted_externs: set[str] = set()  # placeholder ids already emitted this pass (dedup)
+        # Package re-exports, per package dotted path: exposed name `Z` -> the linkage key it points
+        # at (`extern://python/pkg.sub.mod::Y`). Published on the Package node as `reexports` (see
+        # _emit_one_package) -- owned by the __init__ that declares them, so an incremental resync
+        # that re-emits that __init__ refreshes them exactly as a full recompute would.
+        self.reexports: dict[str, dict[str, str]] = {}
         for m in modules:
             self.add_module(m)
 
@@ -108,6 +113,7 @@ class _Index:
             self.module_dotteds.add(m.dotted)
             if m.is_package:
                 self.packages.add(m.dotted)
+                self.add_reexports(m.dotted, getattr(m, "reexports", ()) or ())
         scope_id = _scope_id(self.proj_id, m)
         for fn in m.functions:
             self.callable_by_qname[f"{m.dotted}.{fn.name}"] = (
@@ -116,6 +122,21 @@ class _Index:
             )
         for cls in m.classes:
             self._index_class(cls, m.dotted, scope_id)
+
+    def add_reexports(self, package: str, reexports) -> None:
+        """Record a package's re-exported names (see RawModule.reexports)."""
+        table: dict[str, str] = {}
+        for r in reexports:
+            if r.is_module or "." not in r.target:
+                continue
+            target_mod, target_name = r.target.rsplit(".", 1)
+            target = ids.extern_symbol_key(target_mod, target_name)
+            if target != ids.extern_symbol_key(package, r.local):
+                table[r.local] = target
+        if table:
+            self.reexports[package] = table
+        else:
+            self.reexports.pop(package, None)
 
     def _index_class(self, cls: RawClass, scope_dotted: str, scope_id: str):
         qname = f"{scope_dotted}.{cls.name}"
@@ -259,8 +280,16 @@ def _emit_packages(idx: _Index) -> Iterator[GraphNode | GraphEdge]:
 
 def _emit_one_package(idx: _Index, dotted: str) -> Iterator[GraphNode | GraphEdge]:
     pkg_id = ids.package_id(idx.proj_id, dotted)
-    yield GraphNode("Package", {"id": pkg_id}, {"name": dotted.rsplit(".", 1)[-1], "dotted_path": dotted,
-                                                "linkage_key": ids.extern_module_key(dotted)})
+    props: dict[str, object] = {"name": dotted.rsplit(".", 1)[-1], "dotted_path": dotted,
+                                "linkage_key": ids.extern_module_key(dotted)}
+    table = idx.reexports.get(dotted)
+    # `Name=<target linkage key>` per re-exported name; reconcile resolves a consumer's
+    # `extern://python/<pkg>::Name` placeholder through it (core/linkage.py). Always emitted -- None
+    # when there are none -- because node writes MERGE properties (`n += props`): a key that simply
+    # stopped being emitted would survive, leaving a removed re-export live after an incremental
+    # resync. Setting it to null deletes it, matching a full recompute.
+    props["reexports"] = [f"{name}={target}" for name, target in sorted(table.items())] if table else None
+    yield GraphNode("Package", {"id": pkg_id}, props)
     parent = idx.container_package(dotted)
     if parent:
         yield GraphEdge("HAS_SUBPACKAGE", "Package", {"id": ids.package_id(idx.proj_id, parent)}, "Package", {"id": pkg_id})

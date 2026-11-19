@@ -107,4 +107,9 @@ class RawModule:
     classes: list[RawClass] = field(default_factory=list)
     functions: list[RawFunction] = field(default_factory=list)
     calls: list[RawCall] = field(default_factory=list)  # module-scope (top-level) call sites
+    # Package re-exports (`__init__.py` only): every `from .x import Y [as Z]` the package exposes as
+    # `pkg.Z`, incl. those inside `if TYPE_CHECKING:` and a lazy `_dynamic_imports` table. Kept apart
+    # from `imports` (which drives call resolution) -- used only to publish linkage aliases so a
+    # consumer's `from pkg import Z` placeholder can link to Z's real definition (cross-repo).
+    reexports: list[RawImport] = field(default_factory=list)
     parse_ok: bool = True  # False if the file failed to parse (SyntaxError) -- see file_parser
