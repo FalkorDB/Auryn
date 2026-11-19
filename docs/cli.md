@@ -34,7 +34,9 @@ every detected agent (e.g. Claude Code).
 
 ### `uninstall`
 Reverse `install`: stop the local server and deregister Auryn from every agent.
-- `--purge` — also delete `~/.auryn` (config **and all graphs**).
+- `--purge` — also delete `~/.auryn` (config **and all graphs**). It is kept, with the agent on
+  record, when an agent can't be deregistered: fix that and re-run, or add `--force`.
+- `--force` — finish even when an agent can't be deregistered (its CLI is gone for good): forget it anyway.
 - `--yes` — skip the confirmation prompt.
 
 ### `serve`

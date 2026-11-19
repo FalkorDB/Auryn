@@ -140,11 +140,13 @@ def test_install_stops_on_an_unreadable_config_before_touching_any_agent(tmp_pat
         assert (home / "config.toml").read_bytes() == unreadable
 
 
-def test_uninstall_goes_on_past_an_agent_it_cannot_deregister(tmp_path, monkeypatch):
+@pytest.mark.parametrize("way_out", ["`claude` is back on PATH", "--force"])
+def test_uninstall_goes_on_past_an_agent_it_cannot_deregister(tmp_path, monkeypatch, way_out):
     """A recorded agent whose CLI is gone (`claude` off PATH, the agent removed) raises on
     deregister. That must not stop the uninstall: the agents after it are still reversed. The
     one that failed stays in the manifest -- and `--purge` keeps the home dir with it -- so the
-    next run has something to retry from; the CLI names only what it did deregister, and fails."""
+    next run has something to retry from; the CLI names only what it did deregister, and fails.
+    When the agent is gone for good no retry can ever succeed: `--force` forgets it all the same."""
     from click.testing import CliRunner
 
     from auryn.cli import cli
@@ -167,11 +169,17 @@ def test_uninstall_goes_on_past_an_agent_it_cannot_deregister(tmp_path, monkeypa
     assert [a.name for a in load_config().agents] == ["gone"]
     assert result.exit_code == 1 and "Deregistered from: fake\n" in result.output
     assert "Could not deregister from: gone" in result.output and "Removed ~/.auryn" not in result.output
+    assert "--force" in result.output
 
-    monkeypatch.setattr(_Gone, "deregister", lambda self, reg: None)  # `claude` is back on PATH
-    result = CliRunner().invoke(cli, ["uninstall", "--yes", "--purge"])
+    if way_out == "--force":
+        result = CliRunner().invoke(cli, ["uninstall", "--yes", "--purge", "--force"])
+        assert "Forgot without deregistering: gone" in result.output and "Deregistered from" not in result.output
+    else:
+        monkeypatch.setattr(_Gone, "deregister", lambda self, reg: None)
+        result = CliRunner().invoke(cli, ["uninstall", "--yes", "--purge"])
+        assert "Deregistered from: gone\n" in result.output
 
-    assert result.exit_code == 0 and "Deregistered from: gone\n" in result.output
+    assert result.exit_code == 0
     assert not (tmp_path / "cg").exists()
 
 
