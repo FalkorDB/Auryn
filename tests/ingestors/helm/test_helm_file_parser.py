@@ -159,8 +159,17 @@ def test_non_list_dependencies_is_ignored_not_fatal():
 
 def test_sensitive_key_detection():
     from auryn.ingestors.helm.build import _is_sensitive
-    for s in ("database.password", "api.key", "tls.key", "auth.token", "signing_key",
-              "apiKey", "my.secret", "aws.access_key", "db.credential", "keys"):
+    for s in ("database.password", "api.key", "tls.key", "auth.token", "signing_key", "auth.passphrase",
+              "auth.pwd", "apiKey", "my.secret", "aws.access_key", "db.credential", "keys"):
         assert _is_sensitive(s), s
     for s in ("replicaCount", "image.repository", "monkey", "keyboard", "service.port", "publicKey"):
         assert not _is_sensitive(s), s
+
+
+def test_url_credential_redaction():
+    from auryn.ingestors.helm.build import _redact_value
+    assert _redact_value("postgres://user:s3cr3t@host:5432/db") == "postgres://user:[redacted]@host:5432/db"
+    assert _redact_value("redis://:p4ss@cache") == "redis://:[redacted]@cache"
+    # no credentials -> untouched
+    assert _redact_value("https://example.com/path") == "https://example.com/path"
+    assert _redact_value("just a plain value") == "just a plain value"

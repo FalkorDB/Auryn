@@ -30,13 +30,21 @@ from auryn.ingestors.helm.model import ParsedChart
 # The final branch catches a bare `key`/`keys` SEGMENT (`tls.key`, `api.key`, `signing_key` -> a private
 # key) while not firing on `monkey`/`keyboard`/`publicKey` (a public key isn't a secret).
 _SENSITIVE = re.compile(
-    r"(?i)(password|passwd|secret|token|credential|api[_-]?key|access[_-]?key|private[_-]?key"
-    r"|(?:^|[._-])keys?(?:[._-]|$))"
+    r"(?i)(password|passwd|passphrase|pwd|secret|token|credential|api[_-]?key|access[_-]?key"
+    r"|private[_-]?key|(?:^|[._-])keys?(?:[._-]|$))"
 )
+
+# Credentials embedded in a connection-URL VALUE (`postgres://user:pass@host`) -- the password segment
+# is redacted even when the KEY (`database.url`) doesn't look sensitive, so no credential is stored.
+_URL_CRED = re.compile(r"(?i)([a-z][a-z0-9+.\-]*://[^\s:/@]*:)([^\s@/]+)(@)")
 
 
 def _is_sensitive(name: str) -> bool:
     return bool(_SENSITIVE.search(name))
+
+
+def _redact_value(value: str) -> str:
+    return _URL_CRED.sub(r"\1[redacted]\3", value)
 
 
 def _scope(pc: ParsedChart) -> str:
@@ -103,12 +111,14 @@ def build_graph(charts: list[ParsedChart], proj_id: str) -> Iterator[GraphNode |
 
         for cv_name, cv_value in pc.config_values:
             vid = ids.config_value_id(cid, cv_name)
-            # Redact a sensitive value (a `*password*`/`*token*`/... key): the graph, viewer and MCP
-            # reads surface ConfigValue.value, so a credential in values.yaml must never be stored.
-            sensitive = _is_sensitive(cv_name)
+            # Redact credentials (the graph, viewer and MCP reads surface ConfigValue.value): a whole
+            # value under a sensitive KEY (`*password*`/`*token*`/...), or just the password embedded in
+            # a connection-URL VALUE under an ordinary key (`database.url`).
+            key_sensitive = _is_sensitive(cv_name)
+            value = "[redacted]" if key_sensitive else _redact_value(cv_value)
             yield GraphNode("ConfigValue", {"id": vid}, {
-                "name": cv_name, "value": "[redacted]" if sensitive else cv_value,
-                "sensitive": sensitive, "chart_dir": pc.chart_dir,
+                "name": cv_name, "value": value,
+                "sensitive": key_sensitive or value != cv_value, "chart_dir": pc.chart_dir,
             })
             # MOUNTS is the tier's config-wiring edge (ADR 0007 line 107); v1 helm has no Service, so the
             # release Resource is the owner -- mirroring how ADR §3 generalized RUNS_IMAGE/DEPENDS_ON to
