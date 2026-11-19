@@ -35,8 +35,10 @@ _SENSITIVE = re.compile(
 )
 
 # Credentials embedded in a connection-URL VALUE (`postgres://user:pass@host`) -- the password segment
-# is redacted even when the KEY (`database.url`) doesn't look sensitive, so no credential is stored.
-_URL_CRED = re.compile(r"(?i)([a-z][a-z0-9+.\-]*://[^\s:/@]*:)([^\s@/]+)(@)")
+# is redacted even when the KEY (`database.url`) doesn't look sensitive, so no credential is stored. The
+# `user:pass@` is userinfo only inside the AUTHORITY, so the user/pass spans exclude `/?#` (an `@` after
+# a `?` is in the query, e.g. `https://host?contact=a:b@x`, and must not be mistaken for a credential).
+_URL_CRED = re.compile(r"(?i)([a-z][a-z0-9+.\-]*://[^\s:/@?#]*:)([^\s@/?#]+)(@)")
 
 
 def _is_sensitive(name: str) -> bool:

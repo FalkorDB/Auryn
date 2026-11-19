@@ -173,3 +173,6 @@ def test_url_credential_redaction():
     # no credentials -> untouched
     assert _redact_value("https://example.com/path") == "https://example.com/path"
     assert _redact_value("just a plain value") == "just a plain value"
+    # a `user:pass@` INSIDE a query string is not userinfo -> must not be redacted
+    assert _redact_value("https://example.com?contact=alice:bob@example.org") == \
+        "https://example.com?contact=alice:bob@example.org"
