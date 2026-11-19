@@ -175,6 +175,34 @@ def test_read_fingerprints_never_reads_a_project_whose_name_continues_at_a_dot(g
         }
 
 
+def test_read_fingerprints_leaves_out_a_nested_project_created_while_it_reads(graph, monkeypatch):
+    """Another session ingests `Acme.Core.Tests` for the first time while `Acme.Core` resyncs. The
+    nested Project ids are looked up AFTER each read's rows, so a project whose nodes a read
+    returned is already known to be someone else's -- looked up before the reads, its nodes came
+    back as `Acme.Core`'s leftovers, to be deleted."""
+    writer, other = GraphWriter(graph), GraphWriter(graph)
+    core, tests = "csharp://Sol/Acme.Core", "csharp://Sol/Acme.Core.Tests"
+    writer.merge_node(GraphNode("Project", {"id": core}, {"name": "Acme.Core"}))
+    writer.merge_node(GraphNode("Class", {"id": f"{core}/ns/A"}, {"name": "A"}))
+    ro_query = graph.ro_query
+
+    def a_sibling_appears_before_the_first_read(query, *args, **kwargs):
+        if "_fingerprint" in query and not other.node_exists("Project", tests):
+            # its Project node first, as every sync writes it
+            other.merge_node(GraphNode("Project", {"id": tests}, {"name": "Acme.Core.Tests"}))
+            other.merge_node(GraphNode("Class", {"id": f"{tests}/ns/A"}, {"name": "A"}))
+        return ro_query(query, *args, **kwargs)
+
+    monkeypatch.setattr(graph, "ro_query", a_sibling_appears_before_the_first_read)
+
+    node_fps, _ = writer.read_fingerprints(core, ["Project", "Class"])
+
+    assert set(node_fps) == {
+        node_key(GraphNode("Project", {"id": core}, {})),
+        node_key(GraphNode("Class", {"id": f"{core}/ns/A"}, {})),
+    }
+
+
 def test_subgraph_fingerprint_queries_plan_as_a_label_scan_not_a_full_scan(graph):
     """An earlier, unlabeled version of these queries (`MATCH (n) WHERE
     n.id STARTS WITH ...`) planned as "All Node Scan" regardless of the WHERE
