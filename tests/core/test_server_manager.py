@@ -100,3 +100,4 @@ def test_ensure_server_reaps_orphan_before_cold_start(tmp_path, monkeypatch):
 
     assert (cfg.host, cfg.port) == ("127.0.0.1", 6401)
     assert calls == [("reap", stale), ("start", None)]  # reaped, and strictly before cold-start
+

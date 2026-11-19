@@ -22,6 +22,7 @@ quirks documented in ingestors/csharp/file_parser.py). In particular:
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import logging
 import os
@@ -202,6 +203,18 @@ class GitRepoCache:
         return [
             (path, blob_sha) for path, blob_sha in self._all_files(sha)
             if path.endswith(suffix) and not (excluded_dir_names & set(path.split("/")[:-1]))
+        ]
+
+    def list_files_glob(
+        self, sha: str, patterns: tuple[str, ...], excluded_dir_names: set[str]
+    ) -> list[tuple[str, str]]:
+        """Every blob whose BASENAME matches any of `patterns` (fnmatch, case-sensitive), excluding
+        `excluded_dir_names` -- the glob-aware counterpart of `list_files` (basename variants + exact
+        anchors a bare suffix can't express), over the same cached one-time tree traversal."""
+        return [
+            (path, blob_sha) for path, blob_sha in self._all_files(sha)
+            if any(fnmatch.fnmatchcase(path.rsplit("/", 1)[-1], pat) for pat in patterns)
+            and not (excluded_dir_names & set(path.split("/")[:-1]))
         ]
 
     def read_blob(self, blob_sha: str) -> bytes:

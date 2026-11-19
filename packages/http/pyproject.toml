@@ -1,10 +1,11 @@
 [project]
 name = "auryn-http"
 version = "0.1.0"
-description = "Language-agnostic HTTP call<->endpoint stitch for Auryn (ADR 0006): a post-ingestion hook that resolves route-keyed APIEndpoint placeholders (emitted by any caller language) to their handler Methods across the shared multi-repo graph, by route+verb. Order-independent, 1-to-many, provenance-scoped. Depends only on auryn-core."
+description = "Language-agnostic HTTP call<->endpoint stitch for Auryn (ADR 0006): a post-ingestion hook that resolves route-keyed APIEndpoint placeholders (emitted by any caller language) to their handler Methods across the shared multi-repo graph, by route and HTTP verb (MVC `/Controller/Action` routes match by name only). Order-independent, 1-to-many, provenance-scoped. Depends only on auryn-core."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     # Reads/writes the finished graph via GraphWriter; matches routes with plain graph queries.
     # No language-extraction engines -- it joins facts the language parsers already emitted.

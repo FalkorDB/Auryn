@@ -2,9 +2,10 @@
 name = "auryn-python"
 version = "0.1.0"
 description = "Python language plugin for Auryn: fast `ast` + deep Jedi (in-process) engines, plus the web-framework route enrichment."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
     "jedi>=0.20.0",

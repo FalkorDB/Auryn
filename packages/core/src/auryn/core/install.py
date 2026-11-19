@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import shutil
 import sys
+from dataclasses import replace
 
 from auryn.core.agents import default_adapters
 from auryn.core.app_config import Backend, Config, load_config, save_config
@@ -44,7 +45,10 @@ def do_install(backend: Backend, *, adapters=None, server_command: list[str] | N
             registrations.append(adapter.register(command))
         except Exception as e:  # noqa: BLE001 -- one bad agent must not fail the whole install
             logger.warning("Skipped %s: could not register (%s)", adapter.name, e)
-    config = Config(backend=backend, agents=tuple(registrations))
+    # Preserve everything else the user already configured (resync trigger, disabled hooks,
+    # registered repos, embed mode) -- a re-install only updates the backend and the set of
+    # registered agents, it must not silently reset persisted settings.
+    config = replace(load_config(), backend=backend, agents=tuple(registrations))
     save_config(config)
     return config
 

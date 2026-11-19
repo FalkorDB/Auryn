@@ -25,6 +25,9 @@ The `adr/` folder records the deeper design decisions and their rationale:
 | [0002](adr/0002-incremental-resync.md) | Incremental resync — the recompute-and-diff engine that makes re-ingestion cheap. |
 | [0003](adr/0003-repo-lifecycle-and-resync-triggers.md) | Repo lifecycle: the ingested-repo registry, git hooks, and the watch daemon. |
 | [0004](adr/0004-cross-repo-symbol-resolution.md) | Cross-repo symbol resolution — placeholder nodes and linkage keys. |
+| [0005](adr/0005-delta-sync-all-languages.md) | Delta-sync across all languages — commit-driven incremental updates. |
+| [0006](adr/0006-http-call-endpoint-seam.md) | HTTP call↔endpoint seam — the route-keyed, language-agnostic stitch. |
+| [0007](adr/0007-deployment-infrastructure-tier.md) | Deployment & infrastructure tier — the image-keyed contract across Docker/Compose/k8s/Helm/Terraform. |
 
 ## Website content
 
@@ -35,6 +38,7 @@ the guides above are the developer docs.
 ## Learning by example
 
 - `demo/` has a runnable sample per language/ingestor (e.g. `demo/go-auryn/`,
-  `demo/chinook/` for SQL, `demo/csharp-git/` for git-tracked resync).
+  `demo/chinook/` for SQL, `demo/csharp-git/` for git-tracked resync,
+  `demo/docker-deploy/` for the Dockerfile ingestor + deployment tier).
 - `benchmarks/README.md` documents the ingest, freshness, and agent-adoption benchmark suites.
 </content>
