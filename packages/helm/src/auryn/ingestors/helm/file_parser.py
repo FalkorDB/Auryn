@@ -31,7 +31,8 @@ def parse_chart_yaml(data: str | bytes) -> Chart | None:
         return None
     deps: list[Dependency] = []
     seen: set[str] = set()
-    for d in doc.get("dependencies", []) or []:
+    deps_raw = doc.get("dependencies")  # a malformed `dependencies: 42` must not raise (-> chart dropped)
+    for d in deps_raw if isinstance(deps_raw, list) else []:
         if isinstance(d, dict) and isinstance(d.get("name"), str) and d["name"] not in seen:
             seen.add(d["name"])
             deps.append(Dependency(

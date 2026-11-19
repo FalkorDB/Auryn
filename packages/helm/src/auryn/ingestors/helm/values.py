@@ -38,23 +38,39 @@ def _assemble_image(img: dict) -> str | None:
     return f"{ref}:{tag}" if tag else ref
 
 
+def _plausible_image(ref: str) -> bool:
+    """A sane-looking image ref: non-empty, no whitespace, no unrendered `{{...}}` template, and -- if
+    the last path segment carries a `:tag` -- a non-empty repository and tag. Filters a prose value or a
+    templated tag that happens to sit on an `image:` key (`image: "see the docs"`, `shop/api:`,
+    `repository: shop/api, tag: "{{ .Chart.AppVersion }}"`); `core.image_ref` would otherwise mint a
+    junk Image node from them."""
+    if not ref or "{{" in ref or any(c.isspace() for c in ref):
+        return False
+    last = ref.split("@", 1)[0].rsplit("/", 1)[-1]  # last path segment, digest stripped
+    if ":" in last:
+        repo_tail, _, tag = last.rpartition(":")
+        if not repo_tail or not tag:
+            return False
+    return True
+
+
 def extract_images(values: dict) -> tuple[str, ...]:
     """Every container image ref declared under `values`, de-duplicated in first-seen order. Walks the
     whole tree: wherever a mapping has an `image` key (a `repository` sub-map, or a bare `repo:tag`
-    string) a ref is collected."""
+    string) a ref is collected -- if it looks like a real image ref (`_plausible_image`)."""
     out: dict[str, None] = {}
+
+    def _add(ref: str | None) -> None:
+        if ref and _plausible_image(ref):
+            out.setdefault(ref, None)
 
     def walk(node) -> None:
         if isinstance(node, dict):
             img = node.get("image")
             if isinstance(img, str):
-                ref = img.strip()
-                if ref:
-                    out.setdefault(ref, None)
+                _add(img.strip())
             elif isinstance(img, dict):
-                ref = _assemble_image(img)
-                if ref:
-                    out.setdefault(ref, None)
+                _add(_assemble_image(img))
             for k, v in node.items():
                 if k != "image":  # the `image` block itself holds only scalars -- no images nested within
                     walk(v)

@@ -139,3 +139,19 @@ def test_parse_chart_without_values():
     assert pc.images == ()
     assert pc.config_values == ()
     assert pc.has_values is False
+
+
+def test_implausible_image_values_are_skipped():
+    # prose, an empty tag, or a templated tag on an `image:` key must NOT become an Image ref
+    assert extract_images(load_values('image: "see the deployment docs"\n')) == ()
+    assert extract_images(load_values('image: "shop/api:"\n')) == ()
+    assert extract_images(load_values('image:\n  repository: shop/api\n  tag: "{{ .Chart.AppVersion }}"\n')) == ()
+    # ... but a real ref still passes (incl. a registry:port host, whose `:` is not a tag)
+    assert extract_images(load_values('image: "shop/api:1.0"\n')) == ("shop/api:1.0",)
+    assert extract_images(load_values('image: "localhost:5000/shop/api:1.0"\n')) == ("localhost:5000/shop/api:1.0",)
+
+
+def test_non_list_dependencies_is_ignored_not_fatal():
+    # a malformed `dependencies: 42` must not raise (which would drop the whole chart) -- just no deps
+    c = parse_chart_yaml("apiVersion: v2\nname: shop\nversion: 1.0.0\ndependencies: 42\n")
+    assert c is not None and c.name == "shop" and c.dependencies == ()

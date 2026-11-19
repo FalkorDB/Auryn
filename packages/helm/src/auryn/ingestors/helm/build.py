@@ -17,12 +17,21 @@ A dependency naming an in-repo chart resolves to that chart's real `Resource`; a
 from __future__ import annotations
 
 import posixpath
+import re
 from collections.abc import Iterator
 
 from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.core.image_ref import image_id, image_node
 from auryn.ingestors.helm import ids
 from auryn.ingestors.helm.model import ParsedChart
+
+# A config KEY whose name signals a sensitive value (ADR 0007: a sensitive entry is redacted, never
+# stored). Matched on the dotted name, so `database.password` / `auth.apiKey` are caught at any depth.
+_SENSITIVE = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?key|credential|private[_-]?key)")
+
+
+def _is_sensitive(name: str) -> bool:
+    return bool(_SENSITIVE.search(name))
 
 
 def _scope(pc: ParsedChart) -> str:
@@ -62,7 +71,7 @@ def build_graph(charts: list[ParsedChart], proj_id: str) -> Iterator[GraphNode |
             "version": pc.chart.version if pc.chart else "",
             "app_version": pc.chart.app_version if pc.chart else "",
             "chart_type": pc.chart.chart_type if pc.chart else "",
-            "resolved": True,
+            "resolved": pc.chart is not None,  # a nameless/unreadable Chart.yaml isn't a valid chart
         })
         yield GraphEdge("HAS_RESOURCE", "File", {"id": fid}, "Resource", {"id": cid})
 
@@ -89,7 +98,13 @@ def build_graph(charts: list[ParsedChart], proj_id: str) -> Iterator[GraphNode |
 
         for cv_name, cv_value in pc.config_values:
             vid = ids.config_value_id(cid, cv_name)
-            yield GraphNode("ConfigValue", {"id": vid}, {"name": cv_name, "value": cv_value, "chart_dir": pc.chart_dir})
+            # Redact a sensitive value (a `*password*`/`*token*`/... key): the graph, viewer and MCP
+            # reads surface ConfigValue.value, so a credential in values.yaml must never be stored.
+            sensitive = _is_sensitive(cv_name)
+            yield GraphNode("ConfigValue", {"id": vid}, {
+                "name": cv_name, "value": "[redacted]" if sensitive else cv_value,
+                "sensitive": sensitive, "chart_dir": pc.chart_dir,
+            })
             # MOUNTS is the tier's config-wiring edge (ADR 0007 line 107); v1 helm has no Service, so the
             # release Resource is the owner -- mirroring how ADR §3 generalized RUNS_IMAGE/DEPENDS_ON to
             # a Resource source. Reuses the contract edge rather than inventing one.

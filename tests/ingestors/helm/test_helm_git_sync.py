@@ -149,3 +149,19 @@ def test_ambiguous_dependency_stays_a_placeholder(graph, tmp_path):
     })
     assert q("MATCH (:Resource {name:'app'})-[:DEPENDS_ON]->(d) RETURN d.id") == [["helm://shop/_dep/common"]]
     assert q("MATCH (:Resource {name:'app'})-[:DEPENDS_ON]->(d:Resource {resolved:false}) RETURN count(d)") == [[1]]
+
+
+def test_sensitive_config_value_is_redacted(graph, tmp_path):
+    # a credential in values.yaml must never be stored verbatim (graph/viewer/MCP surface the value)
+    q = _ingest(graph, tmp_path, {
+        "charts/shop/Chart.yaml": "apiVersion: v2\nname: shop\nversion: 1.0.0\n",
+        "charts/shop/values.yaml": "replicaCount: 2\ndatabase:\n  password: s3cr3t\n",
+    })
+    assert q("MATCH (c:ConfigValue {name:'database.password'}) RETURN c.value, c.sensitive") == [["[redacted]", True]]
+    assert q("MATCH (c:ConfigValue {name:'replicaCount'}) RETURN c.value, c.sensitive") == [["2", False]]
+
+
+def test_nameless_chart_is_unresolved(graph, tmp_path):
+    # a Chart.yaml with no name still anchors a Resource, but marked resolved:false (not a valid chart)
+    q = _ingest(graph, tmp_path, {"charts/shop/Chart.yaml": "apiVersion: v2\nversion: 1.0.0\n"})
+    assert q("MATCH (r:Resource {kind:'release'}) RETURN r.resolved") == [[False]]

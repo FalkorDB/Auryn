@@ -20,7 +20,10 @@ NODE_SCHEMAS = [
 ]
 
 # Labels this producer OWNS under its `helm://<project>` prefix and diffs on resync. `Image` is shared.
-OWNED_LABELS = ["Project", "File", "Resource", "ConfigValue"]
+# `Service` is NOT emitted by the static v1, but stays in the reconcilation inventory so a resync of a
+# graph first built by the pre-static (#784) template design -- which DID emit helm `Service` workloads
+# -- purges those now-orphaned nodes (and their DEPLOYS edges) instead of leaving them behind.
+OWNED_LABELS = ["Project", "File", "Resource", "ConfigValue", "Service"]
 
 EDGE_SCHEMAS = [
     EdgeSchema(rel_type="HAS_FILE"),      # Project -> File
