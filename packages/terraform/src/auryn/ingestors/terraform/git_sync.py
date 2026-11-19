@@ -45,9 +45,13 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
     if prior_sha == target_sha:  # tier-wide limitation: ignores source file-selection (see k8s git_sync)
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
-    seen: dict[str, str] = {}
-    for path, blob_sha in source.list_files_glob(target_sha, _MATCH_PATTERNS, set(_EXCLUDED_DIR_NAMES)):
-        seen.setdefault(path, blob_sha)
+    all_files = dict(source.list_files_glob(target_sha, _MATCH_PATTERNS, set(_EXCLUDED_DIR_NAMES)))
+    # OpenTofu precedence: in a directory a `<name>.tofu` OVERRIDES the sibling `<name>.tf` (the `.tf` is
+    # ignored), so drop a `.tf` whenever its `.tofu` twin is present -- otherwise both parse and the same
+    # resource address yields a duplicate node.
+    tofu_stems = {p.rsplit(".", 1)[0] for p in all_files if p.endswith(".tofu")}
+    seen = {p: sha for p, sha in all_files.items()
+            if not (p.endswith(".tf") and p.rsplit(".", 1)[0] in tofu_stems)}
 
     files = []
     for path, blob_sha in sorted(seen.items()):

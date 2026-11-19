@@ -83,3 +83,22 @@ def test_resync_removes_deleted_resource(graph, tmp_path):
     assert q("MATCH (:Resource)-[:DEPENDS_ON]->() RETURN count(*)") == [[0]]
     assert q("MATCH (d:Database) RETURN count(d)") == [[0]]
     assert q("MATCH (r:Registry) RETURN count(r)") == [[0]]  # the ecr Registry node was removed too
+
+
+def test_tofu_overrides_tf_twin(graph, tmp_path):
+    # OpenTofu precedence: a `<name>.tofu` overrides its `<name>.tf` twin in the same dir -> only .tofu
+    q = _ingest(graph, tmp_path, {
+        "main.tf": 'resource "aws_s3_bucket" "b" { bucket = "from-tf" }\n',
+        "main.tofu": 'resource "aws_s3_bucket" "b" { bucket = "from-tofu" }\n',
+    })
+    assert q("MATCH (r:Resource {address:'aws_s3_bucket.b'}) RETURN count(r)") == [[1]]
+    assert q("MATCH (:Project)-[:HAS_FILE]->(f:File) RETURN f.path") == [["main.tofu"]]
+
+
+def test_tofu_and_tf_different_stems_both_parse(graph, tmp_path):
+    # different stems (main.tf + extra.tofu) are BOTH loaded -- precedence is per filename, not per dir
+    q = _ingest(graph, tmp_path, {
+        "main.tf": 'resource "aws_s3_bucket" "a" { bucket = "x" }\n',
+        "extra.tofu": 'resource "aws_s3_bucket" "b" { bucket = "y" }\n',
+    })
+    assert sorted(r[0] for r in q("MATCH (:Project)-[:HAS_FILE]->(f:File) RETURN f.path")) == ["extra.tofu", "main.tf"]
