@@ -1,13 +1,14 @@
-"""Canonical id scheme for the Helm graph (ADR 0007 §2). A chart is a `Resource` (the release),
-keyed by its chart DIRECTORY (`helm://<project>/<chart-dir>`); each workload its templates declare is a
-`Service`, keyed `helm://<project>/<chart-dir>/<template-path>/<kind>/<name>`. The shared `Image` hub
-keys via `core.image_ref`, so a chart's workload that runs an image converges with the other producers."""
+"""Canonical id scheme for the Helm graph (ADR 0007 §2). A chart is a `Resource` (the release), keyed
+by its chart DIRECTORY (`helm://<project>/<chart-dir>`); its notable config values are `ConfigValue`
+nodes keyed owner-scoped (`<resource-id>/env/<NAME>`, the tier-wide ConfigValue scheme, ADR line 72).
+The shared `Image` hub keys via `core.image_ref`, so a chart's image converges with the other
+producers. v1 emits no `Service` (a chart's workloads need a render -- the future k8s arm)."""
 
 from __future__ import annotations
 
-from auryn.core.image_ref import image_id  # re-exported
+from auryn.core.image_ref import image_id  # re-exported: the Image id lives in one place
 
-__all__ = ["project_id", "file_id", "chart_scope", "chart_id", "workload_id", "dep_id", "image_id"]
+__all__ = ["project_id", "file_id", "chart_scope", "chart_id", "dep_id", "config_value_id", "image_id"]
 
 
 def project_id(project_name: str) -> str:
@@ -22,31 +23,29 @@ def file_id(proj_id: str, rel_path: str) -> str:
 
 
 def chart_scope(chart_dir: str) -> str:
-    """The chart's id segment: its DIRECTORY (relative, slash-normalized) -- unique per chart, since one
-    `Chart.yaml` anchors exactly one directory. Keying on the directory (never the Chart.yaml `name`) is
-    what prevents a root chart whose name equals a sibling subdir from merging with that subchart. The
-    repo-ROOT chart (empty dir) uses the `_root` segment, reserved by convention: a subchart whose
-    directory is literally `_root` would collide, which is not enforced but vanishingly unlikely."""
-    d = chart_dir.replace(chr(92), "/").strip("/")
-    return d or "_root"
+    """The chart's id segment: its DIRECTORY (relative, slash-normalized). Keying on the directory --
+    never the Chart.yaml `name` -- is what stops a root chart whose name equals a sibling subdir from
+    merging with that subchart (two charts in two dirs always get two scopes). The repo-ROOT chart
+    (empty dir) uses the reserved `_root` segment. `_root` and the `_dep/` dependency namespace are
+    reserved: `git_sync._collect_charts` skips a real chart that would land on either, so a path can
+    never collide with them (see `dep_id`)."""
+    return chart_dir.replace(chr(92), "/").strip("/") or "_root"
 
 
 def chart_id(proj_id: str, scope: str) -> str:
     return f"{proj_id}/{scope}"
 
 
-def workload_id(proj_id: str, scope: str, template: str, kind: str, name: str) -> str:
-    """Key a workload on its chart-relative TEMPLATE PATH (not just the basename, so `a/deploy.yaml` and
-    `b/deploy.yaml` stay distinct) + the workload KIND + name. With the parser disambiguating same
-    (kind, name) workloads within one file, two workloads can never share an id."""
-    t = template.replace(chr(92), "/").strip("/")
-    return f"{chart_id(proj_id, scope)}/{t}/{kind.lower()}/{name}"
-
-
 def dep_id(proj_id: str, dep_name: str) -> str:
     # A dependency that resolves to an in-repo chart uses that chart's id; an EXTERNAL dependency (not
     # in the repo) gets a project-scoped placeholder keyed by name, so two charts depending on the same
-    # external chart converge on one node. `_dep/` is reserved by convention: it is NOT enforced, but a
-    # collision needs a real chart whose directory is literally `_dep/<external-dep-name>` -- vanishingly
-    # unlikely, and chart discovery never creates such a path.
+    # external chart converge on one node. The `_dep/` namespace is RESERVED -- chart discovery
+    # (git_sync._collect_charts) skips any real chart whose directory is `_dep`/`_dep/...`, so a
+    # placeholder can never collide with a chart `Resource`.
     return f"{proj_id}/_dep/{dep_name}"
+
+
+def config_value_id(owner_id: str, name: str) -> str:
+    # The tier-wide ConfigValue scheme is `<owner-id>/env/<NAME>` (ADR 0007 line 72); the owner is the
+    # chart's `Resource`, so the value is scoped to -- and GC'd with -- its chart.
+    return f"{owner_id}/env/{name}"
