@@ -26,11 +26,17 @@ def _scalar(v) -> str:
     return ""
 
 
+# Kustomize matches an `images:` entry's `name` as a REGEX, so a `name: ".*"` (retag everything) carries
+# no concrete repository. These metacharacters can't appear in a real image ref, so a value containing
+# one is a matcher, not a literal we can key the hub on.
+_IMAGE_FORBIDDEN = frozenset("*?+[]{}()^$\\|<> \t")
+
+
 def _plausible_image(ref: str) -> bool:
-    """A sane-looking image ref: non-empty, no whitespace, and -- if the last path segment carries a
-    `:tag` -- a non-empty repository and tag. Kustomize values are literal (no templating), but guard
-    against a stray non-image string so `core.image_ref` can't mint a junk Image node."""
-    if not ref or any(c.isspace() for c in ref):
+    """A sane-looking, LITERAL image ref: non-empty, no whitespace or regex metacharacter (a `name:`
+    regex like `.*`), and -- if the last path segment carries a `:tag` -- a non-empty repository and
+    tag. Guards against a non-image string so `core.image_ref` can't mint a junk Image node."""
+    if not ref or any(c in _IMAGE_FORBIDDEN for c in ref):
         return False
     last = ref.split("@", 1)[0].rsplit("/", 1)[-1]
     if ":" in last:
@@ -62,20 +68,21 @@ def _resolve_image(entry: dict) -> str | None:
         return None
     name, new_name = _scalar(entry.get("name")), _scalar(entry.get("newName"))
     new_tag, new_digest = _scalar(entry.get("newTag")), _scalar(entry.get("digest"))
-    if not (new_name or new_tag or new_digest):
+    tag_suffix = _scalar(entry.get("tagSuffix"))
+    if not (new_name or new_tag or new_digest or tag_suffix):
         return None  # a no-op entry -- just a match target, asserts nothing
     name_repo, name_tag, name_digest = _split_ref(name) if name else ("", "", "")
     repo = new_name or name_repo  # a tagged `name` contributes only its repository here
     if not repo:
         return None
     if new_digest:
-        ref = f"{repo}@{new_digest}"
+        ref = f"{repo}@{new_digest}"           # a digest is the exact identity; `tagSuffix` is tag-only
     elif new_tag:
-        ref = f"{repo}:{new_tag}"
-    elif name_digest:
-        ref = f"{repo}@{name_digest}"  # renamed, digest kept from the matched name
+        ref = f"{repo}:{new_tag}{tag_suffix}"   # newTag overrides; `tagSuffix` appends (empty when unset)
     elif name_tag:
-        ref = f"{repo}:{name_tag}"      # renamed, tag kept from the matched name
+        ref = f"{repo}:{name_tag}{tag_suffix}"  # renamed, tag kept from the matched name
+    elif name_digest:
+        ref = f"{repo}@{name_digest}"           # renamed, matched by digest -- no tag to suffix
     else:
         return None  # renamed but the base's tag is unknown statically -- don't guess `:latest`
     return ref if _plausible_image(ref) else None

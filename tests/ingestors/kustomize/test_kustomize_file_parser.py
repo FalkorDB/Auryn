@@ -49,6 +49,24 @@ def test_non_list_images_and_resources_are_not_fatal():
     assert p.valid and p.images == () and p.bases == ()
 
 
+def test_tag_suffix_appends_to_the_tag():
+    assert _p("images:\n  - name: nginx\n    newTag: \"1.21\"\n    tagSuffix: -alpine\n").images == ("nginx:1.21-alpine",)
+    # appended to the tag kept from a renamed, tagged name
+    assert _p("images:\n  - name: nginx:1.27\n    newName: acme/nginx\n    tagSuffix: -prod\n").images \
+        == ("acme/nginx:1.27-prod",)
+
+
+def test_tag_suffix_only_without_a_known_tag_is_skipped():
+    # no concrete tag to suffix (base tag unknown render-free) -> skip rather than emit a junk ref
+    assert _p("images:\n  - name: nginx\n    tagSuffix: -prod\n").images == ()
+
+
+def test_regex_name_is_not_a_concrete_image():
+    # Kustomize matches `name` as a regex; `name: ".*"` carries no concrete repository -> skipped
+    assert _p("images:\n  - name: \".*\"\n    newTag: \"1.0\"\n").images == ()
+    assert _p("images:\n  - name: \"^nginx$\"\n    newTag: \"1.0\"\n").images == ()
+
+
 def test_bare_name_is_a_noop_and_skipped():
     # a match target with no override asserts nothing concrete -> not an image
     p = _p("images:\n  - name: nginx\n")

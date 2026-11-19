@@ -66,8 +66,10 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
         parsed.append((path, parse_kustomization(posixpath.dirname(path), blob)))
 
     # Don't stamp a phantom `kustomize://<project>` on a repo with no kustomizations. Still proceed when
-    # a prior subgraph exists, so removing the last one cleans it (recompute-to-empty).
-    if not parsed and prior_sha is None:
+    # a prior subgraph exists, so removing the last one cleans it (recompute-to-empty). Gate on the
+    # Project NODE existing, not on `commit_sha`: an interrupted resync can clear `commit_sha` while
+    # leaving the nodes, and those must still be cleaned up (a bare `prior_sha is None` would skip them).
+    if not parsed and not writer.node_exists("Project", proj_id):
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
     project_node = GraphNode(
