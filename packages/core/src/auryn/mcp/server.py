@@ -258,13 +258,17 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         # (core/sync_lock.py).
         with contextlib.ExitStack() as turn:
             turn.enter_context(sync_lock(resolve_project_root(path), queue_one=False))
+            others = ingest.deep_threads()  # other repos' background deep passes, still running
             try:
                 report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep, embed=embed)
             finally:
                 if deep == "background":
                     # That pass still writes the subgraph after this call has answered: a thread
-                    # takes the lock over, waits for the pass and only then releases it.
-                    turn.callback(ingest.join_deep_phase)
+                    # takes the lock over, waits for this call's pass (not the others') and only
+                    # then releases it.
+                    for thread in ingest.deep_threads():
+                        if thread not in others:
+                            turn.callback(thread.join)
                     threading.Thread(target=turn.pop_all().close, name="unlock-after-deep", daemon=True).start()
         # Shared with the CLI (lifecycle.wire_trigger) so the MCP can't skip the registry/hook
         # setup the CLI does -- honours the install-time [resync].trigger choice.

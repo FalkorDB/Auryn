@@ -715,6 +715,12 @@ def _spawn_deep(writer, source, target_sha, lang, *ctx) -> None:
     _deep_threads.append(thread)
 
 
+def deep_threads() -> list[threading.Thread]:
+    """The background deep passes this process has started and not yet joined -- so a caller can
+    tell the ones its own ingest started from another repo's (see mcp/server.py)."""
+    return list(_deep_threads)
+
+
 def join_deep_phase(timeout: float | None = None) -> None:
     """Block until the background deep passes started by this process finish. Optional for a
     long-lived server (the daemon threads upgrade the graph on their own); used by tests and
