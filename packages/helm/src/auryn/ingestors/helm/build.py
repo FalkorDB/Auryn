@@ -27,7 +27,12 @@ from auryn.ingestors.helm.model import ParsedChart
 
 # A config KEY whose name signals a sensitive value (ADR 0007: a sensitive entry is redacted, never
 # stored). Matched on the dotted name, so `database.password` / `auth.apiKey` are caught at any depth.
-_SENSITIVE = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?key|credential|private[_-]?key)")
+# The final branch catches a bare `key`/`keys` SEGMENT (`tls.key`, `api.key`, `signing_key` -> a private
+# key) while not firing on `monkey`/`keyboard`/`publicKey` (a public key isn't a secret).
+_SENSITIVE = re.compile(
+    r"(?i)(password|passwd|secret|token|credential|api[_-]?key|access[_-]?key|private[_-]?key"
+    r"|(?:^|[._-])keys?(?:[._-]|$))"
+)
 
 
 def _is_sensitive(name: str) -> bool:

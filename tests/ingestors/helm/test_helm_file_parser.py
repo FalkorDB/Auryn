@@ -155,3 +155,12 @@ def test_non_list_dependencies_is_ignored_not_fatal():
     # a malformed `dependencies: 42` must not raise (which would drop the whole chart) -- just no deps
     c = parse_chart_yaml("apiVersion: v2\nname: shop\nversion: 1.0.0\ndependencies: 42\n")
     assert c is not None and c.name == "shop" and c.dependencies == ()
+
+
+def test_sensitive_key_detection():
+    from auryn.ingestors.helm.build import _is_sensitive
+    for s in ("database.password", "api.key", "tls.key", "auth.token", "signing_key",
+              "apiKey", "my.secret", "aws.access_key", "db.credential", "keys"):
+        assert _is_sensitive(s), s
+    for s in ("replicaCount", "image.repository", "monkey", "keyboard", "service.port", "publicKey"):
+        assert not _is_sensitive(s), s
