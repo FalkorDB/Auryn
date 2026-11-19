@@ -28,7 +28,7 @@ from auryn.ingestors.helm.build import build_graph
 from auryn.ingestors.helm.file_parser import parse_chart
 from auryn.ingestors.helm.ids import project_id
 from auryn.ingestors.helm.plugin import EXCLUDED_DIR_NAMES as _EXCLUDED_DIR_NAMES
-from auryn.ingestors.helm.plugin import FILE_SUFFIXES as _FILE_SUFFIXES
+from auryn.ingestors.helm.plugin import CHART_GLOBS as _CHART_GLOBS
 from auryn.ingestors.helm.schema import NODE_SCHEMAS, OWNED_LABELS
 
 logger = logging.getLogger(__name__)
@@ -53,10 +53,9 @@ def _collect_charts(source, target_sha: str) -> dict[str, tuple]:
     `Chart.yaml`. Only the chart's own `Chart.yaml` + sibling `values.yaml` are kept -- v1 reads no
     templates. A repo YAML file that isn't a `Chart.yaml` (and isn't a chart's `values.yaml`) is
     dropped, so a plain k8s manifest or a compose file never anchors a helm chart."""
-    yaml_files: dict[str, str] = {}
-    for suffix in _FILE_SUFFIXES:
-        for path, blob_sha in source.list_files(target_sha, suffix, set(_EXCLUDED_DIR_NAMES)):
-            yaml_files.setdefault(path, blob_sha)
+    yaml_files: dict[str, str] = {}  # only Chart.yaml + values.yaml, not every repo YAML
+    for path, blob_sha in source.list_files_glob(target_sha, _CHART_GLOBS, set(_EXCLUDED_DIR_NAMES)):
+        yaml_files.setdefault(path, blob_sha)
 
     chart_dirs: dict[str, str] = {}
     for p in yaml_files:
@@ -98,8 +97,9 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
             continue
 
     # Don't stamp a phantom `helm://<project>` on a repo that has no charts at all. Still proceed when a
-    # prior helm subgraph exists, so removing the last chart cleans it (recompute-to-empty).
-    if not parsed_charts and prior_sha is None:
+    # prior helm subgraph exists, so removing the last chart cleans it (recompute-to-empty) -- its
+    # Project node, not its stamp: a sync that died mid-apply leaves the node without one.
+    if not parsed_charts and prior_sha is None and not writer.node_exists("Project", proj_id):
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
     project_node = GraphNode(
@@ -108,8 +108,12 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
     )
 
     def make_target():
-        # Project node LAST, so commit_sha isn't stamped on a partial graph (see k8s git_sync).
-        return itertools.chain(build_graph(parsed_charts, proj_id), [project_node])
+        # Project node LAST, so commit_sha isn't stamped on a partial graph (see k8s git_sync). When the
+        # LAST chart was removed (no charts, but a prior graph exists) the target is fully empty -- no
+        # Project either -- so the stale `helm://` subgraph is removed in its entirety, not left as a
+        # bare Project node.
+        tail = [project_node] if parsed_charts else []
+        return itertools.chain(build_graph(parsed_charts, proj_id), tail)
 
     stats, _r, _p = stream_apply(writer, proj_id, OWNED_LABELS, make_target)
     elapsed = time.monotonic() - started
