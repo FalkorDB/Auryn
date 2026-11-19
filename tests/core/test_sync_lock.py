@@ -135,13 +135,15 @@ def test_ingest_dir_takes_its_turn_with_the_repos_syncs(tmp_path, monkeypatch):
     monkeypatch.setattr(sync_lock_mod, "sync_lock", recorded)
     monkeypatch.setattr("auryn.cli._ingest_writer", lambda ctx, graph: None)
     monkeypatch.setattr("auryn.core.ingest.ingest_directory", lambda *a, **k: events.append("ingest"))
+    monkeypatch.setattr("auryn.core.ingest.join_deep_phase", lambda: events.append("join"))
     monkeypatch.setattr("auryn.cli._echo_ingest_report", lambda report: None)
     monkeypatch.setattr("auryn.cli._wire_trigger", lambda *a, **k: None)
 
     res = CliRunner().invoke(cli, ["ingest", "dir", str(tmp_path)])
 
     assert res.exit_code == 0, res.output
-    assert events == [("lock", resolve_project_root(str(tmp_path)), False), "ingest", "unlock"]
+    # "join": a `--deep background` pass still writes the subgraph, so the lock outlasts it
+    assert events == [("lock", resolve_project_root(str(tmp_path)), False), "ingest", "join", "unlock"]
 
 
 @pytest.mark.parametrize("ingest_fails", [False, True])

@@ -921,14 +921,17 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
         # Its turn among this repo's hook / watcher syncs, which write the same project subgraph
         # (core/sync_lock.py) -- e.g. a deep re-ingest while a commit hook fires.
         with sync_lock(resolve_project_root(path), queue_one=False):
-            report = ingest.ingest_directory(
-                writer, path, project_name=project_name, solution_name=solution_name, deep=deep,
-                # Explicit --host is an ad-hoc connection the background daemon may not match -> inline.
-                embed=("inline" if ctx.obj.get("host") else None),
-                include_dirs=include_dirs, exclude_dirs=exclude_dirs,
-                include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
-                enrichment_only=only_hooks, enrichment_skip=skip_hooks,
-            )
+            try:
+                report = ingest.ingest_directory(
+                    writer, path, project_name=project_name, solution_name=solution_name, deep=deep,
+                    # Explicit --host is an ad-hoc connection the background daemon may not match -> inline.
+                    embed=("inline" if ctx.obj.get("host") else None),
+                    include_dirs=include_dirs, exclude_dirs=exclude_dirs,
+                    include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
+                    enrichment_only=only_hooks, enrichment_skip=skip_hooks,
+                )
+            finally:
+                ingest.join_deep_phase()  # `--deep background` writers: hold the lock for them, as `sync` does
     except ValueError as e:  # missing path / not a directory -- a clean CLI error, not a traceback
         raise click.ClickException(str(e)) from e
     _echo_ingest_report(report)
