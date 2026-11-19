@@ -10,7 +10,8 @@
 #     pip install "falkordb-auryn[all]"          # + live-DB drivers (oracledb / postgres / mysql)
 #     pip install "auryn-core[python,http]"      # custom: the core + only the plugins named
 #
-# Every auryn-* requirement is pinned to this release's version (release.yml stamps the pins).
+# Every auryn-* requirement is pinned to the version being built (hatch_build.py fills the pins
+# in; release.yml also stamps them here).
 #
 # For local development, `uv sync` installs the whole workspace editable (all members
 # are in the dev group below), so the full test suite and benchmarks run unchanged.
@@ -18,7 +19,7 @@
 
 [project]
 name = "falkordb-auryn"
-dynamic = ["version"]
+dynamic = ["version", "dependencies", "optional-dependencies"]
 description = "Extracts structural metadata from source code (and SQL databases) into a FalkorDB knowledge graph for AI agent consumption. Umbrella package; language support ships as auryn-<lang> plugins."
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
@@ -49,6 +50,9 @@ classifiers = [
 #   * the COMPILED live-DB drivers (oracledb / postgres / mysql) -- opt-in via `[all]`/`[oracle-live]`/
 #     `[sql-all]`.
 # For a custom install, use `auryn-core[<plugin>,...]` (see packages/core/pyproject.toml).
+# Declared here, not under [project]: hatch_build.py fills each `auryn-*==` pin in with the version
+# being built, so these fields are dynamic (see `dynamic` above).
+[tool.hatch.metadata.hooks.custom]
 dependencies = [
     "auryn-core==0.1.0",
     # languages
@@ -89,7 +93,7 @@ Repository = "https://github.com/FalkorDB/Auryn"
 Documentation = "https://github.com/FalkorDB/Auryn/tree/main/docs"
 Issues = "https://github.com/FalkorDB/Auryn/issues"
 
-[project.optional-dependencies]
+[tool.hatch.metadata.hooks.custom.optional-dependencies]
 # Only the heavy optional parts; every plugin is already a dependency above.
 embedded = ["auryn-core[embedded]==0.1.0"]      # serverless, in-process FalkorDB (no server/Docker); powers `auryn quickstart`
 oracle-live = ["auryn-oracle[live]==0.1.0"]     # + oracledb for the live `oracle` PL/SQL ingestor

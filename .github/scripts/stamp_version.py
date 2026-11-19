@@ -3,7 +3,8 @@
 Rewrites every `auryn-*==<x>` pin (the umbrella's dependencies, auryn-core's plugin extras), so a
 release stays lockstep: `falkordb-auryn==X` installs exactly the X of every plugin. A package's
 own version is not in its pyproject: it comes from git (hatch-vcs), so build the stamped tree
-with `SETUPTOOLS_SCM_PRETEND_VERSION` set to the same VERSION.
+with `SETUPTOOLS_SCM_PRETEND_VERSION` set to the same VERSION. (hatch_build.py pins the built
+metadata to the build's version anyway; stamping keeps the pyproject an sdist ships in step.)
 
 Usage: python .github/scripts/stamp_version.py VERSION [ROOT]
 Used by release.yml (the release version) and tests.yml (a local-only version for install tests).

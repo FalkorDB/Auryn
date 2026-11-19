@@ -526,7 +526,7 @@ but the workspace has to know the distribution exists. Copy every place `go` app
 
 ```toml
 # pyproject.toml (root: the falkordb-auryn umbrella)
-[project]
+[tool.hatch.metadata.hooks.custom]
 dependencies = [..., "auryn-go==0.1.0", ...]   # 1. `pip install falkordb-auryn` installs every plugin
 
 [tool.uv.sources]
@@ -539,13 +539,14 @@ dev = [..., "auryn-go", ...]       # 3. so `uv sync` installs it editable for de
 source = [..., "packages/go/src/auryn", ...]   # 4. include it in coverage
 
 # packages/core/pyproject.toml
-[project.optional-dependencies]
+[tool.hatch.metadata.hooks.custom.optional-dependencies]
 go = ["auryn-go==0.1.0"]           # 5. the custom-install extra: pip install "auryn-core[go]"
 all = [..., "auryn-go==0.1.0", ...]   # 6. pip install "auryn-core[all]" installs every plugin
 ```
 
-Pin to the version the other pins carry; the release workflow rewrites these pins to the
-released version (the package's own version comes from git, see step 1). `tests/test_package_extras.py` fails
+Pin to the version the other pins carry: it is a placeholder, and every build fills in its own
+version. That is why these requirements sit under the build hook's table and not under `[project]`
+(`hatch_build.py`; the package's own version comes from git, see step 1). `tests/test_package_extras.py` fails
 if a plugin is missing from the umbrella's dependencies (1), its core extra (5) or `all` (6).
 
 Then `uv sync` and confirm discovery picks it up:

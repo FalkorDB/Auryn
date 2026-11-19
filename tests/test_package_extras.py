@@ -4,7 +4,8 @@
 - `pip install "auryn-core[python,http]"` installs the core and only the plugins named.
 - Extras on the umbrella are only the heavy optional parts.
 - Every auryn-* pin is `==` one version, so release.yml can stamp them (lockstep). A package's own
-  version is not in these files: it comes from git (see tests/core/test_version.py).
+  version is not in these files: it comes from git (see tests/core/test_version.py), and every
+  build pins to the version it is built at (hatch_build.py).
 """
 
 import importlib.util
@@ -27,7 +28,10 @@ def _name(requirement: str) -> str:
 
 
 def _project(path: Path) -> dict:
-    return tomllib.loads(path.read_text())["project"]
+    # The requirements that carry an auryn-* pin are dynamic: they are declared under the build
+    # hook's table and become [project] fields at build time (hatch_build.py). Read them as such.
+    data = tomllib.loads(path.read_text())
+    return data["project"] | data["tool"]["hatch"].get("metadata", {}).get("hooks", {}).get("custom", {})
 
 
 def _members() -> dict[str, dict]:
@@ -97,6 +101,42 @@ def test_every_summary_fits_pypi():
     projects = [_project(ROOT / "pyproject.toml"), *_members().values()]
     too_long = {p["name"]: len(p["description"]) for p in projects if len(p["description"]) > 512}
     assert not too_long, too_long
+
+
+def test_every_pin_is_declared_where_the_build_hook_fills_it_in():
+    # hatch_build.py fills the pins in at build time, from its own table. A pin left under
+    # [project] would be shipped as written. The hook has to be inside each package that has pins
+    # (an sdist holds one package's directory), so there are copies, and they must not drift.
+    hooks = []
+    for f in [ROOT / "pyproject.toml", *sorted((ROOT / "packages").glob("*/pyproject.toml"))]:
+        data = tomllib.loads(f.read_text())
+        static = data["project"].get("dependencies", []) + [
+            r for rs in data["project"].get("optional-dependencies", {}).values() for r in rs
+        ]
+        assert not [r for r in static if _name(r).startswith("auryn-") and "==" in r], f
+        hooked = data["tool"]["hatch"].get("metadata", {}).get("hooks", {}).get("custom")
+        if hooked:
+            assert set(hooked) <= set(data["project"]["dynamic"]), f
+            hooks.append((f.parent / "hatch_build.py").read_text())
+    assert len(hooks) > 1 and len(set(hooks)) == 1
+
+
+def test_installed_auryn_packages_satisfy_each_others_pins():
+    # `pip check`, for the Auryn packages of this environment: built from one tree they fit
+    # together whatever version git gave them. With fixed `==0.1.0` pins they did not.
+    from importlib.metadata import distributions
+
+    from packaging.requirements import Requirement
+
+    ours = {_name(d.metadata["Name"]): d for d in distributions()}
+    ours = {name: d for name, d in ours.items() if name == "falkordb-auryn" or name.startswith("auryn-")}
+    assert "auryn-core" in ours
+    for name, dist in ours.items():
+        for r in dist.requires or []:
+            requirement = Requirement(r)
+            if _name(requirement.name) in ours:
+                installed = ours[_name(requirement.name)].version
+                assert requirement.specifier.contains(installed, prereleases=True), (name, r, installed)
 
 
 def test_no_plugin_requires_the_umbrella():

@@ -1,11 +1,14 @@
 [project]
 name = "auryn-oracle"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "Oracle-stack plugins for Auryn: live-DB and file-based PL/SQL (vendored ANTLR grammar) and Redgate schema-catalog reconstruction (oraschema). (The generic relational-DB schema ingestor now lives in auryn-sql.)"
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }
+# Declared here, not under [project]: hatch_build.py fills each `auryn-*==` pin in with the version
+# being built, so these fields are dynamic (see `dynamic` above).
+[tool.hatch.metadata.hooks.custom]
 dependencies = [
     "auryn-core",
     # oraschema (Redgate schema-catalog reconstruction) reuses the generic relational

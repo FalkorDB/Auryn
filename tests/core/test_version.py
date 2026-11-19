@@ -72,7 +72,7 @@ def test_every_package_takes_its_version_from_git():
     assert len(files) > 20
     for f in files:
         data = tomllib.loads(f.read_text())
-        assert "version" not in data["project"] and data["project"]["dynamic"] == ["version"], f
+        assert "version" not in data["project"] and "version" in data["project"]["dynamic"], f
         assert "hatch-vcs" in data["build-system"]["requires"], f
         assert data["tool"]["hatch"]["version"]["source"] == "vcs", f
 

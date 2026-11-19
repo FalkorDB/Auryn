@@ -1,6 +1,6 @@
 [project]
 name = "auryn-core"
-dynamic = ["version"]
+dynamic = ["version", "optional-dependencies"]
 description = "Core of Auryn: registry/plugin discovery, git+local sources, the FalkorDB graph layer, the MCP server, the viewer, and the `auryn` CLI. Language support ships as separate `auryn-<lang>` plugins."
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
@@ -18,7 +18,9 @@ dependencies = [
     "tomli-w>=1.0",  # write ~/.auryn/config.toml (install manifest); reads use stdlib tomllib
 ]
 
-[project.optional-dependencies]
+# Declared here, not under [project]: hatch_build.py fills each `auryn-*==` pin in with the version
+# being built, so these fields are dynamic (see `dynamic` above).
+[tool.hatch.metadata.hooks.custom.optional-dependencies]
 # Optional AI enrichment for the viewer: naming detected graph communities via
 # Claude (viewer/community_names.py). Imported lazily and degraded gracefully, so
 # the viewer runs fine without it -- install `auryn-core[llm]` + set
@@ -30,8 +32,8 @@ llm = ["anthropic>=0.40"]
 # embedded mode, so the normal server path never carries it. Powers `auryn quickstart`.
 embedded = ["falkordblite>=0.10"]
 # Plugins, for a custom install: `pip install "auryn-core[python,http]"`. Each extra is named
-# after its package (`auryn-<name>`) and pinned to this release's version (release.yml stamps
-# the pins with the version). `pip install falkordb-auryn` installs all of them.
+# after its package (`auryn-<name>`) and pinned to the version being built (hatch_build.py fills
+# the pins in; release.yml also stamps them here). `pip install falkordb-auryn` installs all of them.
 # languages
 python = ["auryn-python==0.1.0"]
 typescript = ["auryn-typescript==0.1.0"]       # also .js/.jsx/.mjs/.cjs
