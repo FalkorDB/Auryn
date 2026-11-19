@@ -528,6 +528,37 @@ def test_stream_apply_interrupted_mid_apply_leaves_the_commit_unstamped(graph, a
     ).result_set == [["c2"]]
 
 
+def test_stream_apply_clears_the_stamp_before_the_first_batch_when_the_project_node_comes_last(graph, monkeypatch):
+    """compose and k8s yield their Project node LAST. A full batch of changed nodes ahead of it
+    must not reach the graph while the previous commit is still stamped -- a sync that dies there
+    would leave that commit claimed over a half-written graph."""
+    monkeypatch.setattr("auryn.core.graph_sync._STREAM_BATCH_SIZE", 2)
+    writer = GraphWriter(graph)
+    writer.setup_schema([NodeSchema("Project"), NodeSchema("Class")])
+    labels = ["Project", "Class"]
+
+    def target(sha):
+        classes = [GraphNode("Class", {"id": f"{_P}.{c}"}, {"name": sha}) for c in "abc"]
+        return [*classes, GraphNode("Project", {"id": _P}, {"name": "p", "commit_sha": sha})]
+
+    stream_apply(writer, _P, labels, _fresh(target("c1")))
+    merge_nodes = writer.merge_nodes
+
+    def dies_on_the_first_batch(nodes):
+        if nodes[0].label == "Class":
+            raise RuntimeError("killed mid-apply")
+        merge_nodes(nodes)
+
+    monkeypatch.setattr(writer, "merge_nodes", dies_on_the_first_batch)
+    with pytest.raises(RuntimeError):
+        stream_apply(writer, _P, labels, _fresh(target("c2")))
+    assert writer.get_property("Project", {"id": _P}, "commit_sha") is None
+
+    stream_apply(GraphWriter(graph), _P, labels, _fresh(target("c2")))  # the healthy re-run heals it, then stamps
+    assert writer.get_property("Project", {"id": _P}, "commit_sha") == "c2"
+    assert graph.query("MATCH (c:Class) RETURN DISTINCT c.name").result_set == [["c2"]]
+
+
 def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(graph):
     """Parity: streaming and the materialise-then-diff path must leave byte-identical
     graphs (same nodes, edges, and stored properties incl. _fingerprint)."""
