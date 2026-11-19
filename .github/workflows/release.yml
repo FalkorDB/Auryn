@@ -74,13 +74,19 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Releasing version $v"
 
-      - name: Stamp the version into every package (single source of truth = the tag)
+      - name: Stamp the version into every auryn-* pin (single source of truth = the tag)
         env:
           VERSION: ${{ steps.ver.outputs.version }}
-        # Rewrites each `version = ...` line and every `auryn-*==` pin (umbrella deps, core extras).
+        # Rewrites every `auryn-*==` pin (umbrella deps, core extras). The packages' own versions
+        # come from git; the build below holds them at this same version.
         run: python .github/scripts/stamp_version.py "$VERSION"
 
       - name: Build the umbrella + every member package
+        env:
+          # Versions are derived from git (hatch-vcs, see the pyproject files). A release builds
+          # every package at the ONE version resolved above -- single source of truth = the tag --
+          # whatever `git describe` would say about this checkout.
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           rm -rf dist && mkdir -p dist
           uv build --out-dir dist .                    # falkordb-auryn (umbrella)
@@ -88,7 +94,7 @@ jobs:
             uv build --out-dir dist "$d"               # auryn-core + every language/feature dist
           done
 
-      - name: Sanity check — one wheel per workspace package (+ umbrella)
+      - name: Sanity check — one wheel per workspace package (+ umbrella), all at one version
         run: |
           ls -1 dist
           n=$(ls -1 dist/*.whl | wc -l)
@@ -96,6 +102,16 @@ jobs:
           expected=$(( members + 1 ))   # every packages/* member + the umbrella
           echo "built $n wheels; expected $expected ($members members + umbrella)"
           test "$n" -eq "$expected" || { echo "::error::expected $expected wheels, got $n"; exit 1; }
+          # A wheel is built from its sdist, where there is no git: catch a package that fell back
+          # to another version (or still carries a fixed one) instead of publishing a mismatched
+          # set. Compared with each other, not with the tag: the built name is the normalized
+          # form (`0.4.0-rc.1` -> `0.4.0rc1`).
+          versions=$(ls -1 dist | sed -E 's/^.+-([^-]+)(-py3-none-any\.whl|\.tar\.gz)$/\1/' | sort -u)
+          echo "version(s) built: $versions"
+          if [ "$(echo "$versions" | wc -l)" -ne 1 ]; then
+            ls -1 dist | sed -E 's/^(.+)-([^-]+)(-py3-none-any\.whl|\.tar\.gz)$/\2  &/' | sort
+            echo "::error::built more than one version"; exit 1
+          fi
 
       - name: Select a single project for pending publisher bootstrap
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.bootstrap_project != '' }}

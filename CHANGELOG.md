@@ -6,6 +6,10 @@ All notable changes to Auryn are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`auryn --version`** — the installed version and, for a build that isn't a release, the git
+  commit it was built from.
+
 ### Changed
 - Relicensed the project from the Server Side Public License (SSPL-1.0) to the
   **MIT License**. MIT covers Auryn's own code in the repository and all subsequent
@@ -13,6 +17,9 @@ All notable changes to Auryn are documented here. The format is based on
   in `auryn-oracle`) retain their own licenses — see that package's `LICENSE`. The
   already-published 0.1.0 packages on PyPI keep their original SSPL metadata (PyPI
   releases are immutable).
+- Package versions are derived from git instead of a fixed `0.1.0`, so reinstalling from a
+  clone after a `git pull`, or after editing a package's sources, rebuilds instead of reusing
+  a stale cached build.
 
 ## [0.1.0] — Initial public release
 

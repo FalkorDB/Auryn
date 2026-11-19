@@ -27,7 +27,19 @@ from auryn.core.logging_config import setup_logging
 from auryn.core.registry import discover_ingestors
 
 
+def _print_version(ctx: click.Context, _param, value: bool) -> None:
+    """Eager callback for `--version`: print it and stop, before any subcommand is resolved."""
+    if not value or ctx.resilient_parsing:
+        return
+    from auryn.core.version import describe
+
+    click.echo(describe())
+    ctx.exit()
+
+
 @click.group()
+@click.option("--version", is_flag=True, expose_value=False, is_eager=True, callback=_print_version,
+              help="Show the installed version and the git commit it was built from, then exit.")
 @click.option("-v", "--verbose", is_flag=True, default=False,
               help="Log every file as it's parsed (a live progress line per file). Off by default; "
                    "also settable with AURYN_VERBOSE=1. On the pooled C#/PL/SQL parsers, verbose "

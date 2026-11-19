@@ -10,7 +10,8 @@
 #     pip install "falkordb-auryn[all]"          # + live-DB drivers (oracledb / postgres / mysql)
 #     pip install "auryn-core[python,http]"      # custom: the core + only the plugins named
 #
-# Every auryn-* requirement is pinned to this release's version (release.yml stamps the pins).
+# Every auryn-* requirement is pinned to the version being built (hatch_build.py fills the pins
+# in; release.yml also stamps them here).
 #
 # For local development, `uv sync` installs the whole workspace editable (all members
 # are in the dev group below), so the full test suite and benchmarks run unchanged.
@@ -18,7 +19,7 @@
 
 [project]
 name = "falkordb-auryn"
-version = "0.1.0"
+dynamic = ["version", "dependencies", "optional-dependencies"]
 description = "Extracts structural metadata from source code (and SQL databases) into a FalkorDB knowledge graph for AI agent consumption. Umbrella package; language support ships as auryn-<lang> plugins."
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
@@ -49,6 +50,9 @@ classifiers = [
 #   * the COMPILED live-DB drivers (oracledb / postgres / mysql) -- opt-in via `[all]`/`[oracle-live]`/
 #     `[sql-all]`.
 # For a custom install, use `auryn-core[<plugin>,...]` (see packages/core/pyproject.toml).
+# Declared here, not under [project]: hatch_build.py fills each `auryn-*==` pin in with the version
+# being built, so these fields are dynamic (see `dynamic` above).
+[tool.hatch.metadata.hooks.custom]
 dependencies = [
     "auryn-core==0.1.0",
     # languages
@@ -89,7 +93,7 @@ Repository = "https://github.com/FalkorDB/Auryn"
 Documentation = "https://github.com/FalkorDB/Auryn/tree/main/docs"
 Issues = "https://github.com/FalkorDB/Auryn/issues"
 
-[project.optional-dependencies]
+[tool.hatch.metadata.hooks.custom.optional-dependencies]
 # Only the heavy optional parts; every plugin is already a dependency above.
 embedded = ["auryn-core[embedded]==0.1.0"]      # serverless, in-process FalkorDB (no server/Docker); powers `auryn quickstart`
 oracle-live = ["auryn-oracle[live]==0.1.0"]     # + oracledb for the live `oracle` PL/SQL ingestor
@@ -109,7 +113,7 @@ all = [                                         # every live-DB driver
 auryn = "auryn.cli:cli"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 # The umbrella has no code of its own -- it's a pure dependency aggregator.
@@ -236,3 +240,21 @@ omit = ["*/ingestors/plsql/grammar/*"]
 
 [tool.coverage.report]
 show_missing = true
+
+# ── version: derived from git (hatch-vcs) ────────────────────────────────────
+# Every commit -- and every build of a modified tree (local part `+g<sha>.d<timestamp>`) -- gets
+# its own version, and uv's build cache is keyed on the git commit and the source files (by default
+# it only watches pyproject.toml). Together these stop `uv tool install --force <clone>` from
+# silently reinstalling a stale cached build. An sdist keeps the version it was built with, and a
+# `git archive` / GitHub ZIP reads it from .git_archival.txt; a tree with neither falls back to
+# 0.0.0.dev0 -- a development version, so it can't pass for a release.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0.dev0"
+raw-options = { root = ".", local_scheme = "node-and-timestamp" }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" }, { file = "README.md" }, { git = { commit = true, tags = true } },
+    { file = "packages/*/src/**/*.py" }, { file = "packages/*/src/**/*.js" }, { file = "packages/*/src/**/*.md" }, { file = "packages/*/src/**/*.cs" }, { file = "packages/*/src/**/*.html" }, { file = "packages/*/src/**/*.css" }, { file = "packages/*/src/**/*.csproj" }, { file = "packages/*/pyproject.toml" },
+]
