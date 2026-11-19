@@ -40,31 +40,51 @@ def _plausible_image(ref: str) -> bool:
     return True
 
 
+def _split_ref(ref: str) -> tuple[str, str, str]:
+    """`repo[:tag][@digest]` -> (repository, tag, digest). The tag is a `:` in the LAST path segment
+    only, so a `registry:port/...` host is never mistaken for a tag."""
+    body, _, digest = ref.partition("@")
+    cut = body.rfind("/")
+    seg = body[cut + 1:]
+    if ":" in seg:
+        repo_tail, _, tag = seg.rpartition(":")
+        return body[:cut + 1] + repo_tail, tag, digest
+    return body, "", digest
+
+
 def _resolve_image(entry: dict) -> str | None:
-    """A single `images:` entry -> the concrete ref it sets, or None. `newName`/`newTag`/`digest`
-    override the matched `name`; a bare `{name: x}` with no override keeps the base's render-time tag
-    (unknown statically), so it is skipped -- only an entry that ASSERTS a concrete image is emitted."""
+    """A single `images:` entry -> the concrete ref the overlay deploys, or None. Precedence follows
+    Kustomize: `newName` replaces the repository, `newTag`/`digest` replace the tag/digest, and a rename
+    with no new tag KEEPS the tag/digest carried by the matched `name`. Only an entry that ASSERTS a
+    concrete ref is emitted -- a no-op `{name: x}`, or a `newName`-only rename whose base tag is unknown
+    render-free, is skipped (materializing `:latest` would be a false hub join)."""
     if not isinstance(entry, dict):
         return None
     name, new_name = _scalar(entry.get("name")), _scalar(entry.get("newName"))
-    new_tag, digest = _scalar(entry.get("newTag")), _scalar(entry.get("digest"))
-    repo = new_name or name
+    new_tag, new_digest = _scalar(entry.get("newTag")), _scalar(entry.get("digest"))
+    if not (new_name or new_tag or new_digest):
+        return None  # a no-op entry -- just a match target, asserts nothing
+    name_repo, name_tag, name_digest = _split_ref(name) if name else ("", "", "")
+    repo = new_name or name_repo  # a tagged `name` contributes only its repository here
     if not repo:
         return None
-    if digest:
-        ref = f"{repo}@{digest}"
+    if new_digest:
+        ref = f"{repo}@{new_digest}"
     elif new_tag:
         ref = f"{repo}:{new_tag}"
-    elif new_name:
-        ref = repo  # repo replaced, tag kept from the base manifest (unknown render-free)
+    elif name_digest:
+        ref = f"{repo}@{name_digest}"  # renamed, digest kept from the matched name
+    elif name_tag:
+        ref = f"{repo}:{name_tag}"      # renamed, tag kept from the matched name
     else:
-        return None  # a no-op entry (just a match target) -- asserts nothing concrete
+        return None  # renamed but the base's tag is unknown statically -- don't guess `:latest`
     return ref if _plausible_image(ref) else None
 
 
 def _paths(doc: dict, key: str) -> list[str]:
+    raw = doc.get(key)  # a malformed `resources: true` / scalar must not iterate (char-by-char or raise)
     out = []
-    for p in doc.get(key, []) or []:
+    for p in raw if isinstance(raw, list) else []:
         s = _scalar(p)
         if s:
             out.append(s)
@@ -80,7 +100,8 @@ def parse_kustomization(kustomization_dir: str, data: str | bytes) -> ParsedKust
         return ParsedKustomization(kustomization_dir=kustomization_dir, valid=False)
 
     images: dict[str, None] = {}
-    for entry in doc.get("images", []) or []:
+    raw_images = doc.get("images")  # a malformed `images: 42` must not iterate
+    for entry in raw_images if isinstance(raw_images, list) else []:
         ref = _resolve_image(entry)
         if ref:
             images.setdefault(ref, None)

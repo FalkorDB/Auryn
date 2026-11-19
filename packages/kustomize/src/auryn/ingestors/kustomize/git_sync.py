@@ -52,6 +52,10 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
 
     parsed = []
     for path, blob_sha in sorted(source.list_files_glob(target_sha, _FILE_GLOBS, set(_EXCLUDED_DIR_NAMES))):
+        cd = posixpath.dirname(path)
+        if cd.replace(chr(92), "/").strip("/") == "_root":  # the reserved repo-root scope
+            logger.warning("kustomize: dir %r collides with the reserved `_root` scope -- skipped", cd)
+            continue
         try:
             blob = source.read_blob(blob_sha)
         except Exception:

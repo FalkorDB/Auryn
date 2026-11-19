@@ -25,10 +25,28 @@ def test_digest_overrides_tag():
     assert p.images == ("nginx@sha256:abc123",)
 
 
-def test_newname_only_keeps_base_tag_unknown():
-    # repo replaced but no tag override -> the base's render-time tag is unknown, so just the repo
+def test_newname_only_without_tag_is_skipped():
+    # repo replaced but no tag anywhere -> the base's tag is unknown render-free; don't guess `:latest`
+    # (a false hub join), so skip it
     p = _p("images:\n  - name: nginx\n    newName: myreg.io/nginx\n")
-    assert p.images == ("myreg.io/nginx",)
+    assert p.images == ()
+
+
+def test_newname_keeps_the_matched_name_tag():
+    # a tagged match target supplies the tag when the repo is renamed (Kustomize keeps it)
+    p = _p("images:\n  - name: nginx:1.27\n    newName: myreg.io/nginx\n")
+    assert p.images == ("myreg.io/nginx:1.27",)
+
+
+def test_newtag_strips_the_tag_from_name():
+    # `name: nginx:1.19` + `newTag: 1.21` must NOT become `nginx:1.19:1.21`
+    assert _p("images:\n  - name: nginx:1.19\n    newTag: \"1.21\"\n").images == ("nginx:1.21",)
+
+
+def test_non_list_images_and_resources_are_not_fatal():
+    # `images: 42` / `resources: true` must not raise (which would abort the whole sync)
+    p = _p("images: 42\nresources: true\n")
+    assert p.valid and p.images == () and p.bases == ()
 
 
 def test_bare_name_is_a_noop_and_skipped():

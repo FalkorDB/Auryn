@@ -93,3 +93,22 @@ def test_repo_with_no_kustomization_is_not_ingested(graph, tmp_path):
     })
     assert q("MATCH (p:Project {name:'shop'}) RETURN count(p)") == [[0]]
     assert q("MATCH (r:Resource) RETURN count(r)") == [[0]]
+
+
+def test_root_base_reference_resolves(graph, tmp_path):
+    # an overlay referencing the REPO-ROOT kustomization (`../..` -> `.` -> the "" key) resolves
+    q = _ingest(graph, tmp_path, {
+        "kustomization.yaml": "kind: Kustomization\nnamespace: base\n",
+        "overlays/prod/kustomization.yaml": "kind: Kustomization\nresources:\n  - ../..\n",
+    })
+    assert q("MATCH (:Resource {name:'overlays/prod'})-[:DEPENDS_ON]->(r:Resource) RETURN r.name") == [["_root"]]
+
+
+def test_reserved_root_dir_is_skipped(graph, tmp_path):
+    # a kustomization literally in a `_root/` dir collides with the repo-root scope -> skipped
+    q = _ingest(graph, tmp_path, {
+        "kustomization.yaml": "kind: Kustomization\nnamespace: real-root\n",
+        "_root/kustomization.yaml": "kind: Kustomization\nnamespace: impostor\n",
+    })
+    assert q("MATCH (r:Resource) RETURN count(r)") == [[1]]
+    assert q("MATCH (r:Resource) WHERE r.id = 'kustomize://shop/_root' RETURN r.namespace") == [["real-root"]]

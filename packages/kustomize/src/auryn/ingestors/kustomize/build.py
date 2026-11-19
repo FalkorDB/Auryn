@@ -19,10 +19,12 @@ from auryn.ingestors.kustomize.model import ParsedKustomization
 
 def _resolve_base(kustomization_dir: str, entry: str) -> str:
     """Normalize a `resources:`/`bases:` path (relative to the kustomization dir) to a repo-relative
-    directory, so it can be matched against the known kustomization dirs. A remote/URL entry normalizes
-    to something that matches nothing -- and is therefore ignored."""
+    directory key, so it can be matched against the known kustomization dirs. The repo-root kustomization
+    is keyed by `""`, so a reference that resolves to the root (`posixpath.normpath` -> `"."`) maps to
+    `""`. A remote/URL entry normalizes to something that matches nothing -- and is therefore ignored."""
     joined = posixpath.join(kustomization_dir, entry) if kustomization_dir else entry
-    return posixpath.normpath(joined).replace(chr(92), "/").strip("/")
+    norm = posixpath.normpath(joined).replace(chr(92), "/")
+    return "" if norm == "." else norm.strip("/")
 
 
 def build_graph(kustomizations: list[tuple[str, ParsedKustomization]], proj_id: str) -> Iterator[GraphNode | GraphEdge]:
