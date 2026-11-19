@@ -82,14 +82,6 @@ class GitLanguage:
     file_suffixes: tuple[str, ...]
     excluded_dir_names: frozenset[str]
     sync: Callable[..., Any]
-    file_globs: tuple[str, ...] = ()
-    """Basename GLOB patterns (fnmatch, case-sensitive) that identify this language's files, for the
-    cases a bare `endswith` suffix can't express: a prefix/infix variant (`Dockerfile.*`,
-    `compose.*.yml`) or an exact-basename anchor that fires only when present (`Chart.yaml`, so Helm
-    isn't woken by every `.yaml`). ADDITIVE to `file_suffixes` (each suffix `s` is equivalent to the
-    glob `*s`); detection and the save-watcher match on the UNION (see `match_patterns`). Overlapping
-    patterns across languages (Helm `Chart.yaml` vs k8s `*.yaml`) are NOT exclusive ownership -- each
-    producer's `sync` still content-sniffs to decide what it actually owns (ADR 0007 §7)."""
     deep_sync: Callable[..., Any] | None = None
     """Optional second, deeper pass for two-phase (dynamic) languages. When set, the
     ingestion endpoint runs `sync` first (fast, e.g. Python's stdlib-`ast` engine) so the
@@ -97,6 +89,15 @@ class GitLanguage:
     inferred types + resolved calls) -- inline or in the background. Same signature and
     return type as `sync`; because both engines emit identical node ids, the deep pass is a
     pure delta over the fast one. None for static languages that have only one pass."""
+    file_globs: tuple[str, ...] = ()
+    """Basename GLOB patterns (fnmatch, case-sensitive) that identify this language's files, for the
+    cases a bare `endswith` suffix can't express: a prefix/infix variant (`Dockerfile.*`,
+    `compose.*.yml`) or an exact-basename anchor that fires only when present (`Chart.yaml`, so Helm
+    isn't woken by every `.yaml`). ADDITIVE to `file_suffixes` (each suffix `s` is equivalent to the
+    glob `*s`); detection and the save-watcher match on the UNION (see `match_patterns`). Overlapping
+    patterns across languages (Helm `Chart.yaml` vs k8s `*.yaml`) are NOT exclusive ownership -- each
+    producer's `sync` still content-sniffs to decide what it actually owns (ADR 0007 §7). Declared LAST
+    (after `deep_sync`) so it never shifts a positional `GitLanguage(...)` registration."""
 
     def is_two_phase(self) -> bool:
         return self.deep_sync is not None

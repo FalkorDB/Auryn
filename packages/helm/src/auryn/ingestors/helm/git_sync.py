@@ -107,8 +107,12 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
     )
 
     def make_target():
-        # Project node LAST, so commit_sha isn't stamped on a partial graph (see k8s git_sync).
-        return itertools.chain(build_graph(parsed_charts, proj_id), [project_node])
+        # Project node LAST, so commit_sha isn't stamped on a partial graph (see k8s git_sync). When the
+        # LAST chart was removed (no charts, but a prior graph exists) the target is fully empty -- no
+        # Project either -- so the stale `helm://` subgraph is removed in its entirety, not left as a
+        # bare Project node.
+        tail = [project_node] if parsed_charts else []
+        return itertools.chain(build_graph(parsed_charts, proj_id), tail)
 
     stats, _r, _p = stream_apply(writer, proj_id, OWNED_LABELS, make_target)
     elapsed = time.monotonic() - started

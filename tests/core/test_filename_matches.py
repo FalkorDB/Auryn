@@ -58,12 +58,14 @@ def test_docker_detects_dockerfile_variants():
     assert not any(fnmatch.fnmatchcase("app.py", pat) for pat in MATCH_PATTERNS)
 
 
-def test_helm_anchors_on_chart_yaml():
+def test_helm_detection_is_chart_related_only():
     from auryn.ingestors.helm.plugin import FILE_GLOBS, FILE_SUFFIXES
     assert FILE_SUFFIXES == ()                 # no broad `*.yaml` -> helm isn't woken by arbitrary YAML
-    assert "Chart.yaml" in FILE_GLOBS
-    # a plain k8s manifest / compose file basename does NOT match helm's anchor
-    for name in ("deploy.yaml", "docker-compose.yml", "values.yaml"):
+    # chart manifest + its values (values is watched + keeps cleanup working after Chart.yaml is removed)
+    for name in ("Chart.yaml", "values.yaml", "values.yml"):
+        assert any(fnmatch.fnmatchcase(name, pat) for pat in FILE_GLOBS), name
+    # but NOT a plain k8s manifest / compose file / arbitrary config
+    for name in ("deploy.yaml", "docker-compose.yml", "config.yaml"):
         assert not any(fnmatch.fnmatchcase(name, pat) for pat in FILE_GLOBS), name
 
 
