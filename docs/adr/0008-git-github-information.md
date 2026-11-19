@@ -46,6 +46,19 @@ This is the spine that answers concern **(2)** and shapes the rest.
   source**: parsed by the code/deployment-tier sync, not the provenance sync. Only CI *runs* are
   provenance. (See §A.)
 
+## Automatic? No — network egress is opt-in and explicit
+
+**Auryn never auto-pulls from a (private or public) GitHub repo as a side-effect of ingesting code.**
+- The **recommended v1 (CI config + ownership rollup) makes zero network calls** — it reads only the
+  checkout's workflow YAML and local `git log`. Ingesting a private repo phones nothing.
+- The only networked axes — **C (PRs/issues/reviews) and CI *runs*** — are **opt-in and explicit**: a
+  deliberate `auryn github-sync` command / an MCP tool / a config flag the user turns on. They are
+  **never triggered by `ingest`, a commit hook, the save-watcher, or a branch switch** (the
+  separate-trigger rule above). The **first** remote pull requires an explicit opt-in that states it
+  reads via the user's `gh`/token access; a scheduled refresh is itself opt-in.
+- Private data that lands in the graph is governed by the PII / no-client-data rule below (redact/hash
+  identities; never in a shared/public/demo graph).
+
 ## (1) Connecting to the remote (for C, and CI runs)
 
 - **Identify the repo** from the checkout's `origin` remote (git_sync already carries `repo_uri`) →
@@ -128,7 +141,9 @@ B and C introduce **human identities**. The hard rule is **no client/prospect da
 So identities are **redacted/hashed by default**, real identities are **opt-in**, and **never** in a
 public/demo graph. This is the gating decision for B and C.
 
-## Recommended v1 (best value per memory, least setup)
+## Recommended v1 (best value per memory, least setup — and zero network)
+
+Both are **entirely local — no GitHub API, no egress, no token, nothing pulled from a private repo:**
 
 1. **CI config** (A) — extends ADR 0007, no auth, branch-tied, completes the build→deploy loop.
 2. **Ownership rollup** (B-lite) — props on `File`/`Function` from `git log`, bounded, redacted; big
