@@ -25,7 +25,16 @@ if TYPE_CHECKING:  # annotations only (module has `from __future__ import annota
 from redis.exceptions import RedisError, ResponseError
 
 from auryn.core.graph_model import GraphEdge, GraphNode, NodeSchema
-from auryn.core.graph_sync import EdgeKey, GraphDelta, NodeKey, edge_key, fingerprint, node_key
+from auryn.core.graph_sync import (
+    SYNC_MARKER,
+    EdgeKey,
+    GraphDelta,
+    NodeKey,
+    edge_key,
+    fingerprint,
+    node_key,
+    unstamped,
+)
 from auryn.core.instrument import phase
 
 logger = logging.getLogger(__name__)
@@ -686,9 +695,15 @@ class GraphWriter:
         }
 
     def apply_delta(self, delta: GraphDelta) -> None:
+        # The node carrying SYNC_MARKER is what the next sync short-circuits on (see
+        # graph_sync.SYNC_MARKER): its stamp is cleared before anything else is written, and the
+        # node is merged whole -- stamp included -- only once the rest of the delta is applied.
+        markers = [n for n in delta.nodes_to_upsert if SYNC_MARKER in n.properties]
         with phase("write"):
+            if markers:
+                self.merge_nodes([unstamped(n) for n in markers])
             if delta.nodes_to_upsert:
-                self.merge_nodes(delta.nodes_to_upsert)
+                self.merge_nodes([n for n in delta.nodes_to_upsert if SYNC_MARKER not in n.properties])
                 # Content-changed nodes keep their now-stale embedding through the merge (it isn't
                 # in the ingestor's property set) -- clear it so the worker re-embeds. New nodes
                 # in this set have no embedding, so clearing them is a no-op.
@@ -699,6 +714,8 @@ class GraphWriter:
                 self.delete_edges(delta.edges_to_remove)
             if delta.nodes_to_remove:
                 self.delete_nodes(delta.nodes_to_remove)
+            if markers:
+                self.merge_nodes(markers)
 
     # -- embeddings (semantic search) -------------------------------------------------------
     #

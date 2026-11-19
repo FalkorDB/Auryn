@@ -18,7 +18,9 @@ change-impact / behavioral closure) without reading whole files -- with `run_cyp
 
 from __future__ import annotations
 
+import contextlib
 import functools
+import threading
 import time
 from typing import Any
 
@@ -35,6 +37,7 @@ from auryn.core import usage
 from auryn.core.embeddings import get_embedder, hybrid_search
 from auryn.core.graph_client import GraphWriter
 from auryn.core.project import resolve_project_root
+from auryn.core.sync_lock import sync_lock
 
 INSTRUCTIONS = """\
 Curated tools over the FalkorDB **code graphs** built by the `auryn` project across every
@@ -251,7 +254,22 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         -> folder watcher, `manual` -> nothing), reported back under `resync`. So a repo an agent
         indexes stays fresh on later commits/saves exactly as one indexed from the CLI would."""
         g, gname = _write_graph(graph)
-        report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep, embed=embed)
+        # Its turn among this repo's hook / watcher syncs, which write the same project subgraph
+        # (core/sync_lock.py).
+        with contextlib.ExitStack() as turn:
+            turn.enter_context(sync_lock(resolve_project_root(path), queue_one=False))
+            others = ingest.deep_threads()  # other repos' background deep passes, still running
+            try:
+                report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep, embed=embed)
+            finally:
+                if deep == "background":
+                    # That pass still writes the subgraph after this call has answered: a thread
+                    # takes the lock over, waits for this call's pass (not the others') and only
+                    # then releases it.
+                    for thread in ingest.deep_threads():
+                        if thread not in others:
+                            turn.callback(thread.join)
+                    threading.Thread(target=turn.pop_all().close, name="unlock-after-deep", daemon=True).start()
         # Shared with the CLI (lifecycle.wire_trigger) so the MCP can't skip the registry/hook
         # setup the CLI does -- honours the install-time [resync].trigger choice.
         resync = lifecycle.wire_trigger(str(resolve_project_root(path)), gname, project_name)
