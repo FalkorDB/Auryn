@@ -21,7 +21,7 @@ def _writer(graph_name="g1", reachable=True):
 
 def test_deep_async_enqueues_to_daemon(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(deepen_daemon, "request_deepen", lambda g, ld, pn: calls.append((g, ld, pn)))
+    monkeypatch.setattr(deepen_daemon, "request_deepen", lambda g, ld, pn, emb=None: calls.append((g, ld, pn)))
     monkeypatch.setattr(deepen_daemon, "daemon_supported", lambda: True)
     src = type("S", (), {"_root": str(tmp_path)})()
 

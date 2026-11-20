@@ -245,3 +245,25 @@ def test_retry_does_not_clobber_a_newer_request(monkeypatch, tmp_path):
 
     assert req.exists() and json.loads(req.read_text())["project_name"] == "B"  # B preserved
     assert not req.with_suffix(".inflight").exists()                            # stale A dropped
+
+
+def test_request_deepen_carries_embed_mode(tmp_path):
+    daemon.request_deepen("g-e", str(tmp_path), "proj", embed="off")
+    files = list(deepen_requests_dir().glob("*.json"))
+    assert json.loads(files[0].read_text())["embed"] == "off"
+
+
+def test_process_request_replays_with_the_carried_embed_mode(monkeypatch, tmp_path):
+    # The replay must make the SAME embed decision the producer did (here: off), not force its own.
+    seen = {}
+
+    def _fake_ingest(writer, path, *, project_name=None, deep="inline", embed=None, **kw):
+        seen["embed"] = embed
+        return _Report(languages=[_Lang("inline")])
+
+    monkeypatch.setattr(ingest_mod, "ingest_directory", _fake_ingest)
+    deepen_requests_dir().mkdir(parents=True, exist_ok=True)
+    req = daemon._request_path("g-emb", "proj")
+    req.write_text(json.dumps({"graph": "g-emb", "local_dir": str(tmp_path), "project_name": "proj", "embed": "off"}))
+    daemon._process_request(req, client=_FakeClient(), attempts={})
+    assert seen["embed"] == "off"

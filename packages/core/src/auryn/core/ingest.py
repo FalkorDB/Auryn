@@ -463,7 +463,7 @@ def _ingest_from_source(
     # PHASE 2 (deep): upgrade two-phase languages whose fast pass succeeded, per `deep`.
     to_deepen = [lang for lang, _ in present if lang.is_two_phase() and fast[lang.language][1] is None]
     deep_results, deep_status = _run_deep_phase(writer, source, target_sha, to_deepen, deep, *ctx,
-                                                async_eligible=async_eligible)
+                                                async_eligible=async_eligible, embed=embed)
 
     # A C/C++ cleanup sync (above) deletes a now-fileless language's symbols but leaves its Project node,
     # which a full recompute of the same state never creates. Sweep a c:// / cpp:// Project that has NO
@@ -688,6 +688,7 @@ def _run_deep_phase(
     ref: str | None,
     cache_root: Path | None,
     async_eligible: bool = True,
+    embed: str | None = None,
 ) -> tuple[dict[str, LanguageIngestResult], dict[str, str]]:
     """Second, deeper pass over the two-phase languages whose fast pass succeeded. Returns
     (deep_results, deep_status) keyed by language. See DEEP_MODES for the `deep` values.
@@ -728,7 +729,7 @@ def _run_deep_phase(
         local_dir = _source_local_dir(source, source_uri)
         graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
         if async_eligible and local_dir and graph_name and daemon_supported() and _daemon_can_reach(writer):
-            request_deepen(graph_name, local_dir, project_name)
+            request_deepen(graph_name, local_dir, project_name, embed)
             logger.info("Deep phase queued to the background deepen daemon for: %s", names)
             return deep_results, {lang.language: "async" for lang in to_deepen}
         logger.info("Deep async unavailable (ref-pinned/filtered/solution source, no local dir / graph / "

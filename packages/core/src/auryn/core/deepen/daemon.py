@@ -111,11 +111,14 @@ def daemon_supported() -> bool:
     return fcntl is not None
 
 
-def request_deepen(graph_name: str, local_dir: str, project_name: str | None = None) -> None:
+def request_deepen(graph_name: str, local_dir: str, project_name: str | None = None,
+                   embed: str | None = None) -> None:
     """Enqueue a background deep pass for `graph_name` and make sure a daemon is running to drain it.
     Returns immediately -- the deep pass happens in the daemon, which re-runs the ingest of `local_dir`
-    with deep="inline" (the fast phase short-circuits). Coalescing: a second request for the same graph
-    overwrites the first, so a burst of resyncs doesn't pile up queue entries."""
+    with deep="inline" (the fast phase short-circuits). `embed` carries the producer's embedding mode so
+    the replay makes the SAME embed decision -- honoring an original `embed="off"` yet still refreshing
+    vectors if the working tree changed before the daemon ran. Coalescing: a second request for the same
+    (graph, project) overwrites the first, so a burst of resyncs doesn't pile up queue entries."""
     requests = deepen_requests_dir()
     requests.mkdir(parents=True, exist_ok=True)
     target = _request_path(graph_name, project_name)
@@ -125,6 +128,8 @@ def request_deepen(graph_name: str, local_dir: str, project_name: str | None = N
     payload: dict[str, str] = {"graph": graph_name, "local_dir": local_dir}
     if project_name:
         payload["project_name"] = project_name
+    if embed:
+        payload["embed"] = embed
     tmp.write_text(json.dumps(payload))
     os.replace(tmp, target)  # atomic publish: the daemon never reads a half-written request
     ensure_deepen_daemon()
@@ -265,6 +270,7 @@ def _process_request(req: Path, client, attempts: dict[str, int]):
         graph_name = data["graph"]
         local_dir = data["local_dir"]
         project_name = data.get("project_name")
+        embed = data.get("embed")  # the producer's embed mode (None -> the ingest's default)
         if not isinstance(graph_name, str) or not graph_name or not isinstance(local_dir, str) or not local_dir:
             raise ValueError("request missing graph or local_dir")
     except (OSError, ValueError, KeyError, TypeError):
@@ -277,7 +283,7 @@ def _process_request(req: Path, client, attempts: dict[str, int]):
     key = req.name  # retry accounting per (graph, project) request, not per graph (repos share graphs)
     try:
         client = client or _connect()
-        _deepen(client, graph_name, local_dir, project_name)
+        _deepen(client, graph_name, local_dir, project_name, embed)
         inflight.unlink(missing_ok=True)
         attempts.pop(key, None)
     except Exception:
@@ -301,7 +307,7 @@ def _process_request(req: Path, client, attempts: dict[str, int]):
     return client
 
 
-def _deepen(client, graph_name: str, local_dir: str, project_name: str | None) -> None:
+def _deepen(client, graph_name: str, local_dir: str, project_name: str | None, embed: str | None = None) -> None:
     """Run the deep pass for one repo by re-running its ingest with deep="inline" against the already
     fast-built graph -- the fast phase short-circuits (same sha + depth=fast), so only the deep upgrade
     does work. Held under the per-repo `sync_lock` (as the CLI/MCP/hook syncs are), so a concurrent
@@ -328,10 +334,11 @@ def _deepen(client, graph_name: str, local_dir: str, project_name: str | None) -
                        "(stale request, deleted graph, or a non-configured backend)", graph_name, project_name)
         return
     with sync_lock(resolve_project_root(local_dir), queue_one=False):
-        # embed="off": the PRODUCER's ingest already made the embedding decision (and deep doesn't change
-        # embeddable node content -- name/doc/source -- only CALLS edges + unresolved_calls), so the
-        # daemon must not re-embed, which also honors an original embed="off".
-        report = ingest_directory(writer, local_dir, project_name=project_name, deep="inline", embed="off")
+        # Replay with the PRODUCER's embed mode (carried in the request): honors an original embed="off",
+        # yet still refreshes vectors if the working tree changed between the producer's embed and now
+        # (the replay's incremental resync picks up the delta, and its embed tail embeds the new nodes).
+        # Embedding is idempotent, so when nothing changed this is a cheap scan that embeds nothing.
+        report = ingest_directory(writer, local_dir, project_name=project_name, deep="inline", embed=embed)
     errored = [r.language for r in report.languages if r.deep_status == "error"]
     if errored:  # surface as a failure so _process_request's bounded retry kicks in
         raise RuntimeError(f"deep pass errored for {graph_name!r}: {', '.join(errored)}")
