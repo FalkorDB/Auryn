@@ -81,3 +81,13 @@ def test_dash_t_in_another_command_is_not_a_build_tag():
     # a `-t` from a non-build command in the same run block must not be captured as a build tag
     p = _p("  b:\n    steps:\n      - run: |\n          docker build -t shop/api:1.0 .\n          tar -t archive.tar\n")
     assert p.built_images == ("shop/api:1.0",)
+
+
+def test_shell_line_continuation_is_joined():
+    p = _p("  b:\n    steps:\n      - run: |\n          docker build \\\n            -t shop/api:1.0 \\\n            .\n")
+    assert p.built_images == ("shop/api:1.0",)
+
+
+def test_shell_comment_is_not_parsed():
+    p = _p("  b:\n    steps:\n      - run: |\n          # docker push evil/x:1\n          docker push shop/api:1.0\n")
+    assert p.built_images == ("shop/api:1.0",)

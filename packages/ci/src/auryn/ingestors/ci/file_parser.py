@@ -77,6 +77,8 @@ def _images_from_step(step: dict) -> list[str]:
             out += _split_tags(with_.get("tags"))
     run = _scalar(step.get("run"))
     if run:
+        run = run.replace("\\\n", " ")          # join shell line continuations before splitting
+        run = re.sub(r"(?m)(^|\s)#.*$", r"\1", run)  # drop shell comments (a commented-out docker cmd isn't real)
         # per COMMAND (split on shell separators), so a `-t` or `push` only counts inside its own
         # `docker build`/`docker push` -- not a `-t` from an unrelated command in the same block.
         for cmd in re.split(r"&&|\|\||;|\n", run):
