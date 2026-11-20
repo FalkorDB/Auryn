@@ -909,14 +909,21 @@ def _validate_hook_names(names) -> None:
 
 
 _DEEP_OPTION = click.option(
-    "--deep", type=click.Choice(["inline", "background", "async", "off"]), default="inline",
+    "--deep", type=click.Choice(["inline", "background", "async", "off"]), default="async",
     help="Deep semantic pass for two-phase languages (Python via Jedi, C# via Roslyn, Rust via "
-         "rust-analyzer): inline=fast then deep, synchronous (default); async=return on the fast "
-         "graph, deepen in a detached daemon that survives this process exiting (recommended for a "
-         "slow deep engine); off=fast structural only (much quicker on large repos); "
-         "background=deepen in an in-process thread (long-lived processes only -- a one-shot CLI "
-         "would kill it; use async instead).",
+         "rust-analyzer): async=return on the fast graph, deepen in a detached daemon that survives "
+         "this process exiting (default -- the graph is queryable immediately; an explicit --host "
+         "connection the daemon can't reach falls back to inline); inline=fast then deep, synchronous; "
+         "off=fast structural only (much quicker on large repos); background=deepen in an in-process "
+         "thread (long-lived processes only -- a one-shot CLI would kill it; prefer async).",
 )
+
+
+def _effective_deep(deep: str, host: str | None) -> str:
+    """`deep="async"` hands the pass to a detached daemon that reconnects to the CONFIGURED backend;
+    an explicit `--host` is an ad-hoc connection the daemon may not match, so deepen inline instead
+    (mirrors the embed-mode fallback). Any other mode passes through unchanged."""
+    return "inline" if deep == "async" and host else deep
 
 
 @ingest_group.command("dir")
@@ -948,7 +955,8 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
         with sync_lock(resolve_project_root(path), queue_one=False):
             try:
                 report = ingest.ingest_directory(
-                    writer, path, project_name=project_name, solution_name=solution_name, deep=deep,
+                    writer, path, project_name=project_name, solution_name=solution_name,
+                    deep=_effective_deep(deep, ctx.obj.get("host")),
                     # Explicit --host is an ad-hoc connection the background daemon may not match -> inline.
                     embed=("inline" if ctx.obj.get("host") else None),
                     include_dirs=include_dirs, exclude_dirs=exclude_dirs,
@@ -1012,7 +1020,8 @@ def ingest_repo(
         graph = ctx.obj["graph_name"] or default_graph_name(dest)
         writer = _ingest_writer(ctx, graph)
         report = ingest.ingest_directory(writer, str(dest), project_name=project_name,
-                                         solution_name=solution_name, deep=deep,
+                                         solution_name=solution_name,
+                                         deep=_effective_deep(deep, ctx.obj.get("host")),
                                          embed=("inline" if ctx.obj.get("host") else None), **_filters)
         _echo_ingest_report(report)
         _wire_trigger(str(dest.resolve()), graph, project_name, trigger or load_config().resync_trigger)
@@ -1023,7 +1032,8 @@ def ingest_repo(
     writer = _ingest_writer(ctx, graph)
     try:
         report = ingest.ingest_repository(
-            writer, repo_uri, ref=ref, project_name=project_name, solution_name=solution_name, deep=deep,
+            writer, repo_uri, ref=ref, project_name=project_name, solution_name=solution_name,
+            deep=_effective_deep(deep, ctx.obj.get("host")),
             embed=("inline" if ctx.obj.get("host") else None), **_filters
         )
     except (ValueError, git.GitCommandError) as e:  # bad ref / unreachable repo -> clean CLI error
@@ -1103,9 +1113,11 @@ def quickstart(path: str | None, db_path: str | None, graph_name: str, project_n
     writer = GraphWriter(client.select_graph(graph_name))
     try:
         report = ingest.ingest_directory(
-            writer, str(root), project_name=project_name, deep=deep,
-            # Serverless/embedded DB lives in THIS process -- a detached daemon couldn't reach it,
-            # so embed inline here rather than enqueuing a background job that would find nothing.
+            writer, str(root), project_name=project_name,
+            # Serverless/embedded DB lives in THIS process -- a detached daemon (deep=async / background
+            # embed) couldn't reach it, so deepen AND embed inline here rather than enqueuing a job that
+            # would find nothing.
+            deep=("inline" if deep == "async" else deep),
             embed="inline",
             include_dirs=include_dirs, exclude_dirs=exclude_dirs,
             include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,

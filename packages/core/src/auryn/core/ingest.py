@@ -54,15 +54,18 @@ logger = logging.getLogger("auryn.ingest")
 # consumes, so the shared core below is duck-typed over the two.
 Source = GitRepoCache | LocalDirectorySource
 
-# How the *deep* phase of a two-phase (dynamic) language runs, once the fast phase has made
-# the graph queryable. A language declares it's two-phase by registering a GitLanguage with a
-# `deep_sync` (see core/registry.py); today only Python does (fast=stdlib-ast, deep=Jedi).
-#   "inline"     -- run the deep upgrade synchronously before returning (default: the graph
-#                   is fully deep when the call completes; preserves pre-two-phase behavior).
-#   "background" -- return as soon as the fast graph is written and upgrade it in a daemon
-#                   thread on a sibling writer. For a long-lived process (the MCP server) an
-#                   agent can start querying the shallow graph immediately. A one-shot CLI
-#                   would exit before it finishes, so CLI stays on "inline".
+# How the *deep* phase of a two-phase (dynamic) language runs, once the fast phase has made the
+# graph queryable. A language declares it's two-phase by registering a GitLanguage with a `deep_sync`
+# (see core/registry.py): Python (ast->Jedi), C# (tree-sitter->Roslyn), Rust (tree-sitter->SCIP).
+#   "async"      -- DEFAULT. Return as soon as the fast graph is written and deepen it in a DETACHED
+#                   daemon (core/deepen) that survives this process exiting -- so the graph is
+#                   queryable at fast-pass speed and deepens in the background even from a one-shot
+#                   CLI. Falls back to "inline" when there's no re-ingestable local dir (remote-URI
+#                   ingest) or the backend is an in-process embedded DB a daemon can't reach.
+#   "inline"     -- run the deep upgrade synchronously before returning (the graph is fully deep when
+#                   the call completes; for CI/batch that must not query until resolution is done).
+#   "background" -- deepen in a daemon THREAD on a sibling writer -- long-lived processes only (a
+#                   one-shot CLI would kill the thread; prefer "async").
 #   "off"        -- fast phase only; leave the graph shallow.
 DEEP_MODES = ("inline", "background", "async", "off")
 
@@ -209,7 +212,7 @@ def ingest_repository(
     solution_name: str | None = None,
     cache_root: Path | None = None,
     auto_install: bool | None = None,
-    deep: str = "inline",
+    deep: str = "async",
     embed: str | None = None,
     include_dirs: tuple[str, ...] = (),
     exclude_dirs: tuple[str, ...] = (),
@@ -264,7 +267,7 @@ def ingest_directory(
     solution_name: str | None = None,
     cache_root: Path | None = None,
     auto_install: bool | None = None,
-    deep: str = "inline",
+    deep: str = "async",
     embed: str | None = None,
     include_dirs: tuple[str, ...] = (),
     exclude_dirs: tuple[str, ...] = (),
@@ -375,7 +378,7 @@ def _ingest_from_source(
     cache_root: Path | None,
     started: float,
     auto_install: bool | None = None,
-    deep: str = "inline",
+    deep: str = "async",
     embed: str | None = None,
     enrichment_only: tuple[str, ...] = (),
     enrichment_skip: tuple[str, ...] = (),
@@ -655,6 +658,16 @@ def _run_phase(
     return result, None
 
 
+def _daemon_can_reach(writer: GraphWriter) -> bool:
+    """Whether a detached deepen daemon could reach this writer's graph. The daemon reconnects to the
+    CONFIGURED backend, so it can only reach a graph on a real server -- never an in-process embedded
+    (falkordblite) DB (serverless quickstart, tests). The embedded client's `g.client` is raw Redis
+    with no `select_graph`, while a server client's has it (see GraphWriter.sibling) -- that tells them
+    apart without threading a config flag down. So an embedded ingest deepens inline instead."""
+    client = getattr(getattr(writer, "_graph", None), "client", None)
+    return client is not None and hasattr(client, "select_graph")
+
+
 def _run_deep_phase(
     writer: GraphWriter,
     source: Source,
@@ -700,11 +713,12 @@ def _run_deep_phase(
 
         local_dir = _source_local_dir(source, source_uri)
         graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
-        if local_dir and graph_name and daemon_supported():
+        if local_dir and graph_name and daemon_supported() and _daemon_can_reach(writer):
             request_deepen(graph_name, local_dir, project_name)
             logger.info("Deep phase queued to the background deepen daemon for: %s", names)
             return deep_results, {lang.language: "async" for lang in to_deepen}
-        logger.info("Deep async unavailable (no local dir / graph / daemon); running inline for: %s", names)
+        logger.info("Deep async unavailable (no local dir / graph / daemon / embedded backend); "
+                    "running inline for: %s", names)
         # fall through to the inline path below
 
     # "inline" (default): run each deep upgrade now, synchronously.

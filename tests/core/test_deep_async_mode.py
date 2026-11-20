@@ -12,8 +12,11 @@ def _lang(name="python"):
     return type("L", (), {"language": name, "deep_sync": object(), "is_two_phase": lambda self: True})()
 
 
-def _writer(graph_name="g1"):
-    return type("W", (), {"_graph": type("G", (), {"_name": graph_name})()})()
+def _writer(graph_name="g1", reachable=True):
+    # a "server" graph's client has select_graph (daemon-reachable); an embedded one wouldn't.
+    client = type("C", (), {"select_graph": lambda self, n: None})() if reachable else object()
+    g = type("G", (), {"_name": graph_name, "client": client})()
+    return type("W", (), {"_graph": g})()
 
 
 def test_deep_async_enqueues_to_daemon(monkeypatch, tmp_path):
@@ -48,6 +51,22 @@ def test_deep_async_falls_back_to_inline_without_local_dir(monkeypatch):
     results, status = ingest_mod._run_deep_phase(
         _writer("g1"), src, "sha", [_lang("python")], "async",
         "https://example.com/remote.git", "proj", None, None, None,  # source_uri is not a local dir
+    )
+    assert ran == ["python"] and status == {"python": "inline"}
+
+
+def test_deep_async_falls_back_to_inline_on_embedded_backend(monkeypatch, tmp_path):
+    # An in-process embedded DB (quickstart/tests) can't be reached by a detached daemon -> inline.
+    monkeypatch.setattr(deepen_daemon, "daemon_supported", lambda: True)
+    monkeypatch.setattr(deepen_daemon, "request_deepen",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not enqueue on embedded")))
+    ran = []
+    monkeypatch.setattr(ingest_mod, "_run_phase",
+                        lambda w, s, t, lang, fn, ph, *c: (ran.append(lang.language), (object(), None))[1])
+    src = type("S", (), {"_root": str(tmp_path)})()
+    results, status = ingest_mod._run_deep_phase(
+        _writer("g1", reachable=False), src, "sha", [_lang("python")], "async",
+        str(tmp_path), "proj", None, None, None,
     )
     assert ran == ["python"] and status == {"python": "inline"}
 
