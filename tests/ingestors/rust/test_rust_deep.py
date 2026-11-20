@@ -102,15 +102,20 @@ def test_resolve_calls_tracks_coverage_and_what_scip_resolved():
     assert unresolved == 0
 
 
-def test_fn_pointer_call_stays_unresolved_after_deep():
-    # `calls_param(f: fn()) { f() }` -- SCIP ties f() to the parameter, not a callable, so deep can't
-    # resolve it; the recomputed unresolved_calls must stay >= 1 (not blindly zeroed).
+def test_fn_pointer_calls_stay_unresolved_after_deep():
+    # Neither a plain fn-pointer call `f()` nor one inside a macro `assert!(g())` can be tied to a
+    # concrete callee -- the recomputed unresolved_calls must stay >= 1 for both (not blindly zeroed),
+    # while a fully-resolved caller goes to 0.
+    from auryn.ingestors.rust.git_sync import _recompute_unresolved
+
     locs = _fixture_locations()
     deep = rust_analyzer.resolve_calls(_SCIP.read_bytes(), locs)
-    cp = next(loc for loc in locs if loc.name == "calls_param")
-    assert cp.id in deep.covered_ids
-    assert "f" not in deep.seen_by_caller.get(cp.id, set())
-    assert len(cp.called_names - deep.seen_by_caller.get(cp.id, set())) >= 1
+    by_name = {loc.name: loc for loc in locs}
+    for name in ("calls_param", "macro_fnptr"):
+        loc = by_name[name]
+        assert loc.id in deep.covered_ids
+        assert _recompute_unresolved(loc, deep.seen_by_caller.get(loc.id, set())) >= 1
+    assert _recompute_unresolved(by_name["caller"], deep.seen_by_caller.get(by_name["caller"].id, set())) == 0
 
 
 def test_resolve_calls_is_empty_without_matching_locations():
@@ -183,9 +188,10 @@ def test_deep_inline_resolves_calls_end_to_end(graph, tmp_path):
         "WHERE m.id CONTAINS '.struct.fast.method.run' RETURN 1"
     ).result_set
     assert hit == [[1]]
-    # a fn-pointer parameter call deep CANNOT resolve stays counted (not blindly zeroed)
-    rp = graph.ro_query("MATCH (f:Function {name:'calls_param'}) RETURN f.unresolved_calls").result_set
-    assert rp and rp[0][0] >= 1
+    # fn-pointer calls deep CANNOT resolve stay counted (not blindly zeroed) -- plain and macro-internal
+    for name in ("calls_param", "macro_fnptr"):
+        rp = graph.ro_query(f"MATCH (f:Function {{name:'{name}'}}) RETURN f.unresolved_calls").result_set
+        assert rp and rp[0][0] >= 1
     # deep resolution zeroes the fast pass's incompleteness count
     r = graph.ro_query("MATCH (f:Function {name:'via_generic'}) RETURN f.unresolved_calls").result_set
     assert r and r[0][0] == 0

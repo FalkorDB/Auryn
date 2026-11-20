@@ -117,6 +117,10 @@ def _norm_path(path: str) -> str:
     return path.replace("\\", "/").lstrip("./")
 
 
+def _span(loc: CallableLocation) -> int:
+    return loc.line_end - loc.line_start
+
+
 @dataclass
 class DeepCalls:
     """The result of resolving CALLS from a SCIP index against the fast pass's callables."""
@@ -145,8 +149,14 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepC
         by_path[_norm_path(loc.rel_path)].append(loc)
 
     def define_match(locs, line_1based, name):  # a definition joins to the same-named callable it sits in
-        hits = [loc for loc in locs if loc.line_start <= line_1based <= loc.line_end and loc.name == name]
-        return min(hits, key=lambda loc: loc.line_end - loc.line_start) if hits else None
+        hits = sorted((loc for loc in locs if loc.line_start <= line_1based <= loc.line_end and loc.name == name),
+                      key=lambda loc: loc.line_end - loc.line_start)
+        if not hits:
+            return None
+        if len(hits) >= 2 and _span(hits[0]) == _span(hits[1]):
+            return None  # ambiguous: 2+ same-named callables on one line (line-only join can't tell them
+            # apart) -> resolve neither, rather than risk a WRONG edge (e.g. B::run stamped as A::run)
+        return hits[0]
 
     def attribute(locs, line_1based, callee_name):  # a reference -> its enclosing CALLER
         hits = [loc for loc in locs if loc.line_start <= line_1based <= loc.line_end]

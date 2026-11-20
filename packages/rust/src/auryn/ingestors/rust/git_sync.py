@@ -140,14 +140,9 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
 
     locations = resolution.callable_locations(files, proj_id)
     deep = rust_analyzer.resolve_calls(scip_bytes, locations)
-    called_by_id = {loc.id: loc.called_names for loc in locations}
-    # unresolved_calls after deep (covered callables only): the fast parse's call names that SCIP did NOT
-    # tie to a concrete callable -- fn-pointer/param calls and the like. Macro-internal calls aren't in
-    # called_names (the parser counts them separately), so they don't inflate this.
-    unresolved_by_id = {
-        cid: len(called_by_id.get(cid, frozenset()) - deep.seen_by_caller.get(cid, set()))
-        for cid in deep.covered_ids
-    }
+    loc_by_id = {loc.id: loc for loc in locations}
+    unresolved_by_id = {cid: _recompute_unresolved(loc_by_id[cid], deep.seen_by_caller.get(cid, set()))
+                        for cid in deep.covered_ids}
     project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "deep")
 
     def make_target():
@@ -165,12 +160,15 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
         return iter(items)
 
     # Background-race guard (deep="background" runs on a sibling writer): if another ingest advanced the
-    # graph to a different commit while rust-analyzer ran, don't stamp this now-stale revision over it.
+    # graph to a different commit while rust-analyzer ran, discard this now-stale revision. Return a
+    # NO-OP SyncStats (not None): None would make sync_at fall back to the fast pass and apply this stale
+    # revision's graph over the newer one. (Narrows but doesn't fully close the write-time TOCTOU -- a
+    # transactional conditional write is a shared two-phase concern for a follow-up.)
     live_sha = writer.get_property("Project", {"id": proj_id}, "commit_sha")
     if live_sha is not None and live_sha != target_sha:
         logger.warning("rust deep pass: graph moved to %s while analyzing %s; discarding stale result",
                        live_sha, target_sha)
-        return None
+        return SyncStats(commit_sha=str(live_sha), elapsed_seconds=time.monotonic() - started)
 
     result = _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(files),
                     diff_extern_edges=not is_upgrade)
@@ -178,6 +176,20 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
                 deep.metrics["resolved"], deep.metrics["external"], len(deep.covered_ids), len(locations))
     _reconcile_cargo(writer, proj_id, source, target_sha)
     return _finish(writer, proj_id, source, result)
+
+
+def _recompute_unresolved(loc, seen: set) -> int:
+    """`unresolved_calls` for a deep-covered callable: call sites with no identifiable concrete callee.
+      * non-macro: fast-parse call names SCIP did NOT tie to a callable (a fn-pointer/param call `f()`);
+      * macro: the callable's macro-internal call count minus the macro-expanded calls SCIP resolved
+        (a name SCIP attributed that the fast parse didn't record is a resolved macro call).
+    An external callee (stdlib / other-crate) counts as identified -- consistent with the fast pass not
+    counting concrete externals (#794). Name-based, so it can be off under same-name call collisions or
+    import aliases; position-precise per-call-site reconciliation is a follow-up (needs SCIP/tree-sitter
+    occurrence columns)."""
+    non_macro = len(loc.called_names - seen)
+    macro_resolved = len(seen - loc.called_names)  # names SCIP saw but the fast parse didn't = macro-expanded
+    return non_macro + max(0, loc.macro_calls - macro_resolved)
 
 
 def _is_name_calls_edge(item) -> bool:

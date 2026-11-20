@@ -161,6 +161,8 @@ class CallableLocation:
     called_names: frozenset[str]  # callee simple names the fast parse saw as CALLS in this body --
     # lets the deep pass disambiguate same-line callers and recompute unresolved_calls from what SCIP
     # actually resolved (macro-internal calls aren't here; they're counted, not parsed as RawCalls)
+    macro_calls: int = 0  # call-like sites inside macro invocations (fast parse can't name them) -- the
+    # deep pass reconciles these against SCIP's macro-expanded refs when recomputing unresolved_calls
 
 
 def callable_locations(raw_files, project_id: str) -> list[CallableLocation]:
@@ -187,7 +189,7 @@ def callable_locations(raw_files, project_id: str) -> list[CallableLocation]:
     def add(node_id: str, label: str, file_id: str, raw) -> None:
         out.append(CallableLocation(node_id, label, fid_to_path.get(file_id, ""),
                                     raw.line_start, raw.line_end, raw.name,
-                                    frozenset(c.name for c in raw.calls)))
+                                    frozenset(c.name for c in raw.calls), raw.unresolved_macro_calls))
 
     for e in c.types:  # trait-declared methods bind to the Trait itself (mirror of _resolve)
         if e.kind != "Trait":

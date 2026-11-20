@@ -23,3 +23,6 @@ pub fn caller() -> u32 {
 
 // a fn-pointer parameter call: even deep analysis can't name the runtime target
 pub fn calls_param(f: fn() -> u32) -> u32 { f() }
+
+// a fn-pointer call INSIDE a macro: tree-sitter counts it as a macro call; SCIP ties it to the param
+pub fn macro_fnptr(g: fn() -> bool) -> bool { assert!(g()); true }
