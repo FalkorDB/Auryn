@@ -101,7 +101,13 @@ def run_watcher(stop_event: threading.Event | None = None,
 
     def note_change(path: str) -> None:
         p = Path(path)
-        if excluded & set(p.parts) or not any(fnmatch.fnmatchcase(p.name, pat) for pat in patterns):
+        abspath = str(p).replace(os.sep, "/")
+        # a path-glob (`.github/workflows/*.yml`) matches a suffix of the path; a bare glob the basename
+        matched = any(
+            fnmatch.fnmatchcase(abspath, "*/" + pat) if "/" in pat else fnmatch.fnmatchcase(p.name, pat)
+            for pat in patterns
+        )
+        if excluded & set(p.parts) or not matched:
             return
         repo = _owning_repo(path, observers.keys())
         if repo is not None:

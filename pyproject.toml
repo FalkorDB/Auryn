@@ -82,6 +82,7 @@ dependencies = [
     "auryn-terraform==0.1.0",
     "auryn-helm==0.1.0",
     "auryn-kustomize==0.1.0",
+    "auryn-ci==0.1.0",
 ]
 
 [project.urls]
@@ -137,6 +138,7 @@ auryn-k8s = { workspace = true }
 auryn-terraform = { workspace = true }
 auryn-helm = { workspace = true }
 auryn-kustomize = { workspace = true }
+auryn-ci = { workspace = true }
 auryn-c = { workspace = true }
 auryn-cpp = { workspace = true }
 auryn-cuda = { workspace = true }
@@ -169,6 +171,7 @@ dev = [
     "auryn-terraform",
     "auryn-helm",
     "auryn-kustomize",
+    "auryn-ci",
     "auryn-c",
     "auryn-cpp",
     "auryn-cuda",
@@ -225,6 +228,7 @@ source = [
     "packages/terraform/src/auryn",
     "packages/helm/src/auryn",
     "packages/kustomize/src/auryn",
+    "packages/ci/src/auryn",
     "packages/c/src/auryn",
     "packages/cpp/src/auryn",
     "packages/cuda/src/auryn",
