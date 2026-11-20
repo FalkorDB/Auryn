@@ -276,3 +276,14 @@ def test_macro_string_literal_parens_are_not_counted():
     # a `(` inside a macro's format/string literal is not a call -- it must not inflate the count
     rf = _parse('fn f() { println!("example: helper()"); }')
     assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 0
+
+
+def test_macro_raw_string_does_not_hide_following_call():
+    # a raw string `r#"..."#` may contain a bare `"`; it must not swallow a real call after it
+    rf = _parse('fn f() { format!(r#"a" {} {}"#, helper(), other()); }')
+    assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 2  # helper() + other()
+
+
+def test_macro_raw_string_with_embedded_quote_counts_zero_when_callfree():
+    rf = _parse('fn f() { println!(r#"value "{}" done"#); }')
+    assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 0

@@ -44,9 +44,20 @@ from auryn.core.docstrings import clean_comment
 # by `(`. The macro name `name!(` carries a `!` and so never matches (it isn't a call).
 _MACRO_CALL_RE = re.compile(r"[A-Za-z_]\w*(?:::<[^<>()]*>)?\s*\(")
 # String/char literals and comments inside a macro's token tree -- blanked before counting call-like
-# sites, so a `(` inside a format string (`println!("helper()")`) isn't mistaken for a call. A char
-# literal needs a closing `'`, so a lifetime (`'a`, no close) is left intact.
-_MACRO_NOISE_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])\'|//[^\n]*|/\*.*?\*/', re.S)
+# sites, so a `(` inside a format string (`println!("helper()")`) isn't mistaken for a call, while real
+# calls AFTER a literal stay visible. Order matters: a raw/byte-raw string (`r"..."`, `r#"..."#`,
+# `br##"..."##`) is matched FIRST with hash-balanced delimiters (its body may contain bare `"`), so it
+# isn't mis-terminated by a normal-string match. The raw `r`/`br` must start a token (`(?<!\w)`), so the
+# `r` in `for"x"` isn't mistaken for a raw string. A char literal needs a closing `'`, so a lifetime
+# (`'a`, no close) is left intact.
+_MACRO_NOISE_RE = re.compile(
+    r'(?<!\w)b?r(#*)"(?:(?!"\1).)*"\1'   # raw / byte-raw string with matching # delimiters
+    r'|b?"(?:\\.|[^"\\])*"'              # normal / byte string (with escapes)
+    r"|'(?:\\.|[^'\\])'"                 # char literal (a lifetime `'a` has no closing ' -> not matched)
+    r'|//[^\n]*'                         # line comment
+    r'|/\*.*?\*/',                       # block comment
+    re.S,
+)
 from auryn.ingestors.rust.grammar import new_parser
 from auryn.ingestors.rust.raw_model import (
     RawCall,
