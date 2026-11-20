@@ -125,12 +125,12 @@ def _span(loc: CallableLocation) -> int:
 class DeepCalls:
     """The result of resolving CALLS from a SCIP index against the fast pass's callables."""
 
-    edges: list[GraphEdge]                      # resolved intra-project CALLS (resolution="resolved")
-    seen_by_caller: dict[str, set[str]]         # caller id -> callee names SCIP IDENTIFIED (in-source or
-    # external) -- for recomputing unresolved_calls (an ambiguous unresolvable def is NOT counted here)
-    resolved_names_by_caller: dict[str, set[str]]  # caller id -> callee names deep resolved to an IN-SOURCE
-    # edge -- the fast name-CALLS the overlay may safely drop (deep authored a replacement)
-    covered_ids: set[str]                       # callable ids SCIP defined (analyzed) -- the overlay scope
+    edges: list[GraphEdge]               # resolved intra-project CALLS (resolution="resolved")
+    seen_by_caller: dict[str, set[str]]  # caller id -> callee names SCIP IDENTIFIED (resolved in-source OR
+    # external). Drives unresolved_calls AND tells the overlay which fast name-CALLS to drop: an identified
+    # call is either replaced by a deep edge (in-source) or was a wrong local guess for an external callee
+    # (drop it) -- while a NON-identified call (ambiguous same-line def / fn-pointer) keeps its fast edge.
+    covered_ids: set[str]                # callable ids SCIP defined (analyzed) -- the overlay scope
     metrics: dict
 
 
@@ -177,7 +177,6 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepC
 
     edges: dict[tuple[str, str], GraphEdge] = {}
     seen_by_caller: dict[str, set[str]] = defaultdict(set)
-    resolved_names_by_caller: dict[str, set[str]] = defaultdict(set)
     metrics = {"resolved": 0, "external": 0, "ambiguous": 0, "unattributed": 0}
     for doc in documents:
         locs = by_path.get(_norm_path(doc.relative_path), [])
@@ -200,7 +199,6 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepC
             seen_by_caller[caller.id].add(callee_name)  # SCIP tied a concrete in-source callable to this call
             if target.id == caller.id:
                 continue  # self-reference / recursion (the fast pass skips self-CALLS too)
-            resolved_names_by_caller[caller.id].add(callee_name)  # deep authored a replacement edge
             key = (caller.id, target.id)
             if key not in edges:
                 edges[key] = GraphEdge(
@@ -208,5 +206,4 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepC
                     {"resolution": "resolved"},
                 )
                 metrics["resolved"] += 1
-    return DeepCalls(list(edges.values()), dict(seen_by_caller), dict(resolved_names_by_caller),
-                     covered_ids, metrics)
+    return DeepCalls(list(edges.values()), dict(seen_by_caller), covered_ids, metrics)

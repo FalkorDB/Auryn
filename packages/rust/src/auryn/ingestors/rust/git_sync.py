@@ -139,7 +139,11 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
         return str(live) if live is not None and live != entry_sha else None
 
     try:
-        with source.working_tree(target_sha) as workdir:  # on-disk cargo checkout rust-analyzer needs
+        # on-disk cargo checkout rust-analyzer needs. A git source yields an immutable checkout at
+        # target_sha; a LOCAL directory yields the live tree, so (as with the fast parse, which also reads
+        # the live tree) an edit landing between the parse and this SCIP read can skew the join -- worst
+        # case a few calls fall back to fast. A content snapshot would close that live-dir window (v2).
+        with source.working_tree(target_sha) as workdir:
             scip_bytes = rust_analyzer.run_scip(str(workdir))
     except rust_analyzer.RustAnalyzerUnavailable as exc:
         # Don't roll a newer concurrent revision back to this one via the fast fallback: no-op if moved.
@@ -162,10 +166,12 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
             if _is_name_calls_edge(item):
                 frm = item.from_key["id"]
                 callee = loc_by_id.get(item.to_key["id"])
-                # drop a fast name-edge ONLY where deep authored a replacement for that call -- so an
-                # edge to an unresolved/ambiguous target (deep couldn't resolve it) is preserved.
+                # drop a fast name-edge where deep IDENTIFIED that call: either deep resolved it in-source
+                # (a resolved edge replaces it) or identified it as external (the fast local guess was
+                # wrong -- e.g. `std::mem::drop` guessed as a local `drop` -- so retire it). A call deep
+                # could NOT identify (ambiguous same-line def / fn-pointer) keeps its fast edge.
                 if (frm in deep.covered_ids and callee is not None
-                        and callee.name in deep.resolved_names_by_caller.get(frm, set())):
+                        and callee.name in deep.seen_by_caller.get(frm, set())):
                     continue
                 yield item
             elif _is_callable_node(item) and item.key["id"] in unresolved_by_id:
