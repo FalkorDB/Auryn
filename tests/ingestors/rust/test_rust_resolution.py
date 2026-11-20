@@ -307,3 +307,24 @@ def test_dyn_trait_dispatch_resolving_to_project_trait_counts():
         "pub fn f(x: &dyn Run) { x.run(); }\n"
     )})
     assert _nodes(nodes, "Function")["f"].properties["unresolved_calls"] >= 1
+
+
+def test_trait_default_method_self_dispatch_counts():
+    # in a trait DEFAULT method, `self.step()` binds to the trait decl -- the concrete impl is unknown
+    nodes, _ = _resolve({"lib.rs": "pub trait Stepper { fn run(&self) { self.step(); } fn step(&self); }\n"})
+    assert _nodes(nodes, "Method")["run"].properties["unresolved_calls"] >= 1
+
+
+def test_incremental_seed_carries_owner_generics():
+    # findings #792: an emit impl on a generic owner from the SEED must flag dynamic dispatch exactly as a
+    # full ingest would. Without type_parameters on the seeded stub, `self.v.run()` (v: T) would count 0.
+    from auryn.ingestors.rust.raw_model import RawField
+    holder_id = _ROOT_CRATE + "/type/Struct/Holder"
+    idx = resolution.RustGraphIndex()
+    idx.types.append(resolution.make_type_stub(
+        holder_id, "Struct", "Holder", [RawField(name="v", type="T")], type_parameters=["T"]))
+    emit = [parse_source(b"impl Holder { pub fn f(&self) { self.v.run(); } }", "impl.rs")]
+    items = resolution.resolve_incremental(emit, _PROJ, idx)
+    methods = {n.properties.get("name"): n for n in items
+               if type(n).__name__ == "GraphNode" and n.label == "Method"}
+    assert methods["f"].properties["unresolved_calls"] >= 1

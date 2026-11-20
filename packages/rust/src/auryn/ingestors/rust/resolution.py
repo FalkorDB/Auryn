@@ -124,12 +124,14 @@ class RustGraphIndex:
     project_module_names: set = field(default_factory=set)
 
 
-def make_type_stub(type_id: str, kind: str, name: str, fields: list) -> _TypeEntry:
+def make_type_stub(type_id: str, kind: str, name: str, fields: list, type_parameters=()) -> _TypeEntry:
     """A lightweight `_TypeEntry` for a NON-emit type the seed provides: id/kind/name (to point an
-    edge at it) + `fields` (name/type) so an emit method whose receiver is this type can still
-    resolve field-typed calls. Never emitted -- it lives only in the resolution index."""
+    edge at it) + `fields` (name/type) so an emit method whose receiver is this type can still resolve
+    field-typed calls + `type_parameters` so an emit method on this (generic) receiver still flags
+    dynamic dispatch exactly as a full ingest would (incremental == full, #792). Never emitted."""
     return _TypeEntry(type_id=type_id, kind=kind, name=name, scope_id="", scope_label="",
-                      file_id="", raw=RawType(kind=kind, name=name, fields=fields))
+                      file_id="", raw=RawType(kind=kind, name=name, fields=fields,
+                                              type_parameters=list(type_parameters)))
 
 
 def resolve(raw_files, project_id: str) -> Iterator[GraphNode | GraphEdge]:
@@ -603,18 +605,22 @@ def _resolve_call(call, cal: _Callable, member_types: dict[str, str], type_index
     return None  # unknown receiver, no project method by that name -> can't name it -> drop
 
 
-def _is_incomplete_dispatch(call, member_types: dict[str, str], generics: set[str]) -> bool:
+def _is_incomplete_dispatch(call, member_types: dict[str, str], generics: set[str], in_trait: bool = False) -> bool:
     """True when a call's edge (if any) can't name the CONCRETE callee -- so `who_calls` on the real
     target still misses this caller (#792):
       * a method on a GENERIC-param / `dyn Trait` / `impl Trait` receiver (keyed by the type variable or
         trait, not the monomorphized/vtable target -- even when it resolves to a project trait's decl);
-      * a path call qualified by a generic param (`T::default()` -> keyed by `T`, not the concrete impl).
-    A concrete receiver type or a concrete path (`std::mem::swap`, `String::new`) is genuinely external
-    and reconciles cross-repo, so it is NOT flagged (counting it would be noise)."""
+      * a path call qualified by a generic param (`T::default()` -> keyed by `T`, not the concrete impl);
+      * a `self.m()` call inside a TRAIT default method (`self` is the unknown implementor -- it binds to
+        the trait's decl, not the overriding impl).
+    A concrete receiver type or a concrete path (`std::mem::swap`, `String::new`), and `self.m()` in a
+    concrete `impl`, are genuinely resolvable, so they are NOT flagged (counting them would be noise)."""
     if call.kind == "path":
         return call.qualifier in generics  # `T::default()` where T is a generic in scope
     if call.kind != "method":
         return False
+    if call.receiver == "self":
+        return in_trait  # trait default method: the concrete implementor is unknown; concrete impl is fine
     rt = member_types.get(call.receiver or "", "")
     if "dyn " in rt or "impl " in rt:
         return True
@@ -646,6 +652,7 @@ def _resolve_calls(cal: _Callable, type_fields, type_index, function_index, meth
         owner = type_by_id.get(cal.self_type_id)
         if owner is not None:
             generics |= set(getattr(owner.raw, "type_parameters", ()))
+    in_trait = cal.owner_label == "Trait"  # a trait default method: self dispatches to an unknown impl
 
     items: list[GraphNode | GraphEdge] = []
     emitted: set[str] = set()
@@ -659,7 +666,7 @@ def _resolve_calls(cal: _Callable, type_fields, type_index, function_index, meth
         # An edge IS emitted below, but count the site as unresolved when it can't name the concrete
         # callee -- a generic/dyn/impl dispatch (even one resolved to a project trait decl, whose real
         # impls stay unknown) or an ambiguous unknown-receiver name pick. Per call site, before dedup.
-        if approx or _is_incomplete_dispatch(call, member_types, generics):
+        if approx or _is_incomplete_dispatch(call, member_types, generics, in_trait):
             unresolved += 1
         if isinstance(hit, _External):
             # Unresolved but nameable (stdlib / other-crate / external type): a placeholder node

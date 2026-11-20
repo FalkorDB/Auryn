@@ -270,3 +270,9 @@ def test_macro_internal_turbofish_call_is_counted():
     # a turbofish call inside a macro (`helper::<u32>()`) is still a call the engine can't see -- counted
     rf = _parse('fn f() { println!("{}", helper::<u32>()); }')
     assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 1
+
+
+def test_macro_string_literal_parens_are_not_counted():
+    # a `(` inside a macro's format/string literal is not a call -- it must not inflate the count
+    rf = _parse('fn f() { println!("example: helper()"); }')
+    assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 0

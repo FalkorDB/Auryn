@@ -43,6 +43,10 @@ from auryn.core.docstrings import clean_comment
 # A call-like site: an identifier (optionally with a single-level turbofish, `helper::<u32>(`) followed
 # by `(`. The macro name `name!(` carries a `!` and so never matches (it isn't a call).
 _MACRO_CALL_RE = re.compile(r"[A-Za-z_]\w*(?:::<[^<>()]*>)?\s*\(")
+# String/char literals and comments inside a macro's token tree -- blanked before counting call-like
+# sites, so a `(` inside a format string (`println!("helper()")`) isn't mistaken for a call. A char
+# literal needs a closing `'`, so a lifetime (`'a`, no close) is left intact.
+_MACRO_NOISE_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])\'|//[^\n]*|/\*.*?\*/', re.S)
 from auryn.ingestors.rust.grammar import new_parser
 from auryn.ingestors.rust.raw_model import (
     RawCall,
@@ -254,7 +258,8 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
         while stack:
             n = stack.pop()
             if n.type == "macro_invocation":
-                total += len(_MACRO_CALL_RE.findall(txt(n)))  # the macro name is `name!(` -> not matched
+                body_txt = _MACRO_NOISE_RE.sub(" ", txt(n))  # blank strings/comments so their `(` don't count
+                total += len(_MACRO_CALL_RE.findall(body_txt))  # the macro name is `name!(` -> not matched
                 continue  # its contents are tokens, not real call_expressions -- don't descend
             stack.extend(n.children)
         return total
