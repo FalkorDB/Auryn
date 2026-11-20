@@ -250,3 +250,19 @@ def test_ambiguous_type_resolves_deterministically_or_not_at_all():
     targets = {t for (f, t) in dep if "make" in f}
     # `Store` names two project types from unrelated modules -> a single deterministic pick, never both.
     assert targets <= {"a.struct.store", "b.struct.store"} and len(targets) <= 1
+
+
+def test_unresolved_calls_flagged_on_the_function_node():
+    # a resolvable intra-crate call -> 0; a generic-receiver method (type un-nameable) + a macro-internal
+    # call -> counted, so the node flags that its callees may be incomplete (#792)
+    nodes, _ = _resolve({
+        "lib.rs": (
+            "pub fn helper() -> u32 { 1 }\n"
+            "pub fn clean() -> u32 { helper() }\n"
+            'pub fn messy<T>(x: T) { x.mystery_method(); println!("{}", format_val()); }\n'
+        )
+    })
+    fns = _nodes(nodes, "Function")
+    assert fns["clean"].properties["unresolved_calls"] == 0
+    # x.mystery_method() (generic receiver, un-nameable) + format_val() inside println! -> >= 2
+    assert fns["messy"].properties["unresolved_calls"] >= 2

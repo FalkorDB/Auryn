@@ -31,9 +31,16 @@ Every node type / field name below was confirmed empirically against tree-sitter
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from auryn.core.docstrings import clean_comment
+
+# A call-like site `ident(` -- an identifier immediately followed by `(`. Applied to a macro
+# invocation's text to count the calls inside it the name pass can't see (the macro name itself is
+# `name!(`, so the `!` keeps it from matching). A variant constructor (`Some(`) counts too -- a
+# conservative over-count is the safe direction for an "answer may be incomplete" signal (#792).
+_MACRO_CALL_RE = re.compile(r"[A-Za-z_]\w*\s*\(")
 from auryn.ingestors.rust.grammar import new_parser
 from auryn.ingestors.rust.raw_model import (
     RawCall,
@@ -234,6 +241,22 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             stack.extend(n.children)
         return out
 
+    def count_macro_calls(body) -> int:
+        """Number of call-like sites inside macro invocations in the body. A macro expands to a token
+        tree the fast engine doesn't parse as expressions, so a call written inside it (`format!("{}",
+        f())`, `assert!(x.is_empty())`) produces no CALLS edge -- counted so the function can flag that
+        its callees may be incomplete. A nested macro is counted once (via the outer's text)."""
+        if body is None:
+            return 0
+        total, stack = 0, [body]
+        while stack:
+            n = stack.pop()
+            if n.type == "macro_invocation":
+                total += len(_MACRO_CALL_RE.findall(txt(n)))  # the macro name is `name!(` -> not matched
+                continue  # its contents are tokens, not real call_expressions -- don't descend
+            stack.extend(n.children)
+        return total
+
     def build_function(node, kind: str, has_body: bool) -> RawFunction:
         params, self_kind = parameters(fieldn(node, "parameters"))
         ls, le = lines(node)
@@ -245,6 +268,8 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             return_type=type_text(fieldn(node, "return_type")) or None,
             parameters=params,
             calls=collect_calls(fieldn(node, "body")),
+            unresolved_macro_calls=count_macro_calls(fieldn(node, "body")),
+            type_parameters=type_parameters(node),
             is_associated=(kind == "METHOD" and self_kind is None),
             self_kind=self_kind,
             has_body=has_body,
