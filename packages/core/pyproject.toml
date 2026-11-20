@@ -65,6 +65,7 @@ k8s = ["auryn-k8s==0.1.0"]                     # Kubernetes manifests + the `dep
 terraform = ["auryn-terraform==0.1.0"]         # Terraform/OpenTofu (HCL) + the `deploy-terraform` stitch
 helm = ["auryn-helm==0.1.0"]                   # Helm charts (render-free) + the `deploy-helm` stitch
 kustomize = ["auryn-kustomize==0.1.0"]         # Kustomize overlays (render-free) + the `deploy-kustomize` stitch
+ci = ["auryn-ci==0.1.0"]                        # GitHub Actions workflows + the `deploy-ci` BUILDS_IMAGE stitch
 # every plugin + both live-DB drivers: the same as `pip install "falkordb-auryn[all]"`
 all = [
     "auryn-python==0.1.0",
@@ -94,6 +95,7 @@ all = [
     "auryn-terraform==0.1.0",
     "auryn-helm==0.1.0",
     "auryn-kustomize==0.1.0",
+    "auryn-ci==0.1.0",
 ]
 
 [project.scripts]

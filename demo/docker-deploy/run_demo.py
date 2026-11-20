@@ -179,6 +179,14 @@ def main() -> None:
             "MATCH (o:Resource {kind:'kustomization'})-[:RUNS_IMAGE]->(i:Image) RETURN o.name, i.ref ORDER BY i.ref"):
             print(f"  overlay {overlay:14}  RUNS  {img}  (from the images: transformer)")
 
+        section("12. CI  (GitHub Actions: a workflow BUILDS the hub image -> it flips internal)")
+        for wf, img in rows(g,
+            "MATCH (w:Resource {kind:'ci-workflow'})-[:BUILDS_IMAGE]->(i:Image) RETURN w.name, i.ref ORDER BY i.ref"):
+            print(f"  workflow '{wf}'  BUILDS  {img}")
+        for ref, resolved, origin in rows(g,
+            "MATCH (:Resource {kind:'ci-workflow'})-[:BUILDS_IMAGE]->(i:Image) RETURN i.ref, i.resolved, i.origin"):
+            print(f"  -> {ref}  is now  resolved={resolved} origin={origin}  (built in-graph, loop closed)")
+
         # The most-shared hub image and how many producers reach it (1 builder + N runners) -- derived
         # from the graph, not a hard-coded ref.
         top = rows(g, "MATCH (n)-[:BUILDS_IMAGE|RUNS_IMAGE]->(i:Image) WITH i, count(DISTINCT n) AS c "

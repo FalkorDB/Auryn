@@ -73,3 +73,23 @@ def test_terraform_detects_tofu():
     from auryn.ingestors.terraform.plugin import MATCH_PATTERNS
     assert any(fnmatch.fnmatchcase("main.tofu", pat) for pat in MATCH_PATTERNS)
     assert any(fnmatch.fnmatchcase("main.tf", pat) for pat in MATCH_PATTERNS)
+
+
+def test_glob_matches_helper_path_vs_basename():
+    from auryn.core.registry import glob_matches
+    # a pattern with `/` matches the relative PATH (directory anchor)
+    assert glob_matches(".github/workflows/ci.yml", (".github/workflows/*.yml",))
+    assert not glob_matches("ci.yml", (".github/workflows/*.yml",))
+    assert not glob_matches("src/.github/notworkflows/ci.yml", (".github/workflows/*.yml",))
+    # a bare pattern matches the BASENAME anywhere
+    assert glob_matches("a/b/app.py", ("*.py",))
+    assert glob_matches("Chart.yaml", ("Chart.yaml",))
+
+
+def test_list_files_glob_path_anchor(tmp_path):
+    src = _src(tmp_path, {
+        ".github/workflows/ci.yml": "jobs: {}\n", "ci.yml": "x: 1\n",
+        "sub/ci.yml": "y: 2\n", "app.py": "x = 1\n",
+    })
+    got = sorted(p for p, _ in src.list_files_glob(src.tree_sha(), (".github/workflows/*.yml",), set()))
+    assert got == [".github/workflows/ci.yml"]  # path-anchored: not the root/sub ci.yml
