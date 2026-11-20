@@ -33,6 +33,7 @@ def _home(tmp_path, monkeypatch):
 @dataclass
 class _Lang:
     deep_status: str
+    language: str = "python"  # _deepen reads r.language when building its error list
 
 
 @dataclass
@@ -130,7 +131,7 @@ def test_process_request_skips_when_local_dir_gone(monkeypatch, tmp_path):
 def test_process_request_retries_then_drops(monkeypatch, tmp_path):
     monkeypatch.setattr(ingest_mod, "ingest_directory",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("deep engine down")))
-    monkeypatch.setattr(daemon, "_connect", lambda: _FakeClient())
+    monkeypatch.setattr(daemon, "_connect", _FakeClient)
     req = _enqueue_raw("g-flaky", str(tmp_path))
     key = req.name  # retry accounting is per (graph, project) request, not per graph name
     attempts: dict = {}
@@ -212,7 +213,7 @@ def test_process_request_retries_on_reported_deep_error(monkeypatch, tmp_path):
     # ingest_directory returns NORMALLY with deep_status="error" (it records errors, doesn't raise);
     # the daemon must treat that as a failure so the request retries, not silently drop it as success.
     monkeypatch.setattr(ingest_mod, "ingest_directory", lambda *a, **k: _Report(languages=[_Lang("error")]))
-    monkeypatch.setattr(daemon, "_connect", lambda: _FakeClient())
+    monkeypatch.setattr(daemon, "_connect", _FakeClient)
     req = _enqueue_raw("g-deeperr", str(tmp_path))
     daemon._process_request(req, client=None, attempts={})
     assert req.exists() and not req.with_suffix(".inflight").exists()  # re-queued, not dropped
@@ -227,3 +228,20 @@ def test_process_request_skips_when_project_absent_on_backend(monkeypatch, tmp_p
     daemon._process_request(req, client=_FakeClient(project_exists=False), attempts={})
     assert spy == []                     # never full-ingested on the wrong backend
     assert not req.exists()              # claim cleared (not a retryable failure)
+
+
+def test_retry_does_not_clobber_a_newer_request(monkeypatch, tmp_path):
+    # While A runs, a producer publishes a NEWER request B (replacement checkout) at the same path. If A
+    # then fails, its re-queue must NOT overwrite B with the stale A.
+    req = _enqueue_raw("g-newer", str(tmp_path), "A")
+
+    def _ingest_then_fail(*a, **k):
+        req.write_text(json.dumps({"graph": "g-newer", "local_dir": str(tmp_path), "project_name": "B"}))  # B
+        raise RuntimeError("A failed mid-run")
+
+    monkeypatch.setattr(ingest_mod, "ingest_directory", _ingest_then_fail)
+    monkeypatch.setattr(daemon, "_connect", _FakeClient)
+    daemon._process_request(req, client=None, attempts={})
+
+    assert req.exists() and json.loads(req.read_text())["project_name"] == "B"  # B preserved
+    assert not req.with_suffix(".inflight").exists()                            # stale A dropped

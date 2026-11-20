@@ -100,7 +100,8 @@ def _request_path(graph_name: str, project_name: str | None = None) -> Path:
     DIFFERENT producer processes map the same repo to the same filename (cross-process coalescing)."""
     key = f"{graph_name}\x00{project_name or ''}"
     safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in f"{graph_name}.{project_name or 'repo'}") or "graph"
-    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=5).hexdigest()
+    safe = safe[:120]  # keep the whole basename (+ `.<10-hex>.json.<pid>.<tid>.tmp`) under the 255-byte FS limit
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=5).hexdigest()  # the digest, not `safe`, is what disambiguates
     return deepen_requests_dir() / f"{safe}.{digest}.json"
 
 
@@ -284,8 +285,14 @@ def _process_request(req: Path, client, attempts: dict[str, int]):
         n = attempts[key]
         if n < _MAX_ATTEMPTS:
             logger.exception("Deepening %r failed (attempt %d/%d); will retry", key, n, _MAX_ATTEMPTS)
-            with contextlib.suppress(OSError):
-                os.replace(inflight, req)  # re-queue for the next pass
+            # Re-queue for the next pass -- but only if a NEWER request for the same (graph, project)
+            # hasn't been published meanwhile (a replacement checkout): don't clobber it with this stale
+            # one. If one has, drop this inflight; the newer `.json` supersedes it.
+            if req.exists():
+                inflight.unlink(missing_ok=True)
+            else:
+                with contextlib.suppress(OSError):
+                    os.replace(inflight, req)
         else:
             logger.exception("Deepening %r failed %d times; dropping request", key, n)
             inflight.unlink(missing_ok=True)
@@ -321,7 +328,10 @@ def _deepen(client, graph_name: str, local_dir: str, project_name: str | None) -
                        "(stale request, deleted graph, or a non-configured backend)", graph_name, project_name)
         return
     with sync_lock(resolve_project_root(local_dir), queue_one=False):
-        report = ingest_directory(writer, local_dir, project_name=project_name, deep="inline")
+        # embed="off": the PRODUCER's ingest already made the embedding decision (and deep doesn't change
+        # embeddable node content -- name/doc/source -- only CALLS edges + unresolved_calls), so the
+        # daemon must not re-embed, which also honors an original embed="off".
+        report = ingest_directory(writer, local_dir, project_name=project_name, deep="inline", embed="off")
     errored = [r.language for r in report.languages if r.deep_status == "error"]
     if errored:  # surface as a failure so _process_request's bounded retry kicks in
         raise RuntimeError(f"deep pass errored for {graph_name!r}: {', '.join(errored)}")
