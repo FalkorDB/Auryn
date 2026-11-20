@@ -70,11 +70,11 @@ def test_callable_locations_match_resolution_node_ids():
 
 def test_resolve_calls_resolves_what_the_name_pass_cannot():
     locs = _fixture_locations()
-    edges, metrics = rust_analyzer.resolve_calls(_SCIP.read_bytes(), locs)
-    assert metrics["resolved"] == 5 and metrics["external"] == 0
+    deep = rust_analyzer.resolve_calls(_SCIP.read_bytes(), locs)
+    assert deep.metrics["resolved"] == 5 and deep.metrics["external"] == 0
     by_id = {loc.id: loc for loc in locs}
-    pairs = {(by_id[e.from_key["id"]].name, e.to_key["id"]) for e in edges}
-    for e in edges:
+    pairs = {(by_id[e.from_key["id"]].name, e.to_key["id"]) for e in deep.edges}
+    for e in deep.edges:
         assert e.properties["resolution"] == "resolved"
 
     def to_id(caller_name, contains):
@@ -90,10 +90,33 @@ def test_resolve_calls_resolves_what_the_name_pass_cannot():
     assert to_id("caller", ".fn.deep(")
 
 
+def test_resolve_calls_tracks_coverage_and_what_scip_resolved():
+    locs = _fixture_locations()
+    deep = rust_analyzer.resolve_calls(_SCIP.read_bytes(), locs)
+    by_name = {loc.name: loc for loc in locs}
+    # every fixture callable is in the active crate, so all are covered (overlay scope)
+    assert deep.covered_ids == {loc.id for loc in locs}
+    # SCIP tied `caller`'s three calls to concrete callables, so none remain unresolved after deep
+    assert deep.seen_by_caller[by_name["caller"].id] == {"run", "helper", "deep"}
+    unresolved = len(by_name["caller"].called_names - deep.seen_by_caller[by_name["caller"].id])
+    assert unresolved == 0
+
+
+def test_fn_pointer_call_stays_unresolved_after_deep():
+    # `calls_param(f: fn()) { f() }` -- SCIP ties f() to the parameter, not a callable, so deep can't
+    # resolve it; the recomputed unresolved_calls must stay >= 1 (not blindly zeroed).
+    locs = _fixture_locations()
+    deep = rust_analyzer.resolve_calls(_SCIP.read_bytes(), locs)
+    cp = next(loc for loc in locs if loc.name == "calls_param")
+    assert cp.id in deep.covered_ids
+    assert "f" not in deep.seen_by_caller.get(cp.id, set())
+    assert len(cp.called_names - deep.seen_by_caller.get(cp.id, set())) >= 1
+
+
 def test_resolve_calls_is_empty_without_matching_locations():
     # SCIP for a different project (no overlapping files) resolves nothing -- never crashes.
-    edges, metrics = rust_analyzer.resolve_calls(_SCIP.read_bytes(), [])
-    assert edges == [] and metrics["resolved"] == 0
+    deep = rust_analyzer.resolve_calls(_SCIP.read_bytes(), [])
+    assert deep.edges == [] and deep.metrics["resolved"] == 0 and deep.covered_ids == set()
 
 
 # -- graceful fallback: deep mode with the tool unavailable yields the fast graph ----------------
@@ -160,6 +183,9 @@ def test_deep_inline_resolves_calls_end_to_end(graph, tmp_path):
         "WHERE m.id CONTAINS '.struct.fast.method.run' RETURN 1"
     ).result_set
     assert hit == [[1]]
+    # a fn-pointer parameter call deep CANNOT resolve stays counted (not blindly zeroed)
+    rp = graph.ro_query("MATCH (f:Function {name:'calls_param'}) RETURN f.unresolved_calls").result_set
+    assert rp and rp[0][0] >= 1
     # deep resolution zeroes the fast pass's incompleteness count
     r = graph.ro_query("MATCH (f:Function {name:'via_generic'}) RETURN f.unresolved_calls").result_set
     assert r and r[0][0] == 0

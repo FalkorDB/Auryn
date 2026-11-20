@@ -84,6 +84,10 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
         incr = _route(writer, source, target_sha, ref, current_sha,
                       project_name=project_name, repo_uri=repo_uri)
         if incr is not None:
+            # A fast incremental resync degrades a deep graph (changed callables get name-resolution,
+            # unchanged ones keep their deep edges), so stamp depth="fast" -- else a later deep phase
+            # would see commit==target & depth=="deep" and short-circuit, leaving the changes shallow.
+            writer.query("MATCH (p:Project {id: $id}) SET p.depth = 'fast'", {"id": proj_id})
             _reconcile_cargo(writer, proj_id, source, target_sha)
             return _finish(writer, proj_id, source, incr)
 
@@ -118,10 +122,13 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
 def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_name: str, repo_uri: str,
                   ref: str | None, started: float, *, is_upgrade: bool) -> "SyncStats | None":
     """Deep pass: resolve CALLS precisely via rust-analyzer's SCIP index, layered over the fast pass's
-    structural subgraph. Reuses the fast parse for all structure (same node ids), replaces the name-based
-    CALLS with `resolution:"resolved"` edges, and zeroes `unresolved_calls`. Returns None (caller falls
-    back to tree-sitter) if rust-analyzer can't run. `diff_extern_edges=False` on an upgrade preserves the
-    fast pass's extern:// placeholders (deep can't author cross-repo edges; reconcile heals them)."""
+    structural subgraph (same node ids). Returns None (caller falls back to tree-sitter) if rust-analyzer
+    can't run. The overlay is SURGICAL -- it only touches the callables SCIP actually analyzed
+    (`covered_ids`): their name-based CALLS are replaced with `resolution:"resolved"` edges and their
+    `unresolved_calls` recomputed from what SCIP resolved (so a fn-pointer call `f()` stays counted). A
+    callable SCIP never saw (feature-gated-out / unlinked) keeps its fast resolution untouched. External
+    CALLS are always kept (deep can't author cross-repo; reconcile heals them). `diff_extern_edges=False`
+    on an upgrade leaves the fast pass's extern:// placeholders alone."""
     from auryn.ingestors.rust import rust_analyzer
 
     try:
@@ -132,38 +139,60 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
         return None
 
     locations = resolution.callable_locations(files, proj_id)
-    deep_edges, metrics = rust_analyzer.resolve_calls(scip_bytes, locations)
+    deep = rust_analyzer.resolve_calls(scip_bytes, locations)
+    called_by_id = {loc.id: loc.called_names for loc in locations}
+    # unresolved_calls after deep (covered callables only): the fast parse's call names that SCIP did NOT
+    # tie to a concrete callable -- fn-pointer/param calls and the like. Macro-internal calls aren't in
+    # called_names (the parser counts them separately), so they don't inflate this.
+    unresolved_by_id = {
+        cid: len(called_by_id.get(cid, frozenset()) - deep.seen_by_caller.get(cid, set()))
+        for cid in deep.covered_ids
+    }
     project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "deep")
 
     def make_target():
         items: list = [project_node]
         for item in resolution.resolve(files, proj_id):
-            if _is_calls_edge(item):  # deep owns CALLS; fast extern:// edges survive via diff_extern_edges=False
-                continue
-            items.append(_zero_unresolved(item) if _is_callable_node(item) else item)
-        items.extend(deep_edges)
+            if _is_name_calls_edge(item):
+                if item.from_key["id"] in deep.covered_ids:
+                    continue  # deep re-authors this covered callable's calls; drop the name guess
+                items.append(item)  # uncovered caller (not in the SCIP index): keep its fast resolution
+            elif _is_callable_node(item) and item.key["id"] in unresolved_by_id:
+                items.append(_set_unresolved(item, unresolved_by_id[item.key["id"]]))
+            else:
+                items.append(item)  # structure, external CALLS, and uncovered callables pass through
+        items.extend(deep.edges)
         return iter(items)
+
+    # Background-race guard (deep="background" runs on a sibling writer): if another ingest advanced the
+    # graph to a different commit while rust-analyzer ran, don't stamp this now-stale revision over it.
+    live_sha = writer.get_property("Project", {"id": proj_id}, "commit_sha")
+    if live_sha is not None and live_sha != target_sha:
+        logger.warning("rust deep pass: graph moved to %s while analyzing %s; discarding stale result",
+                       live_sha, target_sha)
+        return None
 
     result = _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(files),
                     diff_extern_edges=not is_upgrade)
-    logger.info("rust deep: %d resolved / %d external CALLS over %d callables",
-                metrics["resolved"], metrics["external"], len(locations))
+    logger.info("rust deep: %d resolved / %d external CALLS over %d/%d callables covered",
+                deep.metrics["resolved"], deep.metrics["external"], len(deep.covered_ids), len(locations))
     _reconcile_cargo(writer, proj_id, source, target_sha)
     return _finish(writer, proj_id, source, result)
 
 
-def _is_calls_edge(item) -> bool:
-    return type(item).__name__ == "GraphEdge" and item.rel_type == "CALLS"
+def _is_name_calls_edge(item) -> bool:
+    return (type(item).__name__ == "GraphEdge" and item.rel_type == "CALLS"
+            and (item.properties or {}).get("resolution") == "name")
 
 
 def _is_callable_node(item) -> bool:
     return type(item).__name__ == "GraphNode" and item.label in ("Function", "Method")
 
 
-def _zero_unresolved(node: GraphNode) -> GraphNode:
-    """Re-emit a callable node with `unresolved_calls=0`: the deep pass resolved its calls precisely, so
-    the fast pass's incompleteness count (#792) no longer applies."""
-    return GraphNode(node.label, node.key, {**node.properties, "unresolved_calls": 0})
+def _set_unresolved(node: GraphNode, count: int) -> GraphNode:
+    """Re-emit a callable node with `unresolved_calls=count` -- the sites deep could not tie to a
+    concrete callee (0 when it resolved everything). Supersedes the fast pass's estimate (#792)."""
+    return GraphNode(node.label, node.key, {**node.properties, "unresolved_calls": count})
 
 
 def _route(writer, source, target_sha, ref, current_sha, *, project_name, repo_uri) -> "SyncStats | None":

@@ -20,3 +20,6 @@ pub fn caller() -> u32 {
     let c = other::deep();    // cross-module path call
     a + b + c
 }
+
+// a fn-pointer parameter call: even deep analysis can't name the runtime target
+pub fn calls_param(f: fn() -> u32) -> u32 { f() }

@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import tempfile
 from collections import defaultdict
+from dataclasses import dataclass
 
 from auryn.core.graph_model import GraphEdge
 from auryn.ingestors.rust import scip
@@ -55,7 +56,7 @@ def _tool_command() -> list[str]:
             if got.returncode == 0 and path and os.path.exists(path):
                 return [path]
         except (OSError, subprocess.SubprocessError):
-            pass
+            pass  # rustup missing/broken -> fall through to a plain PATH lookup below
     found = shutil.which("rust-analyzer")
     if found:
         return [found]
@@ -78,7 +79,7 @@ def run_scip(root: str) -> bytes:
                 argv, cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 timeout=_SCIP_TIMEOUT_SECONDS, check=False,
             )
-        except FileNotFoundError as exc:
+        except OSError as exc:  # FileNotFoundError, PermissionError (non-executable override), etc.
             raise RustAnalyzerUnavailable(f"could not execute {argv[0]!r}: {exc}") from exc
         except subprocess.TimeoutExpired as exc:
             raise RustAnalyzerUnavailable(f"rust-analyzer scip timed out after {_SCIP_TIMEOUT_SECONDS}s") from exc
@@ -93,7 +94,7 @@ def run_scip(root: str) -> bytes:
             try:
                 os.remove(produced)
             except OSError:
-                pass
+                pass  # best-effort cleanup -- a leftover index.scip in the checkout is harmless
     return data
 
 
@@ -116,46 +117,68 @@ def _norm_path(path: str) -> str:
     return path.replace("\\", "/").lstrip("./")
 
 
-def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> tuple[list[GraphEdge], dict]:
+@dataclass
+class DeepCalls:
+    """The result of resolving CALLS from a SCIP index against the fast pass's callables."""
+
+    edges: list[GraphEdge]              # resolved intra-project CALLS (resolution="resolved")
+    seen_by_caller: dict[str, set[str]]  # caller id -> callee simple names SCIP tied to a callable
+    covered_ids: set[str]              # callable ids SCIP actually defined (analyzed) -- the overlay scope
+    metrics: dict
+
+
+def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepCalls:
     """Derive precise intra-project CALLS from a SCIP index + the fast pass's callable locations.
 
-    Returns (resolved `CALLS` edges with `resolution:"resolved"`, metrics). A reference occurrence of a
-    callable symbol is attributed to the INNERMOST callable whose line span contains it, and resolved to
-    the in-source callable the symbol defines. References whose symbol isn't defined in this project
-    (stdlib / other-crate) are counted as `external` and left to the fast pass's placeholder edges."""
+    A reference occurrence of a callable symbol is attributed to a containing callable (preferring one
+    whose fast parse actually called that name, so same-line siblings disambiguate) and resolved to the
+    in-source callable the symbol defines (`resolution:"resolved"`). A reference whose symbol isn't
+    defined in this project (stdlib / other-crate) is counted but gets no edge -- the fast pass's
+    extern:// placeholder covers it. `covered_ids` are the callables SCIP actually analyzed, so the
+    caller can overlay ONLY those (a feature-gated-out or unlinked callable isn't in the index and keeps
+    its fast resolution). `seen_by_caller` lets the caller recompute unresolved_calls = fast call names
+    minus what SCIP resolved (so a fn-pointer parameter call `f()`, which SCIP ties to a param not a
+    callable, stays counted as unresolved)."""
     documents = scip.parse_index(scip_bytes)
     by_path: dict[str, list[CallableLocation]] = defaultdict(list)
     for loc in locations:
         by_path[_norm_path(loc.rel_path)].append(loc)
 
-    def innermost(locs: list[CallableLocation], line_1based: int, name: str | None = None) -> CallableLocation | None:
-        """The smallest-span callable whose [line_start, line_end] contains the line (optionally also
-        matching `name`) -- so a call site / definition attributes to its enclosing or own callable."""
-        hits = [loc for loc in locs if loc.line_start <= line_1based <= loc.line_end and (name is None or loc.name == name)]
+    def define_match(locs, line_1based, name):  # a definition joins to the same-named callable it sits in
+        hits = [loc for loc in locs if loc.line_start <= line_1based <= loc.line_end and loc.name == name]
         return min(hits, key=lambda loc: loc.line_end - loc.line_start) if hits else None
 
-    # symbol -> the in-source callable it DEFINES (joined by file + containment + name match).
+    def attribute(locs, line_1based, callee_name):  # a reference -> its enclosing CALLER
+        hits = [loc for loc in locs if loc.line_start <= line_1based <= loc.line_end]
+        # prefer a containing callable that the fast parse saw call this name -- disambiguates callers
+        # sharing a line; fall back to innermost so a macro-internal call (no RawCall) still attributes.
+        pool = [loc for loc in hits if callee_name in loc.called_names] or hits
+        return min(pool, key=lambda loc: loc.line_end - loc.line_start) if pool else None
+
     symbol_to_loc: dict[str, CallableLocation] = {}
     for doc in documents:
         locs = by_path.get(_norm_path(doc.relative_path), [])
         for occ in doc.occurrences:
-            if not occ.is_definition or not _is_callable_symbol(occ.symbol):
-                continue
-            match = innermost(locs, occ.start_line + 1, _simple_name(occ.symbol))
-            if match is not None:
-                symbol_to_loc[occ.symbol] = match
+            if occ.is_definition and _is_callable_symbol(occ.symbol):
+                match = define_match(locs, occ.start_line + 1, _simple_name(occ.symbol))
+                if match is not None:
+                    symbol_to_loc[occ.symbol] = match
+    covered_ids = {loc.id for loc in symbol_to_loc.values()}
 
     edges: dict[tuple[str, str], GraphEdge] = {}
+    seen_by_caller: dict[str, set[str]] = defaultdict(set)
     metrics = {"resolved": 0, "external": 0, "unattributed": 0}
     for doc in documents:
         locs = by_path.get(_norm_path(doc.relative_path), [])
         for occ in doc.occurrences:
             if occ.is_definition or not _is_callable_symbol(occ.symbol):
                 continue
-            caller = innermost(locs, occ.start_line + 1)
+            callee_name = _simple_name(occ.symbol)
+            caller = attribute(locs, occ.start_line + 1, callee_name)
             if caller is None:
                 metrics["unattributed"] += 1
                 continue
+            seen_by_caller[caller.id].add(callee_name)  # SCIP tied a concrete callable to this call name
             target = symbol_to_loc.get(occ.symbol)
             if target is None:
                 metrics["external"] += 1  # stdlib / other-crate -- fast pass's extern:// edge covers it
@@ -169,4 +192,4 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> tuple
                     {"resolution": "resolved"},
                 )
                 metrics["resolved"] += 1
-    return list(edges.values()), metrics
+    return DeepCalls(list(edges.values()), dict(seen_by_caller), covered_ids, metrics)

@@ -158,6 +158,9 @@ class CallableLocation:
     line_start: int  # 1-based inclusive (as RawFunction records them)
     line_end: int
     name: str
+    called_names: frozenset[str]  # callee simple names the fast parse saw as CALLS in this body --
+    # lets the deep pass disambiguate same-line callers and recompute unresolved_calls from what SCIP
+    # actually resolved (macro-internal calls aren't here; they're counted, not parsed as RawCalls)
 
 
 def callable_locations(raw_files, project_id: str) -> list[CallableLocation]:
@@ -183,7 +186,8 @@ def callable_locations(raw_files, project_id: str) -> list[CallableLocation]:
 
     def add(node_id: str, label: str, file_id: str, raw) -> None:
         out.append(CallableLocation(node_id, label, fid_to_path.get(file_id, ""),
-                                    raw.line_start, raw.line_end, raw.name))
+                                    raw.line_start, raw.line_end, raw.name,
+                                    frozenset(c.name for c in raw.calls)))
 
     for e in c.types:  # trait-declared methods bind to the Trait itself (mirror of _resolve)
         if e.kind != "Trait":
