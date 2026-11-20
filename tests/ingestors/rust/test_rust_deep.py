@@ -8,6 +8,7 @@ gated on the tool actually being available."""
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -130,14 +131,19 @@ def test_fast_rerun_does_not_downgrade_a_deep_graph(graph):
 # -- end-to-end with a real rust-analyzer (gated on availability) --------------------------------
 
 def _rust_analyzer_available() -> bool:
+    # Must actually RUN: a `rustup` proxy (`~/.cargo/bin/rust-analyzer`) resolves on PATH even when the
+    # component isn't installed, and only fails when invoked (CI hits exactly this). Probe `--version`.
     try:
-        rust_analyzer._tool_command()
-        return True
+        cmd = rust_analyzer._tool_command()
     except rust_analyzer.RustAnalyzerUnavailable:
+        return False
+    try:
+        return subprocess.run([*cmd, "--version"], capture_output=True, timeout=60, check=False).returncode == 0
+    except (OSError, subprocess.SubprocessError):
         return False
 
 
-@pytest.mark.skipif(not _rust_analyzer_available(), reason="requires rust-analyzer (rustup component add rust-analyzer)")
+@pytest.mark.skipif(not _rust_analyzer_available(), reason="requires a working rust-analyzer (rustup component add rust-analyzer)")
 def test_deep_inline_resolves_calls_end_to_end(graph, tmp_path):
     # Copy the cargo fixture out of the repo (rust-analyzer writes a target/ dir) and ingest it deep.
     proj = tmp_path / "raprobe"
@@ -145,9 +151,8 @@ def test_deep_inline_resolves_calls_end_to_end(graph, tmp_path):
     report = ingest.ingest_directory(GraphWriter(graph), str(proj), project_name="rae", deep="inline")
 
     rust = next(r for r in report.languages if r.language == "rust")
-    if rust.deep_status != "inline":  # a sandbox without a usable toolchain degrades -- don't flake
-        pytest.skip(f"deep pass degraded ({rust.deep_status}); rust-analyzer could not analyze the crate")
-    assert _depth(graph, "rae") == "deep"
+    assert rust.deep_status == "inline"
+    assert _depth(graph, "rae") == "deep"  # a working rust-analyzer upgraded the graph in place
 
     # the concrete-impl call the name pass can't make: caller -> Fast::run, resolved
     hit = graph.query(
