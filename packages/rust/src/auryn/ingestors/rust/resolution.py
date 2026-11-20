@@ -67,6 +67,8 @@ class _Callable:
     owner_id: str | None
     raw: RawFunction
     file_id: str = ""  # the File that DEFINES this callable (per-file provenance for delta-sync, ADR 0005)
+    impl_generics: tuple[str, ...] = ()  # generics from the enclosing impl block (`impl<T> Foo<T>`),
+    # merged with the method's own + owning-type generics when flagging dynamic dispatch (#792)
 
 
 @dataclass
@@ -274,7 +276,7 @@ def _resolve(raw_files, project_id: str, seed: "RustGraphIndex | None") -> Itera
         for m in impl.methods:
             mid = ids.method_id(owner.type_id, m.name, [p.type for p in m.parameters], trait_name=impl.trait_name)
             callables.append(_Callable(mid, "Method", owner.scope_id, owner.type_id, owner.kind, owner.type_id, m,
-                                       file_id=impl_file_id))
+                                       file_id=impl_file_id, impl_generics=tuple(impl.type_parameters)))
             method_index[m.name].append((owner.type_id, mid, owner.name))
 
     # free functions.
@@ -343,7 +345,7 @@ def _resolve(raw_files, project_id: str, seed: "RustGraphIndex | None") -> Itera
     for cal in callables:
         cal_crate = crate_name_of_fid.get(cal.file_id) or project_id.split("://", 1)[-1]
         call_items, unresolved_calls = _resolve_calls(cal, type_fields, type_index, function_index,
-                                                      method_index, project_modules, emitted_externs)
+                                                      method_index, project_modules, emitted_externs, type_by_id)
         for it in _emit_callable_node(cal, _real_linkage(cal, cal_crate, dotted_by_id, type_by_id), unresolved_calls):
             if _once(it):
                 yield it
@@ -593,45 +595,72 @@ def _resolve_call(call, cal: _Callable, member_types: dict[str, str], type_index
                              "external", {"receiver_type": head})
     cands = method_index.get(call.name)  # unknown receiver -> deterministic name-based pick
     if cands:
-        return sorted(cands, key=lambda x: x[1])[0][1], "Method", {}
+        pick = sorted(cands, key=lambda x: x[1])[0][1]
+        # >1 project method shares this name and the receiver type is unknown -> the pick is a guess.
+        # Keep the best-effort edge but mark it `_approx` so _resolve_calls counts it as unresolved
+        # (the concrete callee is uncertain). A `_approx` key is internal -- stripped before the edge.
+        return pick, "Method", ({"_approx": True} if len(cands) > 1 else {})
     return None  # unknown receiver, no project method by that name -> can't name it -> drop
 
 
-def _is_dynamic_dispatch(call, member_types: dict[str, str], generics: set[str]) -> bool:
-    """A method call whose receiver is a GENERIC param, a `dyn Trait`, or an `impl Trait` -- the fast
-    engine resolves it to an external placeholder keyed by the type variable, NOT the concrete method a
-    monomorphization/vtable would reach, so `who_calls` on that real method misses this caller (#792)."""
+def _is_incomplete_dispatch(call, member_types: dict[str, str], generics: set[str]) -> bool:
+    """True when a call's edge (if any) can't name the CONCRETE callee -- so `who_calls` on the real
+    target still misses this caller (#792):
+      * a method on a GENERIC-param / `dyn Trait` / `impl Trait` receiver (keyed by the type variable or
+        trait, not the monomorphized/vtable target -- even when it resolves to a project trait's decl);
+      * a path call qualified by a generic param (`T::default()` -> keyed by `T`, not the concrete impl).
+    A concrete receiver type or a concrete path (`std::mem::swap`, `String::new`) is genuinely external
+    and reconciles cross-repo, so it is NOT flagged (counting it would be noise)."""
+    if call.kind == "path":
+        return call.qualifier in generics  # `T::default()` where T is a generic in scope
     if call.kind != "method":
         return False
     rt = member_types.get(call.receiver or "", "")
     if "dyn " in rt or "impl " in rt:
         return True
-    base = rt.lstrip("&").replace("mut ", "").strip().split("<", 1)[0].strip()
+    base = re.sub(r"^'\w+\s+", "", rt.lstrip("&").strip())  # drop a reference lifetime: `&'a T` -> `T`
+    base = base.replace("mut ", "").strip().split("<", 1)[0].strip()
     return base in generics
 
 
 def _resolve_calls(cal: _Callable, type_fields, type_index, function_index, method_index,
-                   project_modules, emitted_externs: set[str]) -> tuple[list[GraphNode | GraphEdge], int]:
+                   project_modules, emitted_externs: set[str], type_by_id) -> tuple[list[GraphNode | GraphEdge], int]:
     """Resolve a callable's call sites ONCE -> (CALLS edges + extern placeholder nodes, unresolved
-    count). Unresolved = a name-pass call that produced no edge (unknown receiver / ambiguous / intra-
-    project dangling) + macro-internal call-like sites + a generic/`dyn`/`impl` method dispatch (which
-    DOES get an external edge, but to a type-variable placeholder, not the concrete method -- so a
-    `who_calls` on the real method is still incomplete). A plain stdlib/other-crate external (a concrete
-    receiver type, or a path call) is genuinely external and reconciles cross-repo, so it does NOT count."""
+    count). A call site is counted as unresolved -- meaning this callable's callees (and the callers of
+    its unknown targets) may be incomplete -- when:
+      * it produced no edge (unknown receiver / intra-project dangling);
+      * it's a macro-internal call-like site (`cal.raw.unresolved_macro_calls`);
+      * it's a generic / `dyn` / `impl` dispatch (method on such a receiver, or a `T::assoc()` path):
+        the edge, if any, targets a type-variable placeholder or a trait decl -- NOT the concrete
+        method -- so this counts EVEN when it resolved to a project node (_is_incomplete_dispatch);
+      * it's an ambiguous unknown-receiver name pick (`_approx`, >1 project method by that name).
+    A plain stdlib/other-crate external (concrete receiver type, or a concrete path) is genuinely
+    external and reconciles cross-repo, so it does NOT count. Generics in scope = the method's own +
+    its enclosing impl block's + its owning type's (so `impl<T> Foo<T>` method params counted too)."""
     member_types: dict[str, str] = {}
     if cal.self_type_id:
         member_types.update(type_fields.get(cal.self_type_id, {}))
     member_types.update({p.name: p.type for p in cal.raw.parameters if p.type})
-    generics = set(cal.raw.type_parameters)
+    generics = set(cal.raw.type_parameters) | set(cal.impl_generics)  # fn + enclosing-impl generics
+    if cal.self_type_id:  # + the owning type's own generics (`struct Foo<T>` / `trait Bar<T>`)
+        owner = type_by_id.get(cal.self_type_id)
+        if owner is not None:
+            generics |= set(getattr(owner.raw, "type_parameters", ()))
 
     items: list[GraphNode | GraphEdge] = []
     emitted: set[str] = set()
     unresolved = cal.raw.unresolved_macro_calls  # macro-internal calls never produce an edge
     for call in cal.raw.calls:
         hit = _resolve_call(call, cal, member_types, type_index, function_index, method_index, project_modules)
+        approx = isinstance(hit, tuple) and hit[2].pop("_approx", False)  # strip the internal marker
         if hit is None:
             unresolved += 1  # a nameable-but-unresolved call site -> no edge, flag incompleteness
             continue
+        # An edge IS emitted below, but count the site as unresolved when it can't name the concrete
+        # callee -- a generic/dyn/impl dispatch (even one resolved to a project trait decl, whose real
+        # impls stay unknown) or an ambiguous unknown-receiver name pick. Per call site, before dedup.
+        if approx or _is_incomplete_dispatch(call, member_types, generics):
+            unresolved += 1
         if isinstance(hit, _External):
             # Unresolved but nameable (stdlib / other-crate / external type): a placeholder node
             # keyed by its cross-repo linkage, reached by an ordinary CALLS edge (ADR 0004). A
@@ -639,8 +668,6 @@ def _resolve_calls(cal: _Callable, type_fields, type_index, function_index, meth
             if hit.eid in emitted:
                 continue
             emitted.add(hit.eid)
-            if _is_dynamic_dispatch(call, member_types, generics):
-                unresolved += 1  # placeholder is keyed by the type variable, not the concrete method
             if hit.eid not in emitted_externs:
                 emitted_externs.add(hit.eid)
                 items.append(GraphNode(hit.label, {"id": hit.eid}, {

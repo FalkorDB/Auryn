@@ -266,3 +266,44 @@ def test_unresolved_calls_flagged_on_the_function_node():
     assert fns["clean"].properties["unresolved_calls"] == 0
     # x.mystery_method() (generic receiver, un-nameable) + format_val() inside println! -> >= 2
     assert fns["messy"].properties["unresolved_calls"] >= 2
+
+
+def test_generic_qualified_path_call_counts_as_unresolved():
+    # `T::default()` is keyed by the type variable T, not a concrete impl -> incomplete (#792 finding)
+    nodes, _ = _resolve({"lib.rs": "pub fn make<T: Default>() -> T { T::default() }\n"})
+    assert _nodes(nodes, "Function")["make"].properties["unresolved_calls"] >= 1
+
+
+def test_reference_lifetime_receiver_still_flags_generic_dispatch():
+    # receiver `&'a T` must normalize to `T` (lifetime stripped) so the generic dispatch is still counted
+    nodes, _ = _resolve({"lib.rs": "pub fn f<'a, T>(x: &'a T) { x.run(); }\n"})
+    assert _nodes(nodes, "Function")["f"].properties["unresolved_calls"] >= 1
+
+
+def test_impl_block_generic_receiver_is_flagged():
+    # `T` is declared on the impl block, not the method -- dispatch on `x: T` is still unresolved (#792)
+    nodes, _ = _resolve({"lib.rs": (
+        "pub struct Holder<T> { v: T }\n"
+        "impl<T> Holder<T> { pub fn f(&self, x: T) { x.run(); } }\n"
+    )})
+    assert _nodes(nodes, "Method")["f"].properties["unresolved_calls"] >= 1
+
+
+def test_ambiguous_unknown_receiver_name_pick_counts():
+    # two project methods named `run`, receiver type unknown -> the name-based pick is a guess (#792)
+    nodes, _ = _resolve({"lib.rs": (
+        "pub struct A; pub struct B;\n"
+        "impl A { pub fn run(&self) {} }\n"
+        "impl B { pub fn run(&self) {} }\n"
+        "pub fn f() { let x = make(); x.run(); }\n"
+    )})
+    assert _nodes(nodes, "Function")["f"].properties["unresolved_calls"] >= 1
+
+
+def test_dyn_trait_dispatch_resolving_to_project_trait_counts():
+    # `&dyn Run` resolves to the project trait's `run` decl, but the concrete impl is unknown -> count it
+    nodes, _ = _resolve({"lib.rs": (
+        "pub trait Run { fn run(&self); }\n"
+        "pub fn f(x: &dyn Run) { x.run(); }\n"
+    )})
+    assert _nodes(nodes, "Function")["f"].properties["unresolved_calls"] >= 1

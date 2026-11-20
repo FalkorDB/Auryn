@@ -108,6 +108,8 @@ class RawType:
 class RawImpl:
     type_name: str  # the impl's `Self` type, bare simple name (`Store` for `impl Store`)
     trait_name: str | None = None  # implemented trait's simple name; None for an inherent impl
+    type_parameters: list[str] = field(default_factory=list)  # the impl block's own generics (`impl<T>
+    # Foo<T>` -> [T]); a method dispatching on one can't be statically resolved to a concrete method (#792)
     methods: list[RawFunction] = field(default_factory=list)
     line_start: int = 0
     line_end: int = 0

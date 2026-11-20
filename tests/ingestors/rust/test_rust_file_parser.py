@@ -264,3 +264,9 @@ def test_macro_internal_calls_are_counted():
 def test_macro_without_a_call_counts_zero():
     rf = _parse('fn f() { println!("hello"); let v = vec![1, 2, 3]; }')
     assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 0
+
+
+def test_macro_internal_turbofish_call_is_counted():
+    # a turbofish call inside a macro (`helper::<u32>()`) is still a call the engine can't see -- counted
+    rf = _parse('fn f() { println!("{}", helper::<u32>()); }')
+    assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 1

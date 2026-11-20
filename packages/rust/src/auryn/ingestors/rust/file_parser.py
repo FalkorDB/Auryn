@@ -40,7 +40,9 @@ from auryn.core.docstrings import clean_comment
 # invocation's text to count the calls inside it the name pass can't see (the macro name itself is
 # `name!(`, so the `!` keeps it from matching). A variant constructor (`Some(`) counts too -- a
 # conservative over-count is the safe direction for an "answer may be incomplete" signal (#792).
-_MACRO_CALL_RE = re.compile(r"[A-Za-z_]\w*\s*\(")
+# A call-like site: an identifier (optionally with a single-level turbofish, `helper::<u32>(`) followed
+# by `(`. The macro name `name!(` carries a `!` and so never matches (it isn't a call).
+_MACRO_CALL_RE = re.compile(r"[A-Za-z_]\w*(?:::<[^<>()]*>)?\s*\(")
 from auryn.ingestors.rust.grammar import new_parser
 from auryn.ingestors.rust.raw_model import (
     RawCall,
@@ -397,6 +399,7 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
         ri = RawImpl(
             type_name=simple_type_name(fieldn(node, "type")) or "",
             trait_name=simple_type_name(fieldn(node, "trait")),
+            type_parameters=type_parameters(node),  # `impl<T> Foo<T>` -> [T]; drives dynamic-dispatch flagging
             line_start=ls,
             line_end=le,
         )
