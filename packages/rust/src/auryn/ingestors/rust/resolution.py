@@ -67,6 +67,8 @@ class _Callable:
     owner_id: str | None
     raw: RawFunction
     file_id: str = ""  # the File that DEFINES this callable (per-file provenance for delta-sync, ADR 0005)
+    impl_generics: tuple[str, ...] = ()  # generics from the enclosing impl block (`impl<T> Foo<T>`),
+    # merged with the method's own + owning-type generics when flagging dynamic dispatch (#792)
 
 
 @dataclass
@@ -122,12 +124,14 @@ class RustGraphIndex:
     project_module_names: set = field(default_factory=set)
 
 
-def make_type_stub(type_id: str, kind: str, name: str, fields: list) -> _TypeEntry:
+def make_type_stub(type_id: str, kind: str, name: str, fields: list, type_parameters=()) -> _TypeEntry:
     """A lightweight `_TypeEntry` for a NON-emit type the seed provides: id/kind/name (to point an
-    edge at it) + `fields` (name/type) so an emit method whose receiver is this type can still
-    resolve field-typed calls. Never emitted -- it lives only in the resolution index."""
+    edge at it) + `fields` (name/type) so an emit method whose receiver is this type can still resolve
+    field-typed calls + `type_parameters` so an emit method on this (generic) receiver still flags
+    dynamic dispatch exactly as a full ingest would (incremental == full, #792). Never emitted."""
     return _TypeEntry(type_id=type_id, kind=kind, name=name, scope_id="", scope_label="",
-                      file_id="", raw=RawType(kind=kind, name=name, fields=fields))
+                      file_id="", raw=RawType(kind=kind, name=name, fields=fields,
+                                              type_parameters=list(type_parameters)))
 
 
 def resolve(raw_files, project_id: str) -> Iterator[GraphNode | GraphEdge]:
@@ -274,7 +278,7 @@ def _resolve(raw_files, project_id: str, seed: "RustGraphIndex | None") -> Itera
         for m in impl.methods:
             mid = ids.method_id(owner.type_id, m.name, [p.type for p in m.parameters], trait_name=impl.trait_name)
             callables.append(_Callable(mid, "Method", owner.scope_id, owner.type_id, owner.kind, owner.type_id, m,
-                                       file_id=impl_file_id))
+                                       file_id=impl_file_id, impl_generics=tuple(impl.type_parameters)))
             method_index[m.name].append((owner.type_id, mid, owner.name))
 
     # free functions.
@@ -310,11 +314,8 @@ def _resolve(raw_files, project_id: str, seed: "RustGraphIndex | None") -> Itera
         for it in _emit_type(e):
             if _once(it):
                 yield it
-    for cal in callables:
-        cal_crate = crate_name_of_fid.get(cal.file_id) or project_id.split("://", 1)[-1]
-        for it in _emit_callable_node(cal, _real_linkage(cal, cal_crate, dotted_by_id, type_by_id)):
-            if _once(it):
-                yield it
+    # callable NODES are emitted in pass 2 (below), once their calls are resolved -- the node carries an
+    # `unresolved_calls` count that is only known after resolution (#792).
     for scope_id, scope_label, file_id, rc in c.consts:
         for it in _emit_const(scope_id, scope_label, file_id, rc):
             if _once(it):
@@ -344,8 +345,13 @@ def _resolve(raw_files, project_id: str, seed: "RustGraphIndex | None") -> Itera
             yield from _depends_on("Field", fid, [f.type], type_index, e.type_id)
 
     for cal in callables:
-        yield from _emit_calls(cal, type_fields, type_index, function_index, method_index,
-                               project_modules, emitted_externs)
+        cal_crate = crate_name_of_fid.get(cal.file_id) or project_id.split("://", 1)[-1]
+        call_items, unresolved_calls = _resolve_calls(cal, type_fields, type_index, function_index,
+                                                      method_index, project_modules, emitted_externs, type_by_id)
+        for it in _emit_callable_node(cal, _real_linkage(cal, cal_crate, dotted_by_id, type_by_id), unresolved_calls):
+            if _once(it):
+                yield it
+        yield from call_items
         type_texts = [cal.raw.return_type] + [p.type for p in cal.raw.parameters]
         yield from _depends_on(cal.label, cal.id, type_texts, type_index, cal.self_type_id)
 
@@ -417,7 +423,7 @@ def _emit_type(e: _TypeEntry) -> Iterator[GraphNode | GraphEdge]:
             yield GraphEdge("HAS_VARIANT", "Enum", {"id": e.type_id}, "EnumVariant", {"id": vid})
 
 
-def _emit_callable_node(cal: _Callable, linkage_key: str | None) -> Iterator[GraphNode | GraphEdge]:
+def _emit_callable_node(cal: _Callable, linkage_key: str | None, unresolved_calls: int = 0) -> Iterator[GraphNode | GraphEdge]:
     fn = cal.raw
     props = {
         "name": fn.name,
@@ -430,6 +436,10 @@ def _emit_callable_node(cal: _Callable, linkage_key: str | None) -> Iterator[Gra
         "doc": fn.doc,
         "line_start": fn.line_start,
         "line_end": fn.line_end,
+        # Call sites the name pass couldn't resolve (an unknown-receiver/ambiguous call, or a call
+        # inside a macro): > 0 means this callable's CALLES (and the callers of its unknown targets)
+        # may be incomplete. A future deep rust-analyzer pass would resolve these and set it to 0 (#792).
+        "unresolved_calls": unresolved_calls,
     }
     if linkage_key is not None:  # ADR 0004: a `pub` callable is externally visible -> cross-repo key
         props["linkage_key"] = linkage_key
@@ -587,22 +597,77 @@ def _resolve_call(call, cal: _Callable, member_types: dict[str, str], type_index
                              "external", {"receiver_type": head})
     cands = method_index.get(call.name)  # unknown receiver -> deterministic name-based pick
     if cands:
-        return sorted(cands, key=lambda x: x[1])[0][1], "Method", {}
+        pick = sorted(cands, key=lambda x: x[1])[0][1]
+        # >1 project method shares this name and the receiver type is unknown -> the pick is a guess.
+        # Keep the best-effort edge but mark it `_approx` so _resolve_calls counts it as unresolved
+        # (the concrete callee is uncertain). A `_approx` key is internal -- stripped before the edge.
+        return pick, "Method", ({"_approx": True} if len(cands) > 1 else {})
     return None  # unknown receiver, no project method by that name -> can't name it -> drop
 
 
-def _emit_calls(cal: _Callable, type_fields, type_index, function_index, method_index,
-                project_modules, emitted_externs: set[str]) -> Iterator[GraphNode | GraphEdge]:
+def _is_incomplete_dispatch(call, member_types: dict[str, str], generics: set[str], in_trait: bool = False) -> bool:
+    """True when a call's edge (if any) can't name the CONCRETE callee -- so `who_calls` on the real
+    target still misses this caller (#792):
+      * a method on a GENERIC-param / `dyn Trait` / `impl Trait` receiver (keyed by the type variable or
+        trait, not the monomorphized/vtable target -- even when it resolves to a project trait's decl);
+      * a path call qualified by a generic param (`T::default()` -> keyed by `T`, not the concrete impl);
+      * a `self.m()` call inside a TRAIT default method (`self` is the unknown implementor -- it binds to
+        the trait's decl, not the overriding impl).
+    A concrete receiver type or a concrete path (`std::mem::swap`, `String::new`), and `self.m()` in a
+    concrete `impl`, are genuinely resolvable, so they are NOT flagged (counting them would be noise)."""
+    if call.kind == "path":
+        return call.qualifier in generics  # `T::default()` where T is a generic in scope
+    if call.kind != "method":
+        return False
+    if call.receiver == "self":
+        return in_trait  # trait default method: the concrete implementor is unknown; concrete impl is fine
+    rt = member_types.get(call.receiver or "", "")
+    if "dyn " in rt or "impl " in rt:
+        return True
+    base = re.sub(r"^'\w+\s+", "", rt.lstrip("&").strip())  # drop a reference lifetime: `&'a T` -> `T`
+    base = base.replace("mut ", "").strip().split("<", 1)[0].strip()
+    return base in generics
+
+
+def _resolve_calls(cal: _Callable, type_fields, type_index, function_index, method_index,
+                   project_modules, emitted_externs: set[str], type_by_id) -> tuple[list[GraphNode | GraphEdge], int]:
+    """Resolve a callable's call sites ONCE -> (CALLS edges + extern placeholder nodes, unresolved
+    count). A call site is counted as unresolved -- meaning this callable's callees (and the callers of
+    its unknown targets) may be incomplete -- when:
+      * it produced no edge (unknown receiver / intra-project dangling);
+      * it's a macro-internal call-like site (`cal.raw.unresolved_macro_calls`);
+      * it's a generic / `dyn` / `impl` dispatch (method on such a receiver, or a `T::assoc()` path):
+        the edge, if any, targets a type-variable placeholder or a trait decl -- NOT the concrete
+        method -- so this counts EVEN when it resolved to a project node (_is_incomplete_dispatch);
+      * it's an ambiguous unknown-receiver name pick (`_approx`, >1 project method by that name).
+    A plain stdlib/other-crate external (concrete receiver type, or a concrete path) is genuinely
+    external and reconciles cross-repo, so it does NOT count. Generics in scope = the method's own +
+    its enclosing impl block's + its owning type's (so `impl<T> Foo<T>` method params counted too)."""
     member_types: dict[str, str] = {}
     if cal.self_type_id:
         member_types.update(type_fields.get(cal.self_type_id, {}))
     member_types.update({p.name: p.type for p in cal.raw.parameters if p.type})
+    generics = set(cal.raw.type_parameters) | set(cal.impl_generics)  # fn + enclosing-impl generics
+    if cal.self_type_id:  # + the owning type's own generics (`struct Foo<T>` / `trait Bar<T>`)
+        owner = type_by_id.get(cal.self_type_id)
+        if owner is not None:
+            generics |= set(getattr(owner.raw, "type_parameters", ()))
+    in_trait = cal.owner_label == "Trait"  # a trait default method: self dispatches to an unknown impl
 
+    items: list[GraphNode | GraphEdge] = []
     emitted: set[str] = set()
+    unresolved = cal.raw.unresolved_macro_calls  # macro-internal calls never produce an edge
     for call in cal.raw.calls:
         hit = _resolve_call(call, cal, member_types, type_index, function_index, method_index, project_modules)
+        approx = isinstance(hit, tuple) and hit[2].pop("_approx", False)  # strip the internal marker
         if hit is None:
+            unresolved += 1  # a nameable-but-unresolved call site -> no edge, flag incompleteness
             continue
+        # An edge IS emitted below, but count the site as unresolved when it can't name the concrete
+        # callee -- a generic/dyn/impl dispatch (even one resolved to a project trait decl, whose real
+        # impls stay unknown) or an ambiguous unknown-receiver name pick. Per call site, before dedup.
+        if approx or _is_incomplete_dispatch(call, member_types, generics, in_trait):
+            unresolved += 1
         if isinstance(hit, _External):
             # Unresolved but nameable (stdlib / other-crate / external type): a placeholder node
             # keyed by its cross-repo linkage, reached by an ordinary CALLS edge (ADR 0004). A
@@ -612,19 +677,20 @@ def _emit_calls(cal: _Callable, type_fields, type_index, function_index, method_
             emitted.add(hit.eid)
             if hit.eid not in emitted_externs:
                 emitted_externs.add(hit.eid)
-                yield GraphNode(hit.label, {"id": hit.eid}, {
+                items.append(GraphNode(hit.label, {"id": hit.eid}, {
                     "name": hit.name, "qualified_name": hit.qualified, "resolved": False,
                     "origin": hit.origin, "linkage_key": hit.eid,
-                })
-            yield GraphEdge("CALLS", cal.label, {"id": cal.id}, hit.label, {"id": hit.eid},
-                            {"resolution": "external", **hit.extra})
+                }))
+            items.append(GraphEdge("CALLS", cal.label, {"id": cal.id}, hit.label, {"id": hit.eid},
+                                   {"resolution": "external", **hit.extra}))
             continue
         target_id, target_label, extra = hit
         if target_id == cal.id or target_id in emitted:
             continue
         emitted.add(target_id)
-        yield GraphEdge("CALLS", cal.label, {"id": cal.id}, target_label, {"id": target_id},
-                        {"resolution": "name", **extra})
+        items.append(GraphEdge("CALLS", cal.label, {"id": cal.id}, target_label, {"id": target_id},
+                               {"resolution": "name", **extra}))
+    return items, unresolved
 
 
 def _depends_on(source_label: str, source_id: str, type_texts, type_index, skip_type_id: str | None) -> Iterator[GraphEdge]:

@@ -169,11 +169,16 @@ def read_rust_index(writer: GraphWriter, proj_id: str, exclude_keys: set[str], n
         "AND t.id >= $lo AND t.id < $hi RETURN t.id, fld.name, fld.type", {"lo": lo, "hi": hi},
     ).result_set:
         fields_by_tid[str(tid)].append(RawField(name=str(fname), type=str(ftype) if ftype is not None else ""))
-    for tid, label, tname in writer.ro_query(
+    for tid, label, tname, tparams in writer.ro_query(
         f"MATCH (file:File)-[:DEFINES]->(t) WHERE file.id IN $fids AND (t:Struct OR t:Enum OR t:Trait) "
-        f"RETURN DISTINCT t.id, {semantic_label('t')}, t.name", {"fids": seed_file_ids},
+        f"RETURN DISTINCT t.id, {semantic_label('t')}, t.name, t.type_parameters", {"fids": seed_file_ids},
     ).result_set:
-        idx.types.append(resolution.make_type_stub(str(tid), str(label), str(tname), fields_by_tid.get(str(tid), [])))
+        # type_parameters comes back so an emit method on this (generic) receiver flags dynamic dispatch
+        # exactly as a full ingest would -- without it, incremental under-counts unresolved_calls (#792).
+        idx.types.append(resolution.make_type_stub(
+            str(tid), str(label), str(tname), fields_by_tid.get(str(tid), []),
+            [str(p) for p in tparams] if tparams else (),
+        ))
 
     # Free functions defined by the surviving files -> name -> [(func_id, scope_id)] (scope = the
     # HAS_FUNCTION source: a Module or the Project).
