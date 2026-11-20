@@ -101,7 +101,11 @@ def _strip_comments(text: str) -> str:
         if ch == "\\" and quote != "'" and i + 1 < n:  # backslash escapes next char (not inside '...')
             out.append(ch)
             out.append(text[i + 1])
-            prev_ws = False
+            # A `\<newline>` continuation is removed by the shell, so the word boundary from BEFORE the
+            # backslash carries to the joined text (`echo x \<NL># c` -> `# c` is still a comment); any
+            # other escaped char is a literal word char.
+            if text[i + 1] != "\n":
+                prev_ws = False
             i += 2
             continue
         if quote:  # inside a quote: only the matching quote closes it; # is literal
@@ -119,7 +123,7 @@ def _strip_comments(text: str) -> str:
             continue
         else:
             out.append(ch)
-            prev_ws = ch in " \t\n"  # a newline also starts a fresh word boundary
+            prev_ws = ch in " \t\n;&|()"  # whitespace, a newline, OR an unquoted shell operator (`true;# c`)
         i += 1
     return "".join(out)
 

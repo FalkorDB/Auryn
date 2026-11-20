@@ -122,3 +122,15 @@ def test_hash_after_a_multiline_string_is_a_comment():
     # the `"..."` string spans two physical lines; the `#` after it closes is a real comment, not quoted.
     p = _p('  b:\n    steps:\n      - run: |\n          echo "status\n          ready" # docker push fake/x:9\n          docker push shop/api:1.0\n')
     assert p.built_images == ("shop/api:1.0",)
+
+
+def test_backslash_newline_before_a_comment_is_stripped():
+    # `echo ready \` <NL> joins the lines; the space before `\` still starts the `#` comment.
+    p = _p("  b:\n    steps:\n      - run: |\n          echo ready \\\n          # docker push fake/x:9\n          docker push shop/api:1.0\n")
+    assert p.built_images == ("shop/api:1.0",)
+
+
+def test_comment_right_after_a_shell_operator_is_stripped():
+    # `true;# docker push fake` -- `#` after the `;` operator is a comment (no space needed).
+    p = _p("  b:\n    steps:\n      - run: |\n          true;# docker push fake/x:9\n          docker push shop/api:1.0\n")
+    assert p.built_images == ("shop/api:1.0",)
