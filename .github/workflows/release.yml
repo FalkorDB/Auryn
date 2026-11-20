@@ -17,8 +17,12 @@ name: release
 #   3. For projects not yet present on either index, register one pending publisher at a time
 #      with the corresponding settings above. Run this workflow against that index with
 #      `bootstrap_project` set to its project name, then repeat for each remaining project.
-#      Pending publishers sharing one workflow/environment cannot be registered simultaneously,
-#      and their minted tokens only authorize the pending project.
+#      Only one pending publisher per workflow/environment can be registered at a time. Once
+#      used, PyPI merges it into the existing publisher, so the upload token covers every
+#      project with that publisher; `bootstrap_project` keeps the run from uploading the other
+#      projects, which could leave a partial release if some still lack a publisher.
+#      Bootstrap with the real release `version`: PyPI files are immutable, and `skip-existing`
+#      would silently skip a mismatched file for that project in the later full release.
 # Configure appropriate protection rules for the `pypi` and `testpypi` GitHub environments.
 
 on:
@@ -137,11 +141,10 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
-          attestations: false
 
   # Real publish: on a GitHub Release, or manual dispatch with target=pypi.
   publish-pypi:
@@ -156,7 +159,6 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           skip-existing: true
-          attestations: false
