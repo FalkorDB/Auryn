@@ -145,6 +145,63 @@ def resolve_incremental(emit_raws, project_id: str, index: RustGraphIndex) -> li
     return list(_resolve(emit_raws, project_id, seed=index))
 
 
+@dataclass(frozen=True)
+class CallableLocation:
+    """Where a project callable lives, keyed by its graph node id -- the join the deep (rust-analyzer
+    / SCIP) pass needs: SCIP reports a resolved call by (file, line); this maps that back to the fast
+    pass's Function/Method node, and its [line_start, line_end] span attributes a call site to the
+    enclosing callable by containment."""
+
+    id: str
+    label: str  # "Function" | "Method" -- the node label the deep CALLS edge must point at
+    rel_path: str
+    line_start: int  # 1-based inclusive (as RawFunction records them)
+    line_end: int
+    name: str
+
+
+def callable_locations(raw_files, project_id: str) -> list[CallableLocation]:
+    """Every project callable's (graph id, file, 1-based line span, name). Reuses the SAME collection
+    and id functions as `resolve()` so the ids are byte-identical -- deep-pass CALLS edges built from
+    these land on the real nodes the fast pass authored (ids embed only syntactic signatures, never
+    resolved types, so this needs no type inference)."""
+    raw_files = sorted(raw_files, key=lambda rf: _norm(rf.path))
+    c = _Collected()
+    fid_to_path: dict[str, str] = {}
+    for rf in raw_files:
+        fid = ids.file_id(project_id, rf.path)
+        fid_to_path[fid] = _norm(rf.path)
+        ct = cargo.crate_target_for_path(rf.path)
+        cid = ids.crate_id(project_id, ct.package_dir, ct.kind, ct.name)
+        _collect(rf, cid, "Crate", cid, fid, "", c)
+
+    type_index: dict[str, list[_TypeEntry]] = defaultdict(list)
+    for e in c.types:
+        type_index[e.name].append(e)
+
+    out: list[CallableLocation] = []
+
+    def add(node_id: str, label: str, file_id: str, raw) -> None:
+        out.append(CallableLocation(node_id, label, fid_to_path.get(file_id, ""),
+                                    raw.line_start, raw.line_end, raw.name))
+
+    for e in c.types:  # trait-declared methods bind to the Trait itself (mirror of _resolve)
+        if e.kind != "Trait":
+            continue
+        for m in e.raw.trait_methods:
+            add(ids.method_id(e.type_id, m.name, [p.type for p in m.parameters]), "Method", e.file_id, m)
+    for impl_file_id, impl in c.impls:
+        owner = _resolve_target(impl.type_name, type_index)
+        if owner is None:
+            continue
+        for m in impl.methods:
+            add(ids.method_id(owner.type_id, m.name, [p.type for p in m.parameters], trait_name=impl.trait_name),
+                "Method", impl_file_id, m)
+    for scope_id, _scope_label, fid, fn in c.funcs:
+        add(ids.function_id(scope_id, fn.name, [p.type for p in fn.parameters]), "Function", fid, fn)
+    return out
+
+
 def _resolve(raw_files, project_id: str, seed: "RustGraphIndex | None") -> Iterator[GraphNode | GraphEdge]:
     # Stable path order so a symbol DEFINED in several files (multi-binary crates: several
     # crate-root `fn main`) reduces to an order-INDEPENDENT winner -- identical here and in
