@@ -125,9 +125,12 @@ def _span(loc: CallableLocation) -> int:
 class DeepCalls:
     """The result of resolving CALLS from a SCIP index against the fast pass's callables."""
 
-    edges: list[GraphEdge]              # resolved intra-project CALLS (resolution="resolved")
-    seen_by_caller: dict[str, set[str]]  # caller id -> callee simple names SCIP tied to a callable
-    covered_ids: set[str]              # callable ids SCIP actually defined (analyzed) -- the overlay scope
+    edges: list[GraphEdge]                      # resolved intra-project CALLS (resolution="resolved")
+    seen_by_caller: dict[str, set[str]]         # caller id -> callee names SCIP IDENTIFIED (in-source or
+    # external) -- for recomputing unresolved_calls (an ambiguous unresolvable def is NOT counted here)
+    resolved_names_by_caller: dict[str, set[str]]  # caller id -> callee names deep resolved to an IN-SOURCE
+    # edge -- the fast name-CALLS the overlay may safely drop (deep authored a replacement)
+    covered_ids: set[str]                       # callable ids SCIP defined (analyzed) -- the overlay scope
     metrics: dict
 
 
@@ -138,46 +141,44 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepC
     whose fast parse actually called that name, so same-line siblings disambiguate) and resolved to the
     in-source callable the symbol defines (`resolution:"resolved"`). A reference whose symbol isn't
     defined in this project (stdlib / other-crate) is counted but gets no edge -- the fast pass's
-    extern:// placeholder covers it. `covered_ids` are the callables SCIP actually analyzed, so the
-    caller can overlay ONLY those (a feature-gated-out or unlinked callable isn't in the index and keeps
-    its fast resolution). `seen_by_caller` lets the caller recompute unresolved_calls = fast call names
-    minus what SCIP resolved (so a fn-pointer parameter call `f()`, which SCIP ties to a param not a
-    callable, stays counted as unresolved)."""
+    extern:// placeholder covers it. A symbol whose definition the line-only join can't disambiguate
+    (2+ same-named callables on one line) is left UNRESOLVED -- no edge, not counted as identified, and
+    the caller's fast edge to it is kept (not in `resolved_names_by_caller`). `covered_ids` are the
+    callables SCIP analyzed, so the overlay touches only those; `seen_by_caller` drives the
+    unresolved_calls recompute; `resolved_names_by_caller` says which fast name-edges deep replaced."""
     documents = scip.parse_index(scip_bytes)
     by_path: dict[str, list[CallableLocation]] = defaultdict(list)
     for loc in locations:
         by_path[_norm_path(loc.rel_path)].append(loc)
-
-    def define_match(locs, line_1based, name):  # a definition joins to the same-named callable it sits in
-        hits = sorted((loc for loc in locs if loc.line_start <= line_1based <= loc.line_end and loc.name == name),
-                      key=lambda loc: loc.line_end - loc.line_start)
-        if not hits:
-            return None
-        if len(hits) >= 2 and _span(hits[0]) == _span(hits[1]):
-            return None  # ambiguous: 2+ same-named callables on one line (line-only join can't tell them
-            # apart) -> resolve neither, rather than risk a WRONG edge (e.g. B::run stamped as A::run)
-        return hits[0]
 
     def attribute(locs, line_1based, callee_name):  # a reference -> its enclosing CALLER
         hits = [loc for loc in locs if loc.line_start <= line_1based <= loc.line_end]
         # prefer a containing callable that the fast parse saw call this name -- disambiguates callers
         # sharing a line; fall back to innermost so a macro-internal call (no RawCall) still attributes.
         pool = [loc for loc in hits if callee_name in loc.called_names] or hits
-        return min(pool, key=lambda loc: loc.line_end - loc.line_start) if pool else None
+        return min(pool, key=_span) if pool else None
 
     symbol_to_loc: dict[str, CallableLocation] = {}
+    ambiguous_defs: set[str] = set()  # same-line same-name defs we couldn't pin -> leave to the fast pass
     for doc in documents:
         locs = by_path.get(_norm_path(doc.relative_path), [])
         for occ in doc.occurrences:
-            if occ.is_definition and _is_callable_symbol(occ.symbol):
-                match = define_match(locs, occ.start_line + 1, _simple_name(occ.symbol))
-                if match is not None:
-                    symbol_to_loc[occ.symbol] = match
+            if not (occ.is_definition and _is_callable_symbol(occ.symbol)):
+                continue
+            hits = sorted((loc for loc in locs if loc.line_start <= occ.start_line + 1 <= loc.line_end
+                           and loc.name == _simple_name(occ.symbol)), key=_span)
+            if not hits:
+                continue
+            if len(hits) >= 2 and _span(hits[0]) == _span(hits[1]):
+                ambiguous_defs.add(occ.symbol)  # can't tell B::run from A::run on one line -> don't risk it
+            else:
+                symbol_to_loc[occ.symbol] = hits[0]
     covered_ids = {loc.id for loc in symbol_to_loc.values()}
 
     edges: dict[tuple[str, str], GraphEdge] = {}
     seen_by_caller: dict[str, set[str]] = defaultdict(set)
-    metrics = {"resolved": 0, "external": 0, "unattributed": 0}
+    resolved_names_by_caller: dict[str, set[str]] = defaultdict(set)
+    metrics = {"resolved": 0, "external": 0, "ambiguous": 0, "unattributed": 0}
     for doc in documents:
         locs = by_path.get(_norm_path(doc.relative_path), [])
         for occ in doc.occurrences:
@@ -188,13 +189,18 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepC
             if caller is None:
                 metrics["unattributed"] += 1
                 continue
-            seen_by_caller[caller.id].add(callee_name)  # SCIP tied a concrete callable to this call name
             target = symbol_to_loc.get(occ.symbol)
             if target is None:
-                metrics["external"] += 1  # stdlib / other-crate -- fast pass's extern:// edge covers it
+                if occ.symbol in ambiguous_defs:
+                    metrics["ambiguous"] += 1  # NOT identified: counts as unresolved, fast edge kept
+                else:
+                    seen_by_caller[caller.id].add(callee_name)  # identified external (stdlib / other-crate)
+                    metrics["external"] += 1
                 continue
+            seen_by_caller[caller.id].add(callee_name)  # SCIP tied a concrete in-source callable to this call
             if target.id == caller.id:
                 continue  # self-reference / recursion (the fast pass skips self-CALLS too)
+            resolved_names_by_caller[caller.id].add(callee_name)  # deep authored a replacement edge
             key = (caller.id, target.id)
             if key not in edges:
                 edges[key] = GraphEdge(
@@ -202,4 +208,5 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepC
                     {"resolution": "resolved"},
                 )
                 metrics["resolved"] += 1
-    return DeepCalls(list(edges.values()), dict(seen_by_caller), covered_ids, metrics)
+    return DeepCalls(list(edges.values()), dict(seen_by_caller), dict(resolved_names_by_caller),
+                     covered_ids, metrics)

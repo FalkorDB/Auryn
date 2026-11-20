@@ -104,7 +104,7 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
     if engine == "rust_analyzer":
         is_upgrade = current_sha == target_sha and current_depth == "fast"
         deep = _deep_sync_at(writer, source, target_sha, files, proj_id, project_name, repo_uri, ref,
-                             started, is_upgrade=is_upgrade)
+                             started, is_upgrade=is_upgrade, entry_sha=current_sha)
         if deep is not None:
             return deep
         # rust-analyzer unavailable / crate not analyzable -> fall through to the tree-sitter fast pass.
@@ -120,21 +120,32 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
 
 
 def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_name: str, repo_uri: str,
-                  ref: str | None, started: float, *, is_upgrade: bool) -> "SyncStats | None":
+                  ref: str | None, started: float, *, is_upgrade: bool, entry_sha) -> "SyncStats | None":
     """Deep pass: resolve CALLS precisely via rust-analyzer's SCIP index, layered over the fast pass's
     structural subgraph (same node ids). Returns None (caller falls back to tree-sitter) if rust-analyzer
     can't run. The overlay is SURGICAL -- it only touches the callables SCIP actually analyzed
-    (`covered_ids`): their name-based CALLS are replaced with `resolution:"resolved"` edges and their
-    `unresolved_calls` recomputed from what SCIP resolved (so a fn-pointer call `f()` stays counted). A
-    callable SCIP never saw (feature-gated-out / unlinked) keeps its fast resolution untouched. External
-    CALLS are always kept (deep can't author cross-repo; reconcile heals them). `diff_extern_edges=False`
-    on an upgrade leaves the fast pass's extern:// placeholders alone."""
+    (`covered_ids`): a fast name-CALLS is replaced only where deep authored a resolved edge for it (so a
+    call to an unresolvable same-line method keeps its fast edge), and `unresolved_calls` is recomputed
+    from what SCIP resolved (so a fn-pointer call `f()` stays counted). A callable SCIP never saw
+    (feature-gated-out / unlinked) keeps its fast resolution untouched. `diff_extern_edges=False` on an
+    upgrade leaves the fast pass's extern:// placeholders alone."""
     from auryn.ingestors.rust import rust_analyzer
+
+    def moved() -> "str | None":
+        # the graph moved off the revision we started from (a concurrent ingest, e.g. deep="background"
+        # on a sibling writer) -> our result is stale. Compare against ENTRY, not target: a direct A->B
+        # deep sync legitimately still reads A here (we haven't written B yet).
+        live = writer.get_property("Project", {"id": proj_id}, "commit_sha")
+        return str(live) if live is not None and live != entry_sha else None
 
     try:
         with source.working_tree(target_sha) as workdir:  # on-disk cargo checkout rust-analyzer needs
             scip_bytes = rust_analyzer.run_scip(str(workdir))
     except rust_analyzer.RustAnalyzerUnavailable as exc:
+        # Don't roll a newer concurrent revision back to this one via the fast fallback: no-op if moved.
+        live = moved()
+        if live is not None:
+            return SyncStats(commit_sha=live, elapsed_seconds=time.monotonic() - started)
         logger.warning("rust deep pass unavailable (%s); falling back to tree-sitter", exc)
         return None
 
@@ -145,30 +156,32 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
                         for cid in deep.covered_ids}
     project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "deep")
 
-    def make_target():
-        items: list = [project_node]
+    def make_target():  # a GENERATOR (not a materialized list) -- preserves stream_apply's bounded memory
+        yield project_node
         for item in resolution.resolve(files, proj_id):
             if _is_name_calls_edge(item):
-                if item.from_key["id"] in deep.covered_ids:
-                    continue  # deep re-authors this covered callable's calls; drop the name guess
-                items.append(item)  # uncovered caller (not in the SCIP index): keep its fast resolution
+                frm = item.from_key["id"]
+                callee = loc_by_id.get(item.to_key["id"])
+                # drop a fast name-edge ONLY where deep authored a replacement for that call -- so an
+                # edge to an unresolved/ambiguous target (deep couldn't resolve it) is preserved.
+                if (frm in deep.covered_ids and callee is not None
+                        and callee.name in deep.resolved_names_by_caller.get(frm, set())):
+                    continue
+                yield item
             elif _is_callable_node(item) and item.key["id"] in unresolved_by_id:
-                items.append(_set_unresolved(item, unresolved_by_id[item.key["id"]]))
+                yield _set_unresolved(item, unresolved_by_id[item.key["id"]])
             else:
-                items.append(item)  # structure, external CALLS, and uncovered callables pass through
-        items.extend(deep.edges)
-        return iter(items)
+                yield item  # structure, external CALLS, uncovered callables pass through
+        yield from deep.edges
 
-    # Background-race guard (deep="background" runs on a sibling writer): if another ingest advanced the
-    # graph to a different commit while rust-analyzer ran, discard this now-stale revision. Return a
-    # NO-OP SyncStats (not None): None would make sync_at fall back to the fast pass and apply this stale
-    # revision's graph over the newer one. (Narrows but doesn't fully close the write-time TOCTOU -- a
-    # transactional conditional write is a shared two-phase concern for a follow-up.)
-    live_sha = writer.get_property("Project", {"id": proj_id}, "commit_sha")
-    if live_sha is not None and live_sha != target_sha:
+    # Freshness guard before the write (see `moved`): discard a stale revision rather than clobber a
+    # newer one. Narrows but doesn't fully close the write-time TOCTOU -- a transactional conditional
+    # write is a shared two-phase concern for a follow-up.
+    live = moved()
+    if live is not None:
         logger.warning("rust deep pass: graph moved to %s while analyzing %s; discarding stale result",
-                       live_sha, target_sha)
-        return SyncStats(commit_sha=str(live_sha), elapsed_seconds=time.monotonic() - started)
+                       live, target_sha)
+        return SyncStats(commit_sha=live, elapsed_seconds=time.monotonic() - started)
 
     result = _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(files),
                     diff_extern_edges=not is_upgrade)
