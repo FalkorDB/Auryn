@@ -87,6 +87,33 @@ def test_read_fingerprints_scopes_by_id_prefix(graph):
     assert edge_fps[expected_edge_key] == fingerprint({})
 
 
+def test_read_fingerprints_never_reads_a_sibling_project(graph):
+    """`python://api` is a string prefix of `python://api2/...`. The read owns the project id and
+    the ids that continue it at a `/` or `.` boundary -- a top-level `<proj>.func.f()` as much as
+    a `<proj>/file/...` -- and nothing of a sibling whose name merely starts with it."""
+    writer = GraphWriter(graph)
+    writer.merge_node(GraphNode("Project", {"id": "python://api"}, {"name": "api"}))
+    writer.merge_node(GraphNode("Class", {"id": "python://api/a"}, {"name": "A"}))
+    writer.merge_node(GraphNode("Class", {"id": "python://api.class.top"}, {"name": "Top"}))
+    writer.merge_edge(GraphEdge("HAS_CLASS", "Project", {"id": "python://api"}, "Class", {"id": "python://api/a"}))
+    # the sibling: same shape, a longer name, plus an edge into it that isn't `api`'s to diff
+    writer.merge_node(GraphNode("Project", {"id": "python://api2"}, {"name": "api2"}))
+    writer.merge_node(GraphNode("Class", {"id": "python://api2/a"}, {"name": "A"}))
+    writer.merge_edge(GraphEdge("HAS_CLASS", "Project", {"id": "python://api2"}, "Class", {"id": "python://api2/a"}))
+    writer.merge_edge(GraphEdge("EXTENDS", "Class", {"id": "python://api/a"}, "Class", {"id": "python://api2/a"}))
+
+    node_fps, edge_fps = writer.read_fingerprints("python://api", ["Project", "Class"])
+
+    assert set(node_fps) == {
+        node_key(GraphNode("Project", {"id": "python://api"}, {})),
+        node_key(GraphNode("Class", {"id": "python://api/a"}, {})),
+        node_key(GraphNode("Class", {"id": "python://api.class.top"}, {})),
+    }
+    assert set(edge_fps) == {
+        edge_key(GraphEdge("HAS_CLASS", "Project", {"id": "python://api"}, "Class", {"id": "python://api/a"}))
+    }
+
+
 def test_setup_schema_raises_resultset_size(graph):
     """FalkorDB's RESULTSET_SIZE config defaults to 10000 and silently truncates
     any query result past that many rows -- confirmed empirically (a 15000-row
@@ -120,7 +147,63 @@ def test_read_fingerprints_reads_past_falkordbs_default_resultset_size_cap(graph
     assert set(node_fps) == expected_keys
 
 
-def test_subgraph_fingerprint_queries_plan_as_an_index_scan_not_a_full_scan(graph):
+def test_read_fingerprints_never_reads_a_project_whose_name_continues_at_a_dot(graph):
+    """`Acme.Core` and `Acme.Core.Tests` are two projects, yet every id of the second continues
+    the first at a `.` -- shaped just like `Acme.Core`'s own top-level `<proj>.class.x`. The
+    second's Project node is what tells them apart: what it owns is left out, and `Acme.Core`'s
+    own dotted ids are still read."""
+    writer = GraphWriter(graph)
+    core, tests = "csharp://Sol/Acme.Core", "csharp://Sol/Acme.Core.Tests"
+    for pid in (core, tests):
+        writer.merge_node(GraphNode("Project", {"id": pid}, {"name": pid.rsplit("/", 1)[1]}))
+        writer.merge_node(GraphNode("Class", {"id": f"{pid}/ns/A"}, {"name": "A"}))
+        writer.merge_node(GraphNode("Class", {"id": f"{pid}.class.Top"}, {"name": "Top"}))
+        writer.merge_edge(GraphEdge("HAS_CLASS", "Project", {"id": pid}, "Class", {"id": f"{pid}/ns/A"}))
+    # an edge into the other project isn't `Acme.Core`'s to diff either
+    writer.merge_edge(GraphEdge("EXTENDS", "Class", {"id": f"{core}/ns/A"}, "Class", {"id": f"{tests}/ns/A"}))
+
+    for pid in (core, tests):
+        node_fps, edge_fps = writer.read_fingerprints(pid, ["Project", "Class"])
+
+        assert set(node_fps) == {
+            node_key(GraphNode("Project", {"id": pid}, {})),
+            node_key(GraphNode("Class", {"id": f"{pid}/ns/A"}, {})),
+            node_key(GraphNode("Class", {"id": f"{pid}.class.Top"}, {})),
+        }
+        assert set(edge_fps) == {
+            edge_key(GraphEdge("HAS_CLASS", "Project", {"id": pid}, "Class", {"id": f"{pid}/ns/A"}))
+        }
+
+
+def test_read_fingerprints_leaves_out_a_nested_project_created_while_it_reads(graph, monkeypatch):
+    """Another session ingests `Acme.Core.Tests` for the first time while `Acme.Core` resyncs. The
+    nested Project ids are looked up AFTER each read's rows, so a project whose nodes a read
+    returned is already known to be someone else's -- looked up before the reads, its nodes came
+    back as `Acme.Core`'s leftovers, to be deleted."""
+    writer, other = GraphWriter(graph), GraphWriter(graph)
+    core, tests = "csharp://Sol/Acme.Core", "csharp://Sol/Acme.Core.Tests"
+    writer.merge_node(GraphNode("Project", {"id": core}, {"name": "Acme.Core"}))
+    writer.merge_node(GraphNode("Class", {"id": f"{core}/ns/A"}, {"name": "A"}))
+    ro_query = graph.ro_query
+
+    def a_sibling_appears_before_the_first_read(query, *args, **kwargs):
+        if "_fingerprint" in query and not other.node_exists("Project", tests):
+            # its Project node first, as every sync writes it
+            other.merge_node(GraphNode("Project", {"id": tests}, {"name": "Acme.Core.Tests"}))
+            other.merge_node(GraphNode("Class", {"id": f"{tests}/ns/A"}, {"name": "A"}))
+        return ro_query(query, *args, **kwargs)
+
+    monkeypatch.setattr(graph, "ro_query", a_sibling_appears_before_the_first_read)
+
+    node_fps, _ = writer.read_fingerprints(core, ["Project", "Class"])
+
+    assert set(node_fps) == {
+        node_key(GraphNode("Project", {"id": core}, {})),
+        node_key(GraphNode("Class", {"id": f"{core}/ns/A"}, {})),
+    }
+
+
+def test_subgraph_fingerprint_queries_plan_as_a_label_scan_not_a_full_scan(graph):
     """An earlier, unlabeled version of these queries (`MATCH (n) WHERE
     n.id STARTS WITH ...`) planned as "All Node Scan" regardless of the WHERE
     clause -- FalkorDB's indexes are per-label, so an unlabeled match can't
@@ -128,18 +211,21 @@ def test_subgraph_fingerprint_queries_plan_as_an_index_scan_not_a_full_scan(grap
     GRAPH.EXPLAIN) to be why a real git_sync diff against dotnet/aspnetcore timed
     out: at real scale (multiple relationship types, hundreds of thousands of
     edges) an unindexed full scan's cost climbed past FalkorDB's default 1000ms
-    query timeout. This asserts the fix (querying per-label, so the range index
-    setup_schema() creates on each label's `id` actually gets used) rather than
-    just trusting the Cypher text looks right."""
+    query timeout. This asserts the fix (querying per-label, so only that label's
+    nodes are ever visited) rather than just trusting the Cypher text looks right.
+
+    It is a label scan with an exact id filter, not a range-index scan: the range
+    `[prefix, prefix + chr(0xFFFF))` is not a project boundary and FalkorDB 4.x
+    answers it wrongly for mixed-case ids (see graph_client._owned_ids)."""
     writer = GraphWriter(graph)
     writer.setup_schema([NodeSchema(label="Class")])
 
-    node_plan = str(graph.explain(_node_fingerprint_query("Class"), {"lo": "a", "hi": "b"}))
-    assert "Node By Index Scan" in node_plan
+    node_plan = str(graph.explain(_node_fingerprint_query("Class"), {"own": "a", "sub": "a/", "dot": "a."}))
+    assert "Node By Label Scan" in node_plan
     assert "All Node Scan" not in node_plan
 
-    edge_plan = str(graph.explain(_edge_fingerprint_query("Class"), {"lo": "a", "hi": "b", "prefix": "a"}))
-    assert "Node By Index Scan" in edge_plan
+    edge_plan = str(graph.explain(_edge_fingerprint_query("Class"), {"own": "a", "sub": "a/", "dot": "a."}))
+    assert "Node By Label Scan" in edge_plan
     assert "All Node Scan" not in edge_plan
 
 
@@ -220,12 +306,12 @@ def test_null_valued_edge_property_round_trips_through_compute_delta_correctly(g
     node, so this needs its own test rather than assuming node behavior carries
     over."""
     writer = GraphWriter(graph)
-    writer.merge_nodes([GraphNode("Column", {"id": "p://a"}, {}), GraphNode("Column", {"id": "p://b"}, {})])
-    key = edge_key(GraphEdge("REFERENCES", "Column", {"id": "p://a"}, "Column", {"id": "p://b"}))
+    writer.merge_nodes([GraphNode("Column", {"id": "p://db/a"}, {}), GraphNode("Column", {"id": "p://db/b"}, {})])
+    key = edge_key(GraphEdge("REFERENCES", "Column", {"id": "p://db/a"}, "Column", {"id": "p://db/b"}))
 
     def _references(constraint_name):
         return GraphEdge(
-            "REFERENCES", "Column", {"id": "p://a"}, "Column", {"id": "p://b"},
+            "REFERENCES", "Column", {"id": "p://db/a"}, "Column", {"id": "p://db/b"},
             {"constraint_name": constraint_name, "on_delete": "CASCADE"},
         )
 
@@ -233,7 +319,7 @@ def test_null_valued_edge_property_round_trips_through_compute_delta_correctly(g
     stored = graph.query("MATCH ()-[r:REFERENCES]->() RETURN properties(r)").result_set[0][0]
     assert "constraint_name" not in stored
 
-    _, fps_v1 = writer.read_fingerprints("p://", ["Column"])
+    _, fps_v1 = writer.read_fingerprints("p://db", ["Column"])
 
     delta = compute_delta({}, fps_v1, [_references(None)])
     assert delta.edges_to_upsert == []  # unnamed FK re-synced unchanged: no spurious update
@@ -244,14 +330,14 @@ def test_null_valued_edge_property_round_trips_through_compute_delta_correctly(g
     stored_named = graph.query("MATCH ()-[r:REFERENCES]->() RETURN properties(r)").result_set[0][0]
     assert stored_named["constraint_name"] == "fk_1"
 
-    _, fps_v2 = writer.read_fingerprints("p://", ["Column"])
+    _, fps_v2 = writer.read_fingerprints("p://db", ["Column"])
     delta = compute_delta({}, fps_v2, [_references(None)])
     assert len(delta.edges_to_upsert) == 1
     writer.apply_delta(delta)
     stored_unnamed_again = graph.query("MATCH ()-[r:REFERENCES]->() RETURN properties(r)").result_set[0][0]
     assert "constraint_name" not in stored_unnamed_again
 
-    _, fps_v3 = writer.read_fingerprints("p://", ["Column"])
+    _, fps_v3 = writer.read_fingerprints("p://db", ["Column"])
     assert fps_v3[key] == fps_v1[key]
 
 
@@ -390,9 +476,8 @@ def test_apply_delta_stamps_the_commit_last(graph, monkeypatch):
 # -- stream_apply: memory-bounded streaming counterpart to compute_delta + apply_delta --
 #
 # Ids are realistic project-prefixed ids (`plsql://Proj...`), not toy ones: read_fingerprints
-# scopes each label by a prefix range whose upper bound is `prefix + chr(0xFFFF)` (see
-# _prefix_range), and that sentinel range only behaves against ids of the shape every ingestor
-# actually emits.
+# reads exactly what the project owns -- its id and the ids that continue it at a `/` or `.`
+# boundary (see graph_client._owned_ids) -- so a toy id that isn't shaped that way is never read.
 
 _STREAM_LABELS = ["Class", "Method"]
 _P = "plsql://Proj"  # id prefix passed to stream_apply / read_fingerprints
@@ -588,3 +673,43 @@ def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(
         return nodes, edges
 
     assert dump(graph) == dump(reference_graph)
+
+
+@pytest.mark.parametrize("name, sibling", [
+    ("api", "api2"), ("api", "api.tests"), ("api", "api/core"), ("api.", "api.2"), ("django", "Flask"), ("Flask", "django"),
+])
+def test_stream_apply_leaves_a_sibling_project_alone(graph, name, sibling):
+    """Two projects share a graph and one name is a prefix of the other (`api` / `api2`),
+    continues it at a dot (`api` / `api.tests`, as in `Acme.Core` / `Acme.Core.Tests`) or at a
+    slash (`api` / `api/core`, as in a C# project `Sol` next to solution `Sol`'s project `Core`),
+    does so after a name that itself ends in a dot (`api.` / `api.2`), or differs in letter case
+    (`django` / `Flask`: FalkorDB 4.x answers an indexed id range wrongly for those). Resyncing
+    the first after it drops two classes must remove those only -- every node and edge of the
+    sibling was read back as the first one's own leftovers, and deleted."""
+    writer = GraphWriter(graph)
+    writer.setup_schema([NodeSchema("Project"), NodeSchema("Class")])
+
+    def project(name, classes):
+        # ids continue the project id both ways real ingestors do: `<proj>/file/...`-style ("/")
+        # and a top-level `<proj>.class.x` (".") -- e.g. a C++ class outside any namespace.
+        pid = f"cpp://{name}"
+        items = [GraphNode("Project", {"id": pid}, {"name": name})]
+        for cls in classes:
+            cid = f"{pid}.class.{cls}" if cls.startswith("top") else f"{pid}/namespace/geo.class.{cls}"
+            items.append(GraphNode("Class", {"id": cid}, {"name": cls}))
+            items.append(GraphEdge("HAS_CLASS", "Project", {"id": pid}, "Class", {"id": cid}))
+        return items
+
+    labels = ["Project", "Class"]
+    stream_apply(writer, f"cpp://{name}", labels, _fresh(project(name, ["a", "gone", "top", "top_gone"])))
+    stream_apply(writer, f"cpp://{sibling}", labels, _fresh(project(sibling, ["a", "top"])))
+
+    stats, _, _ = stream_apply(writer, f"cpp://{name}", labels, _fresh(project(name, ["a", "top"])))
+
+    # the two dropped classes (one of each id shape) and their HAS_CLASS edges -- nothing else
+    assert (stats.nodes_added, stats.nodes_removed, stats.edges_removed) == (0, 2, 2)
+    theirs = f"cpp://{sibling}"
+    assert graph.query("MATCH (n) WHERE n.id STARTS WITH $p RETURN n.id ORDER BY n.id", {"p": theirs}).result_set == [
+        [theirs], [f"{theirs}.class.top"], [f"{theirs}/namespace/geo.class.a"],
+    ]
+    assert graph.query("MATCH (:Project {id: $p})-[r:HAS_CLASS]->() RETURN count(r)", {"p": theirs}).result_set == [[2]]
