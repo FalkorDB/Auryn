@@ -64,7 +64,7 @@ Source = GitRepoCache | LocalDirectorySource
 #                   agent can start querying the shallow graph immediately. A one-shot CLI
 #                   would exit before it finishes, so CLI stays on "inline".
 #   "off"        -- fast phase only; leave the graph shallow.
-DEEP_MODES = ("inline", "background", "off")
+DEEP_MODES = ("inline", "background", "async", "off")
 
 # Background deep passes started by this process (daemon threads). join_deep_phase() awaits
 # them -- optional for a server, used by tests and any caller that must not exit early.
@@ -689,6 +689,23 @@ def _run_deep_phase(
             deep_status[lang.language] = "background"
         logger.info("Deep phase upgrading in the background for: %s", names)
         return deep_results, deep_status
+
+    if deep == "async":
+        # Hand the deep pass to the detached deepen daemon so it SURVIVES this (possibly one-shot CLI)
+        # process exiting -- unlike "background"'s in-process thread. The daemon re-runs the ingest with
+        # deep="inline" (the fast phase short-circuits), upgrading the graph in place. Falls back to
+        # inline when there's no re-ingestable local dir (a remote-URI ingest with no checkout), no
+        # graph name, or the platform can't host the daemon (needs the configured backend + fcntl).
+        from auryn.core.deepen.daemon import daemon_supported, request_deepen
+
+        local_dir = _source_local_dir(source, source_uri)
+        graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
+        if local_dir and graph_name and daemon_supported():
+            request_deepen(graph_name, local_dir, project_name)
+            logger.info("Deep phase queued to the background deepen daemon for: %s", names)
+            return deep_results, {lang.language: "async" for lang in to_deepen}
+        logger.info("Deep async unavailable (no local dir / graph / daemon); running inline for: %s", names)
+        # fall through to the inline path below
 
     # "inline" (default): run each deep upgrade now, synchronously.
     for lang in to_deepen:

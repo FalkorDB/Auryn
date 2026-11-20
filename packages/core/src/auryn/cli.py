@@ -219,6 +219,17 @@ def embed_daemon() -> None:
     run_embed_daemon()
 
 
+@cli.command("deepen-daemon", hidden=True)
+def deepen_daemon() -> None:
+    """Internal: the background deep-analysis worker. Normally spawned detached by an ingest whose
+    deep mode is `async` (see deepen.daemon); it drains the request queue, re-running each repo's
+    ingest with deep=inline (the fast phase short-circuits), and self-terminates once the queue goes
+    idle. Run directly to debug."""
+    from auryn.core.deepen.daemon import run_deepen_daemon
+
+    run_deepen_daemon()
+
+
 def _render_impact(report: dict) -> None:
     """Human-readable rendering of an impact_of_diff report."""
     syms = report.get("changed_symbols", [])
@@ -898,11 +909,13 @@ def _validate_hook_names(names) -> None:
 
 
 _DEEP_OPTION = click.option(
-    "--deep", type=click.Choice(["inline", "background", "off"]), default="inline",
-    help="Deep semantic pass for two-phase languages (Python via Jedi, C# via Roslyn): "
-         "inline=fast then deep, synchronous (default); off=fast structural only (much quicker on "
-         "large repos, no .NET SDK needed for C#); background=return on the fast graph, deepen in a "
-         "thread (long-lived processes only).",
+    "--deep", type=click.Choice(["inline", "background", "async", "off"]), default="inline",
+    help="Deep semantic pass for two-phase languages (Python via Jedi, C# via Roslyn, Rust via "
+         "rust-analyzer): inline=fast then deep, synchronous (default); async=return on the fast "
+         "graph, deepen in a detached daemon that survives this process exiting (recommended for a "
+         "slow deep engine); off=fast structural only (much quicker on large repos); "
+         "background=deepen in an in-process thread (long-lived processes only -- a one-shot CLI "
+         "would kill it; use async instead).",
 )
 
 
