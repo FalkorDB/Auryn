@@ -253,6 +253,9 @@ def ingest_repository(
         started=started,
         auto_install=auto_install,
         deep=deep,
+        # A git repo is pinned to `ref` (a bare-clone cache, not the working tree); the daemon's
+        # working-tree replay would index HEAD + uncommitted changes instead, so never async here.
+        async_eligible=False,
         embed=embed,
         enrichment_only=enrichment_only,
         enrichment_skip=enrichment_skip,
@@ -321,6 +324,9 @@ def ingest_directory(
         started=started,
         auto_install=auto_install,
         deep=deep,
+        # async's daemon replays `ingest_directory(local_dir, deep="inline")` with DEFAULT filters and
+        # no solution wrapper -- so it faithfully reproduces this ingest only when those are default.
+        async_eligible=file_filter.is_empty() and not solution_name,
         embed=embed,
         enrichment_only=enrichment_only,
         enrichment_skip=enrichment_skip,
@@ -379,6 +385,7 @@ def _ingest_from_source(
     started: float,
     auto_install: bool | None = None,
     deep: str = "async",
+    async_eligible: bool = True,
     embed: str | None = None,
     enrichment_only: tuple[str, ...] = (),
     enrichment_skip: tuple[str, ...] = (),
@@ -455,7 +462,8 @@ def _ingest_from_source(
 
     # PHASE 2 (deep): upgrade two-phase languages whose fast pass succeeded, per `deep`.
     to_deepen = [lang for lang, _ in present if lang.is_two_phase() and fast[lang.language][1] is None]
-    deep_results, deep_status = _run_deep_phase(writer, source, target_sha, to_deepen, deep, *ctx)
+    deep_results, deep_status = _run_deep_phase(writer, source, target_sha, to_deepen, deep, *ctx,
+                                                async_eligible=async_eligible)
 
     # A C/C++ cleanup sync (above) deletes a now-fileless language's symbols but leaves its Project node,
     # which a full recompute of the same state never creates. Sweep a c:// / cpp:// Project that has NO
@@ -679,9 +687,15 @@ def _run_deep_phase(
     solution_name: str | None,
     ref: str | None,
     cache_root: Path | None,
+    async_eligible: bool = True,
 ) -> tuple[dict[str, LanguageIngestResult], dict[str, str]]:
     """Second, deeper pass over the two-phase languages whose fast pass succeeded. Returns
-    (deep_results, deep_status) keyed by language. See DEEP_MODES for the `deep` values."""
+    (deep_results, deep_status) keyed by language. See DEEP_MODES for the `deep` values.
+
+    `async_eligible` is False when the daemon's replay (`ingest_directory(local_dir, deep="inline")`)
+    couldn't faithfully reproduce THIS ingest -- a git ref-pinned source (replay would index the
+    working tree's HEAD), non-default source filters, or a solution_name (both change the file set /
+    node ids). Then async downgrades to inline rather than deepen a different graph."""
     deep_results: dict[str, LanguageIngestResult] = {}
     deep_status: dict[str, str] = {}
     if not to_deepen:
@@ -713,12 +727,12 @@ def _run_deep_phase(
 
         local_dir = _source_local_dir(source, source_uri)
         graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
-        if local_dir and graph_name and daemon_supported() and _daemon_can_reach(writer):
+        if async_eligible and local_dir and graph_name and daemon_supported() and _daemon_can_reach(writer):
             request_deepen(graph_name, local_dir, project_name)
             logger.info("Deep phase queued to the background deepen daemon for: %s", names)
             return deep_results, {lang.language: "async" for lang in to_deepen}
-        logger.info("Deep async unavailable (no local dir / graph / daemon / embedded backend); "
-                    "running inline for: %s", names)
+        logger.info("Deep async unavailable (ref-pinned/filtered/solution source, no local dir / graph / "
+                    "daemon, or embedded backend); running inline for: %s", names)
         # fall through to the inline path below
 
     # "inline" (default): run each deep upgrade now, synchronously.

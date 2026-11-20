@@ -36,6 +36,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -92,12 +93,14 @@ def is_daemon_running() -> bool:
 
 
 # -- producer side: enqueue + ensure ----------------------------------------------------------
-def _request_path(graph_name: str) -> Path:
-    """A stable, filesystem-safe request filename per graph, so repeated requests for the same graph
-    coalesce to one queue entry. blake2b (not the salted builtin hash) so DIFFERENT producer processes
-    map the same graph to the same filename -- that's what makes cross-process coalescing work."""
-    safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in graph_name) or "graph"
-    digest = hashlib.blake2b(graph_name.encode("utf-8"), digest_size=4).hexdigest()
+def _request_path(graph_name: str, project_name: str | None = None) -> Path:
+    """A stable, filesystem-safe request filename per (graph, project), so repeated requests for the
+    same repo coalesce to one queue entry -- but DISTINCT repos sharing a graph (MCP indexes several
+    into one) keep separate entries and both get deepened. blake2b (not the salted builtin hash) so
+    DIFFERENT producer processes map the same repo to the same filename (cross-process coalescing)."""
+    key = f"{graph_name}\x00{project_name or ''}"
+    safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in f"{graph_name}.{project_name or 'repo'}") or "graph"
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=5).hexdigest()
     return deepen_requests_dir() / f"{safe}.{digest}.json"
 
 
@@ -114,8 +117,10 @@ def request_deepen(graph_name: str, local_dir: str, project_name: str | None = N
     overwrites the first, so a burst of resyncs doesn't pile up queue entries."""
     requests = deepen_requests_dir()
     requests.mkdir(parents=True, exist_ok=True)
-    target = _request_path(graph_name)
-    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")  # per-process temp -> atomic publish
+    target = _request_path(graph_name, project_name)
+    # per-process AND per-thread temp name -> no two concurrent writers clobber each other's
+    # half-written file before the atomic rename publishes it.
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     payload: dict[str, str] = {"graph": graph_name, "local_dir": local_dir}
     if project_name:
         payload["project_name"] = project_name
@@ -133,11 +138,13 @@ def ensure_deepen_daemon() -> bool:
     if is_daemon_running():
         return True
     deepen_dir().mkdir(parents=True, exist_ok=True)
-    log = open(deepen_log_path(), "ab")  # noqa: SIM115 -- handed to the detached child
-    subprocess.Popen(
-        [sys.executable, "-m", "auryn", "deepen-daemon"],
-        stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True,
-    )
+    # Open in a `with` so the PARENT always releases its copy of the fd (even if Popen raises); the
+    # detached child keeps its own dup'd fd for stdout/stderr.
+    with open(deepen_log_path(), "ab") as log:
+        subprocess.Popen(
+            [sys.executable, "-m", "auryn", "deepen-daemon"],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True,
+        )
     logger.info("Spawned background deepen daemon")
     return True
 
@@ -266,22 +273,23 @@ def _process_request(req: Path, client, attempts: dict[str, int]):
         inflight.unlink(missing_ok=True)
         return client
 
+    key = req.name  # retry accounting per (graph, project) request, not per graph (repos share graphs)
     try:
         client = client or _connect()
         _deepen(client, graph_name, local_dir, project_name)
         inflight.unlink(missing_ok=True)
-        attempts.pop(graph_name, None)
+        attempts.pop(key, None)
     except Exception:
-        attempts[graph_name] = attempts.get(graph_name, 0) + 1
-        n = attempts[graph_name]
+        attempts[key] = attempts.get(key, 0) + 1
+        n = attempts[key]
         if n < _MAX_ATTEMPTS:
-            logger.exception("Deepening graph %r failed (attempt %d/%d); will retry", graph_name, n, _MAX_ATTEMPTS)
+            logger.exception("Deepening %r failed (attempt %d/%d); will retry", key, n, _MAX_ATTEMPTS)
             with contextlib.suppress(OSError):
                 os.replace(inflight, req)  # re-queue for the next pass
         else:
-            logger.exception("Deepening graph %r failed %d times; dropping request", graph_name, n)
+            logger.exception("Deepening %r failed %d times; dropping request", key, n)
             inflight.unlink(missing_ok=True)
-            attempts.pop(graph_name, None)
+            attempts.pop(key, None)
         client = None  # a DB error may have poisoned the client -- re-resolve next time
     return client
 
@@ -289,15 +297,34 @@ def _process_request(req: Path, client, attempts: dict[str, int]):
 def _deepen(client, graph_name: str, local_dir: str, project_name: str | None) -> None:
     """Run the deep pass for one repo by re-running its ingest with deep="inline" against the already
     fast-built graph -- the fast phase short-circuits (same sha + depth=fast), so only the deep upgrade
-    does work. Embedding stays on its own background daemon (embed is handled by the ingest tail)."""
+    does work. Held under the per-repo `sync_lock` (as the CLI/MCP/hook syncs are), so a concurrent
+    resync can't interleave with the delta read+write. Raises on a deep-phase error so the caller
+    retries (ingest_directory reports an error on the LanguageReport rather than raising)."""
     from auryn.core.graph_client import GraphWriter
     from auryn.core.ingest import ingest_directory
+    from auryn.core.project import resolve_project_root
+    from auryn.core.sync_lock import sync_lock
 
     if not Path(local_dir).is_dir():
         logger.warning("Deepen skipped for %r: local dir %s no longer exists", graph_name, local_dir)
         return
     writer = GraphWriter(client.select_graph(graph_name))
-    report = ingest_directory(writer, local_dir, project_name=project_name, deep="inline")
+    # The daemon reconnects to the CONFIGURED backend (_connect). If the producer ingested against a
+    # DIFFERENT backend (a library caller's custom server; the embedded-DB case is already filtered out
+    # before enqueue), the configured backend has no such project -- re-ingesting here would wrongly
+    # build a full graph on the wrong server. So only deepen a project the fast pass already put here;
+    # a mismatch (or a since-deleted graph) is a safe no-op.
+    if project_name and not writer.ro_query(
+        "MATCH (p:Project {name: $n}) RETURN 1 LIMIT 1", {"n": project_name}
+    ).result_set:
+        logger.warning("Deepen skipped for %r/%r: no matching project on the configured backend "
+                       "(stale request, deleted graph, or a non-configured backend)", graph_name, project_name)
+        return
+    with sync_lock(resolve_project_root(local_dir), queue_one=False):
+        report = ingest_directory(writer, local_dir, project_name=project_name, deep="inline")
+    errored = [r.language for r in report.languages if r.deep_status == "error"]
+    if errored:  # surface as a failure so _process_request's bounded retry kicks in
+        raise RuntimeError(f"deep pass errored for {graph_name!r}: {', '.join(errored)}")
     deepened = sum(1 for r in report.languages if r.deep_status == "inline")
     logger.info("Deepened graph %r (%s): %d language(s) upgraded", graph_name, local_dir, deepened)
 

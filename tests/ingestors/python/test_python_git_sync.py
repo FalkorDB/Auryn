@@ -203,6 +203,10 @@ def test_deep_async_default_downgrades_to_inline_on_embedded_backend(graph):
     # The default is deep="async", but a detached daemon can't reach this in-process embedded DB, so
     # it downgrades to inline: the fast (ast) pass runs, then the deep (jedi) pass upgrades the same
     # nodes in place -- ending at the full jedi graph, synchronously, exactly as deep="inline" would.
+    from auryn.core.ingest import _daemon_can_reach
+
+    if _daemon_can_reach(GraphWriter(graph)):  # a server backend WOULD queue to the daemon; skip that path
+        pytest.skip("server backend: async queues to the deepen daemon, not the embedded-downgrade path")
     report = ingest.ingest_directory(GraphWriter(graph), str(_SAMPLE), project_name="demo")
 
     py = next(r for r in report.languages if r.language == "python")

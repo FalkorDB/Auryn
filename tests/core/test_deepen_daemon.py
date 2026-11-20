@@ -40,10 +40,24 @@ class _Report:
     languages: list
 
 
+class _FakeResult:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
 class _FakeClient:
+    def __init__(self, project_exists=True):
+        self._exists = project_exists  # what the project-presence guard in _deepen sees
+
     def select_graph(self, name):
+        exists = self._exists
+
         class _G:
             _name = name
+
+            def ro_query(self, cypher, params=None):  # the daemon's "is this project here?" check
+                return _FakeResult([[1]] if exists else [])
+
         return _G()
 
 
@@ -118,12 +132,13 @@ def test_process_request_retries_then_drops(monkeypatch, tmp_path):
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("deep engine down")))
     monkeypatch.setattr(daemon, "_connect", lambda: _FakeClient())
     req = _enqueue_raw("g-flaky", str(tmp_path))
+    key = req.name  # retry accounting is per (graph, project) request, not per graph name
     attempts: dict = {}
     for n in range(1, daemon._MAX_ATTEMPTS):
         daemon._process_request(req, client=None, attempts=attempts)
-        assert attempts["g-flaky"] == n and req.exists()  # re-queued
+        assert attempts[key] == n and req.exists()  # re-queued
     daemon._process_request(req, client=None, attempts=attempts)
-    assert not req.exists() and "g-flaky" not in attempts  # dropped after _MAX_ATTEMPTS
+    assert not req.exists() and key not in attempts  # dropped after _MAX_ATTEMPTS
 
 
 @pytest.mark.parametrize("payload", ["not json{", "[]", '{"graph": 1}', '{"graph": "g"}', '{"local_dir": "/x"}'])
@@ -179,3 +194,36 @@ def test_run_deepen_daemon_is_single_flight():
     finally:
         fcntl.flock(held, fcntl.LOCK_UN)
         held.close()
+
+
+def test_repos_sharing_a_graph_keep_separate_requests(tmp_path):
+    # MCP can index several repos into ONE graph; each must keep its own pending deep request so one
+    # doesn't overwrite another's (coalescing is per (graph, project), not per graph).
+    daemon.request_deepen("shared", str(tmp_path / "a"), "proj-a")
+    daemon.request_deepen("shared", str(tmp_path / "b"), "proj-b")
+    daemon.request_deepen("shared", str(tmp_path / "a"), "proj-a")  # same repo again -> coalesces
+    files = list(deepen_requests_dir().glob("*.json"))
+    assert len(files) == 2
+    projs = {json.loads(f.read_text())["project_name"] for f in files}
+    assert projs == {"proj-a", "proj-b"}
+
+
+def test_process_request_retries_on_reported_deep_error(monkeypatch, tmp_path):
+    # ingest_directory returns NORMALLY with deep_status="error" (it records errors, doesn't raise);
+    # the daemon must treat that as a failure so the request retries, not silently drop it as success.
+    monkeypatch.setattr(ingest_mod, "ingest_directory", lambda *a, **k: _Report(languages=[_Lang("error")]))
+    monkeypatch.setattr(daemon, "_connect", lambda: _FakeClient())
+    req = _enqueue_raw("g-deeperr", str(tmp_path))
+    daemon._process_request(req, client=None, attempts={})
+    assert req.exists() and not req.with_suffix(".inflight").exists()  # re-queued, not dropped
+
+
+def test_process_request_skips_when_project_absent_on_backend(monkeypatch, tmp_path):
+    # The daemon connects to the CONFIGURED backend; if the project isn't there (a library caller used a
+    # different server backend, or the graph was deleted), it must NOT full-ingest a graph there -- no-op.
+    spy = []
+    monkeypatch.setattr(ingest_mod, "ingest_directory", lambda *a, **k: spy.append(1))
+    req = _enqueue_raw("g-absent", str(tmp_path))
+    daemon._process_request(req, client=_FakeClient(project_exists=False), attempts={})
+    assert spy == []                     # never full-ingested on the wrong backend
+    assert not req.exists()              # claim cleared (not a retryable failure)
