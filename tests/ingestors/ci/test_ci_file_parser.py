@@ -65,3 +65,19 @@ def test_malformed_yaml_is_invalid():
 def test_name_defaults_to_empty_when_absent():
     p = parse_workflow("on: [push]\njobs:\n  b:\n    steps:\n      - run: echo hi\n")
     assert p.valid and p.name == "" and p.built_images == ()
+
+
+def test_push_with_flags_skips_them():
+    p = _p("  b:\n    steps:\n      - run: docker push --quiet shop/api:1.0\n")
+    assert p.built_images == ("shop/api:1.0",)
+
+
+def test_dynamic_tag_substitution_is_skipped():
+    assert _p("  b:\n    steps:\n      - run: docker build -t shop/api:`date` .\n").built_images == ()
+    assert _p("  b:\n    steps:\n      - run: docker build -t shop/api:$(git rev-parse HEAD) .\n").built_images == ()
+
+
+def test_dash_t_in_another_command_is_not_a_build_tag():
+    # a `-t` from a non-build command in the same run block must not be captured as a build tag
+    p = _p("  b:\n    steps:\n      - run: |\n          docker build -t shop/api:1.0 .\n          tar -t archive.tar\n")
+    assert p.built_images == ("shop/api:1.0",)

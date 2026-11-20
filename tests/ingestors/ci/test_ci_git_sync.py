@@ -62,3 +62,13 @@ def test_repo_with_no_workflows_is_not_ingested(graph, tmp_path):
     q = _ingest(graph, tmp_path, {"config.yml": "foo: bar\n", "k8s/deploy.yaml": "apiVersion: v1\nkind: Pod\n"})
     assert q("MATCH (p:Project {name:'shop'}) RETURN count(p)") == [[0]]
     assert q("MATCH (r:Resource) RETURN count(r)") == [[0]]
+
+
+def test_nested_workflow_subdir_is_ignored(graph, tmp_path):
+    # GitHub reads only DIRECT children of .github/workflows/; a nested file is not a workflow
+    q = _ingest(graph, tmp_path, {
+        ".github/workflows/build.yml": _WF,
+        ".github/workflows/archive/old.yml": _WF.replace("shop/api:1.0", "old/x:1"),
+    })
+    assert q("MATCH (r:Resource) RETURN count(r)") == [[1]]
+    assert q("MATCH (i:Image) WHERE i.ref CONTAINS 'old/x' RETURN count(i)") == [[0]]

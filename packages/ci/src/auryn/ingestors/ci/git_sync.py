@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import posixpath
 import time
 from dataclasses import dataclass
 
@@ -51,19 +52,28 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
 
     parsed = []
     for path, blob_sha in sorted(source.list_files_glob(target_sha, _FILE_GLOBS, set(_EXCLUDED_DIR_NAMES))):
-        try:
-            pw = parse_workflow(source.read_blob(blob_sha))
-        except Exception:
-            # KNOWN LIMITATION (tier-wide): a failed read drops it, so the recompute removes its nodes.
-            logger.warning("failed to read workflow %s (its nodes are removed this sync)", path, exc_info=True)
+        # GitHub reads only the DIRECT children of `.github/workflows/`; fnmatch's `*` crosses `/`, so
+        # drop a nested `.github/workflows/archive/x.yml` that the path glob let through.
+        if not posixpath.dirname(path).endswith(".github/workflows"):
             continue
+        # A read failure ABORTS the sync (propagates) rather than silently dropping the workflow and
+        # stamping target_sha -- otherwise a transient failure removes its nodes and a same-SHA retry
+        # short-circuits past the loss ("don't mark an incomplete read as a successful sync").
+        pw = parse_workflow(source.read_blob(blob_sha))
         if pw.valid:
             parsed.append((path, pw))
 
     # Gate the empty-sync phantom guard on the Project NODE existing, not on `commit_sha` (an interrupted
     # resync can clear `commit_sha` while leaving nodes, which must still be cleaned up).
-    if not parsed and not writer.node_exists("Project", proj_id):
+    project_exists = writer.node_exists("Project", proj_id)
+    if not parsed and not project_exists:
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
+
+    # Cleanup path (every workflow removed): invalidate the marker BEFORE applying the empty target, so a
+    # partially-applied delete (edges gone, nodes not) can't leave a Project still carrying `target_sha`
+    # that a same-SHA retry would short-circuit past -- the retry re-runs the cleanup instead.
+    if not parsed and project_exists:
+        writer.query("MATCH (p:Project {id:$id}) SET p.commit_sha = null", {"id": proj_id})
 
     project_node = GraphNode(
         "Project", {"id": proj_id},

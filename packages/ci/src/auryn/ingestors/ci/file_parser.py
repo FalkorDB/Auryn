@@ -14,12 +14,14 @@ import yaml
 
 from auryn.ingestors.ci.model import ParsedWorkflow
 
-# A `docker build`/`buildx build` command in a run script (so a stray `-t` in another command is ignored).
+# A `docker build`/`buildx build` command (matched per-command, so a stray `-t` in another command in
+# the same `run:` block is ignored).
 _HAS_BUILD = re.compile(r"docker\s+(?:buildx\s+)?build\b", re.I)
 _BUILD_TAG = re.compile(r"(?:^|\s)(?:-t|--tag)[=\s]+(\S+)")
-_PUSH = re.compile(r"docker\s+push\s+(\S+)", re.I)
-# A tag component that can't appear in a literal image ref (a `${{ }}` expression or shell metachar).
-_IMAGE_FORBIDDEN = frozenset("${}()<>|&;\"' \t")
+_PUSH = re.compile(r"docker\s+push\s+(.+)", re.I)
+# Characters that can't appear in a LITERAL image ref: a `${{ }}`/shell variable, a `$(...)`/backtick
+# command substitution, or a shell metacharacter. A tag carrying one is dynamic -> not keyed on the hub.
+_IMAGE_FORBIDDEN = frozenset("${}()<>|&;`\"' \t")
 
 
 def _scalar(v) -> str:
@@ -58,6 +60,14 @@ def _split_tags(tags) -> list[str]:
     return [t.strip().strip("\"'") for t in items if t.strip()]
 
 
+def _first_non_flag(args: str) -> str:
+    """The first argument that isn't a `-flag` -- the image in `docker push [--flag ...] <image>`."""
+    for tok in args.split():
+        if not tok.startswith("-"):
+            return tok
+    return ""
+
+
 def _images_from_step(step: dict) -> list[str]:
     out: list[str] = []
     uses = _scalar(step.get("uses"))
@@ -67,10 +77,17 @@ def _images_from_step(step: dict) -> list[str]:
             out += _split_tags(with_.get("tags"))
     run = _scalar(step.get("run"))
     if run:
-        if _HAS_BUILD.search(run):
-            out += [m.group(1).strip("\"'") for m in _BUILD_TAG.finditer(run)]
-        out += [m.group(1).strip("\"'") for m in _PUSH.finditer(run)]
-    return out
+        # per COMMAND (split on shell separators), so a `-t` or `push` only counts inside its own
+        # `docker build`/`docker push` -- not a `-t` from an unrelated command in the same block.
+        for cmd in re.split(r"&&|\|\||;|\n", run):
+            if _HAS_BUILD.search(cmd):
+                out += [m.group(1) for m in _BUILD_TAG.finditer(cmd)]
+            pm = _PUSH.search(cmd)
+            if pm:
+                img = _first_non_flag(pm.group(1))  # skip `docker push --quiet <image>` flags
+                if img:
+                    out.append(img)
+    return [t.strip().strip("\"'") for t in out if t.strip()]
 
 
 def parse_workflow(data: str | bytes) -> ParsedWorkflow:
