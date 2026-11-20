@@ -333,16 +333,17 @@ def _agents_md_block(server_command: list[str]) -> str:
     cmd = " ".join(server_command)
     body = f"""## Auryn (MCP server: `{_SERVER_NAME}`)
 
-This repository can be indexed into a queryable **code graph** exposed by the `{_SERVER_NAME}` MCP
-server (start command: `{cmd}`). For any *structural* question about the codebase -- where a symbol
-is defined, who calls it / what it calls, the path between two symbols, or the blast radius of a
-change -- **query the code graph first** instead of grepping and reading whole files. One query
-returns the precise answer with node ids, at a fraction of the tokens.
+This repository is indexed into a queryable **code graph** served by the `{_SERVER_NAME}` MCP server
+(start command: `{cmd}`). For structural questions -- where a symbol is defined, who calls it, what
+it calls, how two symbols connect, what a change breaks -- query the graph instead of grepping.
 
-Typical flow: `auryn_status` -> `index_repository(path=".")` if it reports no data ->
-`locate(name=...)` to turn a symbol name into its id -> answer with the smallest tool that fits
-(`who_calls`, `callees`, `find_path`, `impact_of`, `trace_entrypoint`, `get_context`). Cite the
-node id the graph returns as your evidence.
+Start with `locate(name=...)` (or `search_code(query=...)` if you don't know the name), then pivot on
+the returned `id` with `who_calls`, `callees`, `get_context`, `find_path`, `impact_of` or
+`trace_entrypoint`. Answers already carry evidence: `file_path` and `line_start`/`line_end` on every
+symbol, and on every call edge the call `lines` plus `sites` (the code on each line).
+**Cite that file:line evidence directly**; `get_context(id, lines="a-b")` returns exact source lines.
+Open a file only for lines the answer does not show. If a query returns nothing, `auryn_status` says
+whether the graph has data (`index_repository(path=".")` builds it).
 
 Agents that read this file but do not speak MCP (e.g. Aider) still benefit: prefer the graph's
 structural view over ad-hoc file spelunking when reasoning about the code."""

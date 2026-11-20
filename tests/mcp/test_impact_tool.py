@@ -34,7 +34,7 @@ def _seed(graph):
 
 def test_impact_of_diff_tool_from_raw_diff(falkordb_connection, graph):
     _seed(graph)
-    server = create_server(falkordb_connection, graph.name)
+    server = create_server(falkordb_connection, graph.name, tools="all")
     content = _call_tool(server, "impact_of_diff", {"diff": DIFF}).structured_content
 
     assert content["graph"] == graph.name
@@ -50,7 +50,7 @@ def test_impact_of_diff_tool_from_raw_diff(falkordb_connection, graph):
 
 def test_impact_of_diff_tool_empty_diff(falkordb_connection, graph):
     _seed(graph)
-    server = create_server(falkordb_connection, graph.name)
+    server = create_server(falkordb_connection, graph.name, tools="all")
     content = _call_tool(server, "impact_of_diff", {"diff": ""}).structured_content
     assert content["impact"]["total_affected"] == 0
     assert "hint" in content

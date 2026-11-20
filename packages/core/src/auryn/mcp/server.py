@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import os
 import threading
 import time
 from typing import Any
@@ -40,44 +41,22 @@ from auryn.core.project import resolve_project_root
 from auryn.core.sync_lock import sync_lock
 
 INSTRUCTIONS = """\
-Curated tools over the FalkorDB **code graphs** built by the `auryn` project across every
-installed language plugin (currently C, C++, C#, Python, Java, Go, Rust, TypeScript/JavaScript,
-Ruby, PHP, Kotlin, Swift, Julia, Bash, and PL/SQL). Prefer these over reading/grepping files
-for structural questions --
-"where is X", "who calls X", "what does X call", "what breaks if X changes", "trace a
-request into the code" -- because one query returns the precise answer with ids instead
-of pulling whole files into context.
+Code-graph tools over FalkorDB (C, C++, C#, Python, Java, Go, Rust, TS/JS, Ruby, PHP, Kotlin,
+Swift, Julia, Bash, PL/SQL). Use them instead of grepping for structural questions: where is X,
+who calls X, what does X call, what breaks if X changes, what does this endpoint do.
 
-Typical workflow:
-  1. `auryn_status` -- is there a graph for this repo yet, and what's in it?
-  2. If empty, `index_repository(path=".")` to build it (local dir; `ingest_repository`
-     for a git URL). Indexing is a one-time cost; queries afterward are cheap.
-  3. Find your starting symbol, then pivot on the `id` it returns (every other tool takes
-     the internal `id`, never a display name):
-       - `locate(name=...)` when you know the name (case-insensitive substring).
-       - `search_code(query=...)` when you DON'T -- semantic/vector search by meaning
-         ("where do we validate eligibility"). Requires embeddings (`auryn embed`).
-
-WORKING ACROSS GRAPHS. One instance holds many graphs, and a graph can hold several repos.
-Every tool takes an optional `graph=<name>` -- omit it to use the session default, or pass a
-name to act on any other graph WITHOUT restarting the server. `list_graphs` shows every graph
-(and the repos each holds) so you can pick one; `use_graph(<name>)` changes the default so you
-don't have to repeat `graph=` on every call. Co-locate repos that belong to one system in a
-single graph (that's what resolves cross-repo calls into real edges) by indexing them with the
-same `graph=`; give an unrelated repo its own graph name.
-  4. Answer the question with the smallest tool that fits: `who_calls`, `callees`,
-     `find_path` (does X reach Y, and how -- any edge type, or `edge_types=["CALLS"]`
-     for a call chain), `get_context` (1-hop + source), `impact_of` (change blast
-     radius), `trace_entrypoint` (full call-closure of an entry point end-to-end, incl.
-     web endpoints).
-  5. `get_schema` (labels/edge-types/counts) and `run_cypher` (arbitrary READ-ONLY
-     Cypher) are the escape hatch for anything custom.
-
-Model notes: nodes are keyed by an internal `id`. Python endpoints (APIEndpoint +
-EXPOSES_ENDPOINT, from route decorators) and C# endpoints are both entry points for
-`trace_entrypoint`. Line numbers are present on C# (and where a parser propagated
-them); some ingestors carry a file path and/or full `source` text instead. Check
-`truncated` on traversal results before treating them as complete.
+How to use:
+  1. Start with `locate(name=...)` (or `search_code(query=...)` if you don't know the name).
+     `locate` results give `file_path`, `line_start`/`line_end` and `signature`; a `search_code`
+     hit gives `id`, `qualified_name` and a `snippet` -- call `get_context` on its `id` before
+     citing a location.
+  2. Pivot on the returned `id`: `who_calls` / `callees` (each edge carries call `lines` and
+     `sites` = {line, code}), `get_context` (compact view; `lines='a-b'` for exact source lines),
+     `find_path`, `impact_of`, `trace_entrypoint`.
+  3. Cite the file:line evidence these answers give directly. Open a file only for lines the
+     answer doesn't show.
+If a query returns nothing, `auryn_status` tells you whether the graph has data (and
+`index_repository(path=".")` builds it). Check `truncated` before treating a list as complete.
 """
 
 _NOT_FOUND = "no node with id {node_id!r} in graph {graph_name!r} -- call locate() first to find a valid id"
@@ -85,6 +64,12 @@ _NOT_FOUND = "no node with id {node_id!r} in graph {graph_name!r} -- call locate
 _EMPTY_HINT = (
     "this graph is empty -- call list_graphs() to see the other graphs on this instance, then pass "
     "graph=<name> to any tool (or use_graph(<name>)) to work in one that already holds data"
+)
+# The same hint when list_graphs/use_graph are hidden by the tool profile (never point an agent at
+# a tool it can't see).
+_EMPTY_HINT_AGENT = (
+    "this graph is empty -- build it with index_repository(path='.'), or pass graph=<name> to query "
+    "another graph on this instance"
 )
 
 _SNIPPET_CHARS = 280
@@ -97,7 +82,28 @@ def _snippet(hit: dict) -> str:
     return text[:_SNIPPET_CHARS]
 
 
-def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None) -> MCPServer:
+# Tool profiles (AURYN_MCP_TOOLS). Every advertised tool's definition is sent to the agent on EVERY
+# request, so the default exposes only what agents use to answer code questions; the graph-admin
+# and escape-hatch tools come back with AURYN_MCP_TOOLS=all.
+AGENT_TOOLS = frozenset({
+    "auryn_status", "index_repository", "locate", "search_code", "get_context", "who_calls",
+    "callees", "find_path", "impact_of", "trace_entrypoint",
+})
+EXTRA_TOOLS = frozenset({"list_graphs", "use_graph", "ingest_repository", "get_schema", "impact_of_diff", "run_cypher"})
+TOOL_PROFILES = {"agent": AGENT_TOOLS, "all": AGENT_TOOLS | EXTRA_TOOLS}
+TOOLS_ENV = "AURYN_MCP_TOOLS"
+
+
+def tool_profile(name: str | None = None) -> frozenset[str]:
+    """The tool names a profile exposes: `name`, else $AURYN_MCP_TOOLS, else "agent". An unknown
+    profile name raises (a typo must not silently hide or expose tools)."""
+    name = (name or os.environ.get(TOOLS_ENV) or "agent").strip().lower()
+    if name not in TOOL_PROFILES:
+        raise ValueError(f"{TOOLS_ENV}={name!r} is not a tool profile; use one of {sorted(TOOL_PROFILES)}")
+    return TOOL_PROFILES[name]
+
+
+def create_server(client: FalkorDB, graph_name: str, tools: str | None = None, *, embed: str | None = None) -> MCPServer:
     """Builds the MCP server with a DEFAULT binding to `graph_name` on `client`.
 
     Graph selection is per-operation: every tool takes an optional `graph` argument naming the
@@ -115,6 +121,10 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
     state = {"name": default_name}  # the session default; use_graph mutates it
 
     server = MCPServer(name="auryn", instructions=INSTRUCTIONS, version="0.2.0")
+    exposed = tool_profile(tools)
+    graph_listing_hint = ("call list_graphs() to see what's available" if "list_graphs" in exposed
+                          else "check the graph name (AURYN_MCP_TOOLS=all adds list_graphs)")
+    empty_hint = _EMPTY_HINT if "list_graphs" in exposed else _EMPTY_HINT_AGENT
 
     read_only = ToolAnnotations(read_only_hint=True)
     writes = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=True)
@@ -131,9 +141,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         if name is None:
             name = state["name"]
         elif name != state["name"] and name not in graphs and name not in set(client.list_graphs()):
-            raise ValueError(
-                f"no graph named {name!r} on this instance -- call list_graphs() to see what's available"
-            )
+            raise ValueError(f"no graph named {name!r} on this instance -- {graph_listing_hint}")
         return _handle(name), name
 
     def _write_graph(name: str | None) -> tuple[Any, str]:
@@ -160,6 +168,8 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         register = server.tool(annotations=annotations, **tool_kwargs)
 
         def decorate(fn):
+            if fn.__name__ not in exposed:
+                return fn  # hidden by the tool profile: defined, never registered/advertised
             @functools.wraps(fn)
             def wrapper(*args, **kwargs):
                 start = time.monotonic()
@@ -185,36 +195,22 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
 
     @tool(read_only, "read")
     def auryn_status(graph: str | None = None) -> dict[str, Any]:
-        """Is there a code graph yet? Returns `has_data`, total `node_count`, per-label counts, and
-        the git-tracked `projects` already indexed. Call this first -- if `has_data` is false, index
-        the repo (or switch to a graph that has data). `graph` picks which graph to report on
-        (default: the session default); `list_graphs` shows every graph on the instance."""
+        """Does the graph have data? Returns `has_data`, node counts and the indexed `projects`. Only needed if a query comes back empty. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
         status = gq.graph_status(g)
         out = {"graph": gname, **status}
         if not status.get("has_data"):
-            out["hint"] = _EMPTY_HINT
+            out["hint"] = empty_hint
         return out
 
     @tool(read_only, "read")
     def list_graphs() -> dict[str, Any]:
-        """Every code graph on this FalkorDB instance and the repositories each one REPRESENTS
-        -- a graph can hold a single repo or several indexed together. `current` marks the session
-        default (the graph tools use when you omit `graph=`); pass `graph=<name>` to any tool, or
-        `use_graph(<name>)`, to act on a different one. Per graph you get its `name`, `node_count`,
-        and `repositories` (each `{name, repo_uri, depth, base_commit}`).
-
-        Read this to decide where a new repo belongs: co-locating related repos in one graph (index
-        them with the same `graph=`) is what lets cross-repo calls resolve into real edges; an
-        unrelated repo is better off under its own graph name."""
+        """Every graph on this instance with the repositories each holds; `current` is the session default. Co-locate related repos in one graph so cross-repo calls resolve."""
         return gq.graphs_overview(client, current=state["name"])
 
     @tool(read_only, "read")
     def use_graph(name: str) -> dict[str, Any]:
-        """Change the session DEFAULT graph to `name` (must already exist on this instance) so
-        subsequent tools act on it without an explicit `graph=` argument. This is a convenience over
-        passing `graph=` every call -- it changes nothing in any graph. Returns the new default's
-        status. Call `list_graphs` to see the available names."""
+        """Set the session default graph to an existing `name` (saves passing `graph=` on every call). Changes nothing in any graph."""
         if name not in graphs and name not in set(client.list_graphs()):
             raise ValueError(
                 f"no graph named {name!r} on this instance -- call list_graphs() to see what's available"
@@ -226,33 +222,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
     def index_repository(
         path: str = ".", project_name: str | None = None, deep: str = "inline", graph: str | None = None
     ) -> dict[str, Any]:
-        """Build (or update) the code graph for a LOCAL repository directory -- no git
-        required. Auto-detects every installed language plugin (currently C, C++, C#, Python,
-        Java, Go, Rust, TypeScript/JavaScript, Ruby, PHP, Kotlin, Swift, Julia, Bash, PL/SQL)
-        and ingests all their files, returning a per-language report. Re-running derives a precise
-        delta (unchanged = no-op, changed file = minimal update). `project_name` defaults to
-        the directory name. This is the one-time setup an agent does before querying.
-
-        `graph` picks the target graph (default: the session default). Indexing an additional repo
-        into the SAME graph ADDS it alongside the existing ones -- do that when the repos belong to
-        one system (they call each other / share a runtime): co-locating them is exactly what makes
-        cross-repo references resolve into real CALLS/impact edges. For an UNRELATED repo, pass a
-        NEW `graph=<name>` -- an unknown name is created on write, so you get a dedicated, scoped
-        graph without launching a separate server. Call `list_graphs` first to see what exists.
-
-        `deep` controls the second, deeper pass for the languages that have one (Python via
-        Jedi, C# via Roslyn) -- a fast structural pass first, then inferred types + resolved calls:
-          - "inline" (default): return only when the graph is fully deep. Simplest; use it
-            unless you want to start querying sooner.
-          - "background": return as soon as the fast graph is ready and deepen it in the
-            background -- you can query immediately (types/call edges land shortly after).
-            The graph reports its state per project as `depth` = "fast" then "deep".
-          - "off": fast graph only (shallow types).
-
-        Same effect as the CLI `ingest`: after building the graph this registers the repo and
-        sets up whatever resync trigger you chose at install time (`commit` -> git hooks, `save`
-        -> folder watcher, `manual` -> nothing), reported back under `resync`. So a repo an agent
-        indexes stays fresh on later commits/saves exactly as one indexed from the CLI would."""
+        """Build or update the graph for a LOCAL directory (`path`, default '.'); re-running applies only the delta. Use `graph=` to add a related repo to the same graph (cross-repo calls resolve) or a new name to isolate it. `deep`: 'inline' (default), 'background', or 'off'. `graph` picks the graph (default: the session default)."""
         g, gname = _write_graph(graph)
         # Its turn among this repo's hook / watcher syncs, which write the same project subgraph
         # (core/sync_lock.py).
@@ -280,18 +250,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         repo_uri: str, ref: str | None = None, project_name: str | None = None,
         deep: str = "inline", graph: str | None = None
     ) -> dict[str, Any]:
-        """Like `index_repository`, but clones a GIT repository first (`repo_uri` is a path or
-        any URI git understands; `ref` picks a branch/tag/commit). Use this for a remote repo;
-        use `index_repository` for the working directory you're already in. `deep`
-        ("inline"|"background"|"off") works exactly as in `index_repository`.
-
-        The same graph selection applies: `graph` targets an existing graph to EXTEND (co-locate a
-        related repo so cross-repo references resolve) or a NEW name to ISOLATE (created on write).
-        Call `list_graphs` first.
-
-        Like `index_repository`, it then wires the install-time resync trigger and reports it
-        under `resync` -- but only a LOCAL path has a working tree to attach to; a remote clone
-        has none, so `resync` will note that (clone locally to get commit/save resync)."""
+        """Like `index_repository` but clones a git `repo_uri` first (`ref` picks a branch/tag/commit). `graph` picks the graph (default: the session default)."""
         g, gname = _write_graph(graph)
         try:
             report = ingest.ingest_repository(GraphWriter(g), repo_uri, ref=ref, project_name=project_name, deep=deep, embed=embed)
@@ -307,35 +266,13 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
 
     @tool(read_only, "read")
     def locate(name: str, kind: str | None = None, limit: int = 20, graph: str | None = None) -> dict[str, Any]:
-        """Find symbols by name (case-insensitive substring), optionally filtered by `kind`
-        (a node label: "Function", "Method", "Class", "Module", "APIEndpoint", "Table", ...).
-        Returns each match's `id`, `label`, `name`, and properties -- feed a result's `id`
-        into the other tools. This is name search, not semantic/vector search. `graph` picks which
-        graph to search (default: the session default)."""
+        """Find symbols by name (case-insensitive substring), optionally by `kind` (Function, Method, Class, ...). Each result has its `id`, `file_path`, `line_start`/`line_end` and `signature` -- cite them directly, and pass the `id` to the other tools. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
-        return {"graph": gname, "name": name, "kind": kind, "results": gq.search_nodes(g, kind, name, limit)}
+        return {"graph": gname, "name": name, "kind": kind, "results": gq.locate_nodes(g, kind, name, limit)}
 
     @tool(read_only, "read")
     def search_code(query: str, k: int = 10, mode: str = "hybrid", graph: str | None = None) -> dict[str, Any]:
-        """Find code by MEANING and/or NAME -- the retrieval complement to `locate`. Describe what
-        you want in natural language ("where do we validate user eligibility", "retry logic for
-        database connections"); results are the nearest callables/types.
-
-        `mode`:
-          - "hybrid" (default) -- fuse a lexical (BM25 over name+doc) and a vector (semantic)
-            ranker via Reciprocal Rank Fusion. Best overall: keyword precision + meaning recall.
-          - "semantic" -- vector only (pure meaning).
-          - "lexical" -- full-text only (keywords; needs no embedding model).
-
-        Each result has `id` (feed into `get_context`/`who_calls`/`callees` to pivot into the
-        structure), `kind`, `name`, `qualified_name`, a `snippet`, and `score` -- results are
-        already ordered best-first, so prefer order over the raw score (its scale differs by
-        mode). Use this as the ENTRY POINT when you don't know the symbol's name; use `locate`
-        when you do. `graph` picks which graph to search (default: the session default).
-
-        Needs an embed pass (`auryn embed`) for hybrid/semantic. Degrades gracefully: hybrid
-        falls back to lexical if the model is unavailable and to vector if there's no full-text
-        index; empty `results` come with a `hint`."""
+        """Find code by meaning or keywords when you don't know the name (`mode`: hybrid/semantic/lexical). Results carry `id`, `qualified_name` and a `snippet`. Semantic modes need `auryn embed`. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
         writer = GraphWriter(g)
         rp = ("name", "qualified_name", "doc", "source")
@@ -369,30 +306,22 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         if not results:
             out["hint"] = (
                 "no results -- build the index with `auryn embed` (hybrid/semantic need it), "
-                "or fall back to locate()/get_schema()."
+                "or fall back to locate()."
             )
         return out
 
     @tool(read_only, "read")
-    def get_context(node_id: str, graph: str | None = None) -> dict[str, Any]:
-        """A bounded context package for one node: its own properties (incl. `source` text
-        where captured) plus its immediate 1-hop neighbours in both directions. Sized for one
-        LLM context window -- use the traversal tools for anything deeper. `graph` picks which
-        graph the id lives in (default: the session default)."""
+    def get_context(node_id: str, lines: str | None = None, graph: str | None = None) -> dict[str, Any]:
+        """One node, compactly: `file_path`, `line_start`/`line_end`, `signature`, short `doc`, a numbered `preview` of its first lines, and its callers/callees with call sites (file:line + code). Pass `lines='120-160'` to get exactly those numbered source lines instead of opening the file. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
-        result = gq.neighbors(g, node_id)
+        result = gq.context_view(g, node_id, lines)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
         return {"graph": gname, **result}
 
     @tool(read_only, "read")
     def get_schema(graph: str | None = None) -> dict[str, Any]:
-        """The graph's META-MODEL, so you understand its STRUCTURE before querying: node
-        labels (with counts), edge types, the actual `(FromLabel)-[TYPE]->(ToLabel)` patterns
-        present (the schema graph -- e.g. `(Method)-[CALLS]->(Method)`,
-        `(Class)-[EXTENDS]->(Class)`), and the property keys each label carries. Read this
-        first to know which traversal answers a question, or to write a correct `run_cypher`.
-        `graph` picks which graph to describe (default: the session default)."""
+        """The graph's labels, edge types, `(From)-[TYPE]->(To)` patterns and property keys -- read before writing `run_cypher`. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
         return {"graph": gname, **gq.graph_schema(g)}
 
@@ -400,9 +329,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
 
     @tool(read_only, "read")
     def who_calls(node_id: str, max_depth: int = gq.DEFAULT_CALL_DEPTH, graph: str | None = None) -> dict[str, Any]:
-        """Who CALLS this function/method (inward), within `max_depth` hops (1 = direct
-        callers). The answer to "what uses X / who depends on X's behavior". `graph` picks which
-        graph the id lives in (default: the session default)."""
+        """Who calls this function/method, within `max_depth` hops (1 = direct). Each edge gives the caller's `file`, every call `lines` and up to 3 `sites` ({line, code}) -- cite these as file:line evidence. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
         result = gq.callers(g, node_id, max_depth)
         if result is None:
@@ -411,9 +338,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
 
     @tool(read_only, "read")
     def callees(node_id: str, max_depth: int = gq.DEFAULT_CALL_DEPTH, graph: str | None = None) -> dict[str, Any]:
-        """What this function/method CALLS (outward), within `max_depth` hops (1 = direct
-        callees). The answer to "what does X do / what does X depend on". `graph` picks which
-        graph the id lives in (default: the session default)."""
+        """What this function/method calls, within `max_depth` hops (1 = direct). Each edge gives the `file`, call `lines` and up to 3 `sites` ({line, code}) in the caller. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
         result = gq.callees(g, node_id, max_depth)
         if result is None:
@@ -429,14 +354,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         edge_types: list[str] | None = None,
         graph: str | None = None,
     ) -> dict[str, Any]:
-        """The shortest path between two nodes (<= `max_depth` hops) -- "does X reach Y, and
-        how". `edge_types` scopes which relationships to traverse: omit it to connect them
-        over ANY edge type (e.g. a Method to a Table, a Class to an APIEndpoint), or pass
-        e.g. `["CALLS"]` for a pure call chain. `directed` follows edge direction
-        from_id->...->to_id; set it false to connect them regardless of which way the arrows
-        point (more likely to find something). Returns the ordered `nodes` and the connecting
-        `edges` (each with its real direction and type); `found` is false if no path exists
-        within the bound. `graph` picks which graph the ids live in (default: the session default)."""
+        """Shortest path from `from_id` to `to_id` (<= `max_depth` hops) -- does X reach Y, and how. `edge_types=['CALLS']` for a pure call chain; `directed=false` to ignore arrow direction. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
         result = gq.shortest_path(g, from_id, to_id, max_depth, directed, edge_types)
         if result is None:
@@ -452,11 +370,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         limit: int = gq.DEFAULT_TRAVERSAL_LIMIT,
         graph: str | None = None,
     ) -> dict[str, Any]:
-        """Change-impact traversal from one node over "uses" edges (default CALLS/DEPENDS_ON/
-        READS/WRITES/REFERENCES), up to `max_depth` hops (1-10). `direction`: "downstream"
-        (what this could break), "upstream" (what could force this to change), or "both".
-        Broader than who_calls/callees (multiple edge types); use it for "blast radius".
-        `graph` picks which graph the id lives in (default: the session default)."""
+        """Blast radius of changing one node over CALLS/DEPENDS_ON/READS/WRITES/REFERENCES. `direction`: 'downstream' (what it could break), 'upstream', or 'both'. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
         result = gq.impact_of(g, node_id, direction, max_depth, edge_types, limit)
         if result is None:
@@ -471,16 +385,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         max_depth: int = 4,
         graph: str | None = None,
     ) -> dict[str, Any]:
-        """"What will this change break?" -- the blast radius of a DIFF (a whole PR/commit at
-        once), not a single node. Provide a git range (`base`, optionally `head`), OR raw
-        unified-diff text in `diff`, OR omit all three to use the working tree's uncommitted
-        changes. Maps the changed LINES to graph symbols, then returns the reverse-dependency
-        closure: `changed_symbols`, and under `impact` the `direct_callers` + `transitive`
-        dependents, `api_endpoints_reached`, `tests_covering`, `cross_service_consumers` (other
-        repos co-located in this graph), and `affected` (every dependent with its node `id`, to
-        pivot via who_calls/get_context). `flags` calls out cross-service breaks and missing test
-        coverage; `unmapped_files` are changed files with no graph symbols (config/docs). Use this
-        in code review before merging. `graph` picks which graph to resolve against."""
+        """Blast radius of a whole diff: a git range (`base`/`head`), raw `diff` text, or (omit all) the uncommitted changes. Returns changed symbols, callers, endpoints and tests reached. `graph` picks the graph (default: the session default)."""
         from auryn.core import impact as impact_mod
 
         g, gname = _read_graph(graph)
@@ -503,12 +408,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         entry_id: str, max_depth: int | None = None, limit: int = gq.DEFAULT_TRAVERSAL_LIMIT,
         graph: str | None = None,
     ) -> dict[str, Any]:
-        """What does this entry point actually do, end to end? Returns its full call-closure --
-        every function reachable via CALLS -- plus any tables those functions read or write. Pass
-        a function/method, a Procedure/Function, or an APIEndpoint (an endpoint resolves to its
-        handler first, so "what does this route do end-to-end" works). Unbounded by default
-        (completeness is the point); check `truncated`. `graph` picks which graph the id lives in
-        (default: the session default)."""
+        """Everything an entry point (function, method or APIEndpoint) reaches via CALLS, plus tables read/written. Check `truncated`. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
         result = gq.trace_entrypoint(g, entry_id, max_depth, limit)
         if result is None:
@@ -519,12 +419,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
 
     @tool(read_only, "read")
     def run_cypher(query: str, graph: str | None = None) -> dict[str, Any]:
-        """Run an arbitrary READ-ONLY Cypher query (FalkorDB rejects any write clause). For
-        questions the curated tools don't cover. Call `get_schema` first to see the labels and
-        edge types. Returns matched graph entities as {nodes, edges} for a graph view, AND
-        `columns`/`rows` -- the tabular result set -- so projections and aggregations that aren't
-        graph entities (`RETURN e.route, count(*)`) come back too. `graph` picks which graph to
-        query (default: the session default)."""
+        """Run any READ-ONLY Cypher query; returns {nodes, edges} plus `columns`/`rows`. Call `get_schema` first. `graph` picks the graph (default: the session default)."""
         g, gname = _read_graph(graph)
         return {"graph": gname, **gq.run_read_query(g, query)}
 

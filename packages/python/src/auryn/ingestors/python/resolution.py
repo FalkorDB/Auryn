@@ -98,6 +98,12 @@ class _Index:
         self.callable_by_qname: dict[str, tuple[str, str]] = {}  # qname -> (id, "Function"|"Method")
         self.parents: dict[str, list[str]] = {}
         self.emitted_externs: set[str] = set()  # placeholder ids already emitted this pass (dedup)
+        # Package re-exports, per package dotted path: exposed name `Z` -> the linkage key it points
+        # at (`extern://python/pkg.sub.mod::Y`). Published on the Package node as `reexports` (see
+        # _emit_one_package) -- owned by the __init__ that declares them, so an incremental resync
+        # that re-emits that __init__ refreshes them exactly as a full recompute would.
+        self.reexports: dict[str, dict[str, str]] = {}
+        self.package_paths: dict[str, str] = {}  # package dotted -> its __init__.py path
         for m in modules:
             self.add_module(m)
 
@@ -108,6 +114,8 @@ class _Index:
             self.module_dotteds.add(m.dotted)
             if m.is_package:
                 self.packages.add(m.dotted)
+                self.add_reexports(m.dotted, getattr(m, "reexports", ()) or ())
+                self.package_paths[m.dotted] = m.path
         scope_id = _scope_id(self.proj_id, m)
         for fn in m.functions:
             self._index_function(fn, m.dotted, scope_id)
@@ -122,6 +130,21 @@ class _Index:
         self.callable_by_qname[qname] = (fid, "Function")
         for nested in fn.nested:
             self._index_function(nested, qname, fid)
+
+    def add_reexports(self, package: str, reexports) -> None:
+        """Record a package's re-exported names (see RawModule.reexports)."""
+        table: dict[str, str] = {}
+        for r in reexports:
+            if r.is_module or "." not in r.target:
+                continue
+            target_mod, target_name = r.target.rsplit(".", 1)
+            target = ids.extern_symbol_key(target_mod, target_name)
+            if target != ids.extern_symbol_key(package, r.local):
+                table[r.local] = target
+        if table:
+            self.reexports[package] = table
+        else:
+            self.reexports.pop(package, None)
 
     def _index_class(self, cls: RawClass, scope_dotted: str, scope_id: str):
         qname = f"{scope_dotted}.{cls.name}"
@@ -265,8 +288,19 @@ def _emit_packages(idx: _Index) -> Iterator[GraphNode | GraphEdge]:
 
 def _emit_one_package(idx: _Index, dotted: str) -> Iterator[GraphNode | GraphEdge]:
     pkg_id = ids.package_id(idx.proj_id, dotted)
-    yield GraphNode("Package", {"id": pkg_id}, {"name": dotted.rsplit(".", 1)[-1], "dotted_path": dotted,
-                                                "linkage_key": ids.extern_module_key(dotted)})
+    props: dict[str, object] = {"name": dotted.rsplit(".", 1)[-1], "dotted_path": dotted,
+                                "linkage_key": ids.extern_module_key(dotted)}
+    table = idx.reexports.get(dotted)
+    # `Name=<target linkage key>` per re-exported name; reconcile resolves a consumer's
+    # `extern://python/<pkg>::Name` placeholder through it (core/linkage.py). Always emitted -- None
+    # when there are none -- because node writes MERGE properties (`n += props`): a key that simply
+    # stopped being emitted would survive, leaving a removed re-export live after an incremental
+    # resync. Setting it to null deletes it, matching a full recompute.
+    props["reexports"] = [f"{name}={target}" for name, target in sorted(table.items())] if table else None
+    # The package's __init__.py, so its top-level calls (the Package is their caller) and the
+    # old-graph file fallback can cite a file; None for a namespace package with no __init__.
+    props["file_path"] = idx.package_paths.get(dotted)
+    yield GraphNode("Package", {"id": pkg_id}, props)
     parent = idx.container_package(dotted)
     if parent:
         yield GraphEdge("HAS_SUBPACKAGE", "Package", {"id": ids.package_id(idx.proj_id, parent)}, "Package", {"id": pkg_id})
@@ -397,6 +431,7 @@ def _emit_class(cls: RawClass, scope_id: str, scope_dotted: str, container_id: s
             "doc": cls.doc,
             "line_start": cls.line_start,
             "line_end": cls.line_end,
+            "file_path": ctx.module_path,
         },
     )
     yield GraphEdge(container_rel, container_label, {"id": container_id}, "Class", {"id": cls_id})
@@ -439,7 +474,13 @@ def _resolve_scope_calls(
     call texts (jedi engine only, for the node's `unresolved_calls` property). Shared by
     `_emit_function` and `_emit_module` so a top-level call and a function-body call resolve
     identically; only the caller node (`caller_label`/`caller_id`) differs."""
-    call_edges: list[GraphEdge] = []
+    # One CALLS edge per (caller, target) -- the graph MERGEs on that pair anyway -- carrying every
+    # call-site line in `lines` (sorted, unique, capped at _MAX_CALL_LINES) so a who_calls/callees
+    # answer can cite file:line without the agent grepping for it. Insertion order is kept (first
+    # call to a target decides its position); the props of the LAST call to a target win, matching
+    # the MERGE last-write behaviour of emitting one edge per call.
+    by_target: dict[tuple[str, str], tuple[dict, set[int]]] = {}
+    codes: dict[tuple[str, str], dict[int, str]] = {}  # module-scope callers: line -> code
     external_nodes: list[GraphNode] = []
     unresolved_calls: list[str] = []
     for call in calls:
@@ -453,20 +494,33 @@ def _resolve_scope_calls(
             if eid not in ctx.idx.emitted_externs:
                 ctx.idx.emitted_externs.add(eid)
                 external_nodes.append(_external_symbol_node(res))
-            call_edges.append(
-                GraphEdge(
-                    "CALLS", caller_label, {"id": caller_id}, res.label, {"id": eid},
-                    {"resolution": "external", "receiver_type": None, "argument_types": [], "type_arguments": []},
-                )
-            )
-            continue
-        call_edges.append(
-            GraphEdge(
-                "CALLS", caller_label, {"id": caller_id}, res.label, {"id": res.id},
-                {"resolution": res.resolution, "receiver_type": res.receiver_type, "argument_types": [], "type_arguments": []},
-            )
-        )
+            target = (res.label, eid)
+            props = {"resolution": "external", "receiver_type": None, "argument_types": [], "type_arguments": []}
+        else:
+            target = (res.label, res.id)
+            props = {"resolution": res.resolution, "receiver_type": res.receiver_type,
+                     "argument_types": [], "type_arguments": []}
+        _, lines = by_target.get(target, (None, set()))
+        if isinstance(call.line, int):
+            lines.add(call.line)
+            if call.code:
+                codes.setdefault(target, {})[call.line] = call.code
+        by_target[target] = (props, lines)
+    call_edges = []
+    for (to_label, to_id), (props, lines) in by_target.items():
+        kept = sorted(lines)[:_MAX_CALL_LINES]
+        edge_props = {**props, "lines": kept}
+        site_code = codes.get((to_label, to_id))
+        if site_code:  # a Module/Package caller has no `source` to cut sites from: carry them here
+            edge_props["site_code"] = [f"{ln}:{site_code[ln]}" for ln in kept if ln in site_code][:_MAX_SITE_CODES]
+        call_edges.append(GraphEdge("CALLS", caller_label, {"id": caller_id}, to_label, {"id": to_id}, edge_props))
     return call_edges, external_nodes, unresolved_calls
+
+
+# Cap on call-site lines stored per CALLS edge: enough to cite every site of a normal call
+# relationship, bounded so a generated/huge function can't bloat one edge.
+_MAX_CALL_LINES = 20
+_MAX_SITE_CODES = 3  # module-scope call sites with code stored per edge (matches the sites shown)
 
 
 def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotted: str, container_rel: str, container_id: str, container_label: str, ctx: _ModCtx, enclosing_locals: frozenset = frozenset()) -> Iterator[GraphNode | GraphEdge]:
@@ -502,6 +556,7 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
         "doc": fn.doc,
         "line_start": fn.line_start,
         "line_end": fn.line_end,
+        "file_path": ctx.module_path,
     }
     if is_method:
         props.update(kind=_method_kind(fn), is_abstract=_method_is_abstract(fn), overrides=None)

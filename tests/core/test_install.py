@@ -540,3 +540,17 @@ def test_do_install_skips_a_failing_adapter(tmp_path, monkeypatch):
     cfg = do_install(Backend(mode="local"), adapters=[_Boom(), good], server_command=["x"])
     assert [a.name for a in cfg.agents] == ["fake"]  # only the good one survived
     assert [a.name for a in load_config().agents] == ["fake"]
+
+
+def test_agents_md_priming_points_at_file_line_evidence_not_status_first():
+    # agent-evidence design §5: no "auryn_status first" turn; tell the agent the answers carry
+    # citable file:line evidence.
+    from auryn.core import agents
+
+    block = agents._agents_md_block(["auryn", "mcp"])
+    assert "locate(name=...)" in block and "file:line" in block
+    assert "`auryn_status` ->" not in block
+    assert block.index("locate(") < block.index("auryn_status")
+    skill = (agents._skill_source() / "SKILL.md").read_text()
+    assert "file:line" in skill and "lines=\"a-b\"" in skill
+    assert "1. **`auryn_status`**" not in skill

@@ -84,6 +84,9 @@ def _line_starts(data: bytes) -> list[int]:
     return starts
 
 
+_MAX_SITE_CODE = 200  # chars of a module-scope call's source line kept for its CALLS edge
+
+
 class _Source:
     """A file's text prepared once for cheap, repeated source extraction.
 
@@ -130,6 +133,11 @@ def parse_module(source: bytes | str, path: str, package_dirs: frozenset[str] | 
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     module.functions.append(_function(node, src))
             module.calls = _module_calls(tree)
+            for call in module.calls:  # module-scope callers store no source: keep each call's line
+                if 0 < call.line <= len(src._lines):
+                    call.code = src._lines[call.line - 1].strip()[:_MAX_SITE_CODE]
+            if module.is_package:
+                module.reexports = _reexports(tree, dotted)
         return module
     except SyntaxError as e:
         # Broken (mid-edit) code: flag it so the resync can preserve the file's last-good
@@ -178,6 +186,61 @@ def _imports(node: ast.Import | ast.ImportFrom, current_dotted: str, is_package:
             continue
         target = f"{base}.{alias.name}" if base else alias.name
         out.append(RawImport(local=alias.asname or alias.name, target=target, is_module=False))
+    return out
+
+
+def _is_type_checking(test: ast.expr) -> bool:
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    )
+
+
+def _dynamic_import_entries(value: ast.expr, package: str) -> list[RawImport]:
+    """`{'Name': (<anything>, '.sub.mod'), ...}` -- the lazy-import table some packages (pydantic)
+    resolve in `__getattr__`. Read as a literal only; nothing is imported or evaluated. A relative
+    module ('.x', '..x') is resolved against `package`; '__module__' (the entry IS a submodule) and
+    any non-literal entry are skipped."""
+    out: list[RawImport] = []
+    if not isinstance(value, ast.Dict):
+        return out
+    for key, val in zip(value.keys, value.values):
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            continue
+        if not (isinstance(val, ast.Tuple) and len(val.elts) == 2):
+            continue
+        mod = val.elts[1]
+        if not (isinstance(mod, ast.Constant) and isinstance(mod.value, str)) or mod.value == "__module__":
+            continue
+        name = mod.value
+        if name.startswith("."):
+            level = len(name) - len(name.lstrip("."))
+            base = package
+            for _ in range(level - 1):
+                base = base.rsplit(".", 1)[0] if "." in base else ""
+            rest = name[level:]
+            module_path = f"{base}.{rest}" if base and rest else (base or rest)
+        else:
+            module_path = name
+        if module_path:
+            out.append(RawImport(local=key.value, target=f"{module_path}.{key.value}", is_module=False))
+    return out
+
+
+def _reexports(tree: ast.Module, package: str) -> list[RawImport]:
+    """A package `__init__`'s re-exported names (see RawModule.reexports): top-level and
+    `if TYPE_CHECKING:` `from ... import` names, plus a literal `_dynamic_imports` table."""
+    out: list[RawImport] = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            out.extend(_imports(node, package, True))
+        elif isinstance(node, ast.If) and _is_type_checking(node.test):
+            for sub in node.body:
+                if isinstance(sub, ast.ImportFrom):
+                    out.extend(_imports(sub, package, True))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and t.id == "_dynamic_imports" for t in targets) and node.value is not None:
+                out.extend(_dynamic_import_entries(node.value, package))
     return out
 
 

@@ -57,7 +57,7 @@ def _list_tool_names(server) -> set[str]:
 
 def test_server_advertises_its_tools(falkordb_connection, graph):
     _seed(graph)
-    server = create_server(falkordb_connection, graph.name)
+    server = create_server(falkordb_connection, graph.name, tools="all")
 
     assert _list_tool_names(server) == {
         "auryn_status",
@@ -115,7 +115,7 @@ def test_list_graphs_reports_repositories_across_graphs(falkordb_connection, gra
         "depth:'deep', base_commit:'ghi'})"
     )
     try:
-        server = create_server(falkordb_connection, graph.name)
+        server = create_server(falkordb_connection, graph.name, tools="all")
         content = _call_tool(server, "list_graphs", {}).structured_content
 
         assert content["current"] == graph.name
@@ -211,7 +211,7 @@ def test_find_path_direction_matters(falkordb_connection, graph):
 
 def test_get_schema_and_run_cypher(falkordb_connection, graph):
     _seed(graph)
-    server = create_server(falkordb_connection, graph.name)
+    server = create_server(falkordb_connection, graph.name, tools="all")
 
     schema = _call_tool(server, "get_schema", {}).structured_content
     assert "Procedure" in {row["label"] for row in schema["node_labels"]}
@@ -234,7 +234,8 @@ def test_get_context_returns_node_and_neighbors(falkordb_connection, graph):
 
     content = result.structured_content
     assert content["center"]["name"] == "TransferEmployee"
-    assert {n["name"] for n in content["nodes"]} == {"LogChange"}
+    # calls are reported once, under callees (with call sites when the graph has lines)
+    assert [e["to"] for e in content["callees"]] == ["b"]
 
 
 def test_impact_of_downstream_from_entry(falkordb_connection, graph):
@@ -315,7 +316,7 @@ def test_use_graph_changes_the_session_default(falkordb_connection, graph):
     _seed(graph)
     other = _seed_named(falkordb_connection, f"{graph.name}_def", "OtherProc")
     try:
-        server = create_server(falkordb_connection, graph.name)
+        server = create_server(falkordb_connection, graph.name, tools="all")
 
         switched = _call_tool(server, "use_graph", {"name": other.name}).structured_content
         assert switched["graph"] == other.name and switched["default"] is True
@@ -347,7 +348,7 @@ def test_use_graph_rejects_unknown_name(falkordb_connection, graph):
 def test_auryn_status_on_empty_graph_hints_to_switch(falkordb_connection, graph):
     # The default graph is empty but others exist -> status must nudge toward list_graphs/use_graph
     # (the exact situation that stalled the audit: bound to the wrong, empty graph).
-    server = create_server(falkordb_connection, graph.name)  # graph seeded with nothing
+    server = create_server(falkordb_connection, graph.name, tools="all")  # graph seeded with nothing
     content = _call_tool(server, "auryn_status", {}).structured_content
     assert content["has_data"] is False
     assert "list_graphs" in content["hint"]
@@ -391,7 +392,7 @@ def _make_mixed_repo(root):
 def test_ingest_repository_ingests_and_reports_per_language(falkordb_connection, graph, tmp_path):
     root = tmp_path / "MixedRepo"
     commit = _make_mixed_repo(root)
-    server = create_server(falkordb_connection, graph.name)
+    server = create_server(falkordb_connection, graph.name, tools="all")
 
     result = _call_tool(server, "ingest_repository", {"repo_uri": str(root)})
 
@@ -537,3 +538,87 @@ def test_mcp_ingest_wires_resync_trigger_like_the_cli(falkordb_connection, graph
     assert hooks.is_installed(local_dir)
     reg = get_repo(local_dir)
     assert reg is not None and reg.graph_name == graph.name
+
+
+# -- agent-evidence design §2/§4: tool profile, definition size, compact get_context ---------------
+
+_AGENT_TOOLS = {
+    "auryn_status", "index_repository", "locate", "search_code", "get_context", "who_calls",
+    "callees", "find_path", "impact_of", "trace_entrypoint",
+}
+
+# Characters of tool descriptions + input schemas + INSTRUCTIONS for all 16 tools BEFORE the
+# agent-evidence change (measured 2026-11-18). The default profile must send under half of it.
+_BASELINE_DEFINITION_CHARS = 18590
+
+
+def _definition_chars(server) -> int:
+    import json
+
+    from auryn.mcp.server import INSTRUCTIONS
+
+    async def run():
+        async with Client(server) as client:
+            return await client.list_tools()
+
+    tools = asyncio.run(run()).tools
+    return sum(len(t.description or "") + len(json.dumps(t.input_schema)) for t in tools) + len(INSTRUCTIONS)
+
+
+def test_default_profile_exposes_only_the_agent_tools(falkordb_connection, graph, monkeypatch):
+    monkeypatch.delenv("AURYN_MCP_TOOLS", raising=False)
+    _seed(graph)
+    assert _list_tool_names(create_server(falkordb_connection, graph.name)) == _AGENT_TOOLS
+
+
+def test_env_all_exposes_every_tool(falkordb_connection, graph, monkeypatch):
+    monkeypatch.setenv("AURYN_MCP_TOOLS", "all")
+    _seed(graph)
+    names = _list_tool_names(create_server(falkordb_connection, graph.name))
+    assert names == _AGENT_TOOLS | {"list_graphs", "use_graph", "ingest_repository", "get_schema",
+                                    "impact_of_diff", "run_cypher"}
+
+
+def test_unknown_profile_is_rejected(falkordb_connection, graph, monkeypatch):
+    monkeypatch.setenv("AURYN_MCP_TOOLS", "everything")
+    with pytest.raises(ValueError, match="AURYN_MCP_TOOLS"):
+        create_server(falkordb_connection, graph.name)
+
+
+def test_hidden_tool_cannot_be_called(falkordb_connection, graph, monkeypatch):
+    monkeypatch.delenv("AURYN_MCP_TOOLS", raising=False)
+    _seed(graph)
+    result = _call_tool(create_server(falkordb_connection, graph.name), "run_cypher", {"query": "RETURN 1"})
+    assert result.is_error is True
+
+
+def test_default_definitions_are_under_half_the_old_size(falkordb_connection, graph, monkeypatch):
+    monkeypatch.delenv("AURYN_MCP_TOOLS", raising=False)
+    _seed(graph)
+    assert _definition_chars(create_server(falkordb_connection, graph.name)) < _BASELINE_DEFINITION_CHARS / 2
+
+
+def test_empty_graph_hint_never_points_at_a_hidden_tool(falkordb_connection, graph, monkeypatch):
+    monkeypatch.delenv("AURYN_MCP_TOOLS", raising=False)
+    graph.query("CREATE (:Tmp {id: 'x'})")
+    graph.query("MATCH (n:Tmp) DELETE n")
+    result = _call_tool(create_server(falkordb_connection, graph.name), "auryn_status", {})
+    hint = result.structured_content.get("hint", "")
+    assert "list_graphs" not in hint and "use_graph" not in hint
+
+
+def test_get_context_is_compact_and_serves_line_ranges(falkordb_connection, graph):
+    src = "\\n".join(["def big():"] + [f"    x{i} = {i}" for i in range(1, 100)])
+    graph.query(
+        f"CREATE (:Function {{id: 'big', name: 'big', line_start: 10, file_path: 'p/big.py', "
+        f"signature: 'big()', source: '{src}'}})"
+    )
+    server = create_server(falkordb_connection, graph.name)
+    view = _call_tool(server, "get_context", {"node_id": "big"}).structured_content
+    assert "source" not in view["center"]["properties"]
+    assert view["center"]["properties"]["file_path"] == "p/big.py"
+    assert len(view["preview"]) == 40
+    rng = _call_tool(server, "get_context", {"node_id": "big", "lines": "20-21"}).structured_content
+    assert rng["lines"] == [{"line": 20, "code": "    x10 = 10"}, {"line": 21, "code": "    x11 = 11"}]
+    bad = _call_tool(server, "get_context", {"node_id": "big", "lines": "oops"})
+    assert bad.is_error is True

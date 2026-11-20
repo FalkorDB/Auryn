@@ -66,6 +66,9 @@ class RawCall:
     is_simple_name: bool  # True when the callee is a bare Name (not an attribute access)
     line: int = 0  # position of the callee name, for the Jedi oracle
     col: int = 0
+    # The stripped source line of a MODULE-scope call (its caller, a Module/Package node, stores no
+    # `source`), kept so the CALLS edge can carry citable code; None for calls inside a def.
+    code: str | None = None
 
 
 @dataclass
@@ -108,4 +111,9 @@ class RawModule:
     classes: list[RawClass] = field(default_factory=list)
     functions: list[RawFunction] = field(default_factory=list)
     calls: list[RawCall] = field(default_factory=list)  # module-scope (top-level) call sites
+    # Package re-exports (`__init__.py` only): every `from .x import Y [as Z]` the package exposes as
+    # `pkg.Z`, incl. those inside `if TYPE_CHECKING:` and a lazy `_dynamic_imports` table. Kept apart
+    # from `imports` (which drives call resolution) -- used only to publish linkage aliases so a
+    # consumer's `from pkg import Z` placeholder can link to Z's real definition (cross-repo).
+    reexports: list[RawImport] = field(default_factory=list)
     parse_ok: bool = True  # False if the file failed to parse (SyntaxError) -- see file_parser

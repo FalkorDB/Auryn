@@ -204,6 +204,8 @@ def stream_apply(
     authored, and would otherwise diff them away before reconcile_linkages heals them (the cross-repo
     `consumer_first` heal). The placeholders are owned by the fast pass + the linkage reconciler, not
     the deep upgrade. Only extern:// targets are affected; in-prefix edges diff normally either way."""
+    from auryn.core.linkage import reexport_alias_keys  # local: linkage -> graph_client -> graph_sync
+
     with phase("read_fingerprints"):
         node_fps, edge_fps = writer.read_fingerprints(id_prefix, node_labels)
     stats = DeltaStats()
@@ -227,6 +229,8 @@ def stream_apply(
                     placeholders.append(str(item.key["id"]))
                 else:
                     reals.append(str(props["linkage_key"]))
+                    # a package's re-export alias keys are linkages this ingest touched too
+                    reals.extend(reexport_alias_keys(props))
             prev = node_fps.pop(node_key(item), _MISSING)
             if prev is _MISSING:
                 stats.nodes_added += 1
