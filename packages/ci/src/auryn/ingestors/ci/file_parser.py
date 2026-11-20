@@ -83,26 +83,45 @@ def _first_non_flag(args: str) -> str:
     return ""
 
 
-def _strip_comment(line: str) -> str:
-    """Drop a trailing shell comment from ONE physical line: a `#` that begins a word (at line start
-    or after whitespace) and is not inside single/double quotes. A `#` mid-token (`tag#sha`) or quoted
-    (`echo "a # b"`) is literal, not a comment. Done per physical line and BEFORE joining `\\`
-    continuations, because a shell comment is never continued by a trailing backslash."""
-    quote = ""
-    prev_ws = True  # line start is a word boundary
-    for i, ch in enumerate(line):
-        if quote:  # inside a quote: only the matching quote closes it
+def _strip_comments(text: str) -> str:
+    """Drop shell comments from a (possibly multi-line) `run:` block: a `#` that begins a word (line
+    start or after whitespace) and is NOT inside single/double quotes starts a comment running to the
+    end of its physical line. A `#` mid-token (`tag#sha`) or quoted (`echo "a # b"`) is literal.
+
+    Single-pass so it is faithful to shell lexing across lines: quote state is tracked ACROSS physical
+    lines (a `"..."` string may span newlines), and a backslash escapes the next character except inside
+    single quotes (so `echo \\"` doesn't open a quote, and the following `#` IS a comment). A comment is
+    never continued by a trailing backslash, so this runs BEFORE joining `\\`-continuations."""
+    out: list[str] = []
+    quote = ""      # "", "'", or '"' -- the open quote, if any
+    prev_ws = True  # at a word boundary (line start / after whitespace)
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and quote != "'" and i + 1 < n:  # backslash escapes next char (not inside '...')
+            out.append(ch)
+            out.append(text[i + 1])
+            prev_ws = False
+            i += 2
+            continue
+        if quote:  # inside a quote: only the matching quote closes it; # is literal
+            out.append(ch)
             if ch == quote:
                 quote = ""
             prev_ws = False
         elif ch in "'\"":
             quote = ch
+            out.append(ch)
             prev_ws = False
-        elif ch == "#" and prev_ws:
-            return line[:i]
+        elif ch == "#" and prev_ws:  # a real comment -> skip to end of THIS physical line
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
         else:
-            prev_ws = ch in " \t"
-    return line
+            out.append(ch)
+            prev_ws = ch in " \t\n"  # a newline also starts a fresh word boundary
+        i += 1
+    return "".join(out)
 
 
 def _images_from_step(step: dict) -> list[str]:
@@ -114,10 +133,10 @@ def _images_from_step(step: dict) -> list[str]:
             out += _split_tags(with_.get("tags"))
     run = _scalar(step.get("run"))
     if run:
-        # Strip shell comments PER PHYSICAL LINE first (a comment isn't continued by a trailing `\`),
-        # THEN join `\`-continuations -- so a `# docker push x \` comment can't swallow the next line,
-        # and a real `docker build -t x \` <newline> `.` stays one command.
-        run = "\n".join(_strip_comment(ln) for ln in run.split("\n"))
+        # Strip shell comments first (a comment isn't continued by a trailing `\`), THEN join
+        # `\`-continuations -- so a `# docker push x \` comment can't swallow the next line, and a real
+        # `docker build -t x \` <newline> `.` stays one command. `_strip_comments` is quote/escape aware.
+        run = _strip_comments(run)
         run = run.replace("\\\n", " ")
         # per COMMAND (split on shell separators), so a `-t` or `push` only counts inside its own
         # `docker build`/`docker push` -- not a `-t` from an unrelated command in the same block.

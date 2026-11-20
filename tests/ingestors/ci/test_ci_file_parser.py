@@ -110,3 +110,15 @@ def test_hash_inside_quotes_is_not_a_comment():
     # (Uses a block scalar so YAML itself doesn't treat the ` #` as a YAML comment.)
     p = _p('  b:\n    steps:\n      - run: |\n          echo "status # ready"; docker push shop/api:1.0\n')
     assert p.built_images == ("shop/api:1.0",)
+
+
+def test_escaped_quote_does_not_hide_a_comment():
+    # `echo \" # docker push fake` -- the escaped quote doesn't open a string, so the `#` IS a comment.
+    p = _p('  b:\n    steps:\n      - run: |\n          echo \\" # docker push fake/x:9\n          docker push shop/api:1.0\n')
+    assert p.built_images == ("shop/api:1.0",)
+
+
+def test_hash_after_a_multiline_string_is_a_comment():
+    # the `"..."` string spans two physical lines; the `#` after it closes is a real comment, not quoted.
+    p = _p('  b:\n    steps:\n      - run: |\n          echo "status\n          ready" # docker push fake/x:9\n          docker push shop/api:1.0\n')
+    assert p.built_images == ("shop/api:1.0",)
