@@ -224,7 +224,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
 
     @tool(writes, "write")
     def index_repository(
-        path: str = ".", project_name: str | None = None, deep: str = "inline", graph: str | None = None
+        path: str = ".", project_name: str | None = None, deep: str = "async", graph: str | None = None
     ) -> dict[str, Any]:
         """Build (or update) the code graph for a LOCAL repository directory -- no git
         required. Auto-detects every installed language plugin (currently C, C++, C#, Python,
@@ -241,13 +241,16 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         graph without launching a separate server. Call `list_graphs` first to see what exists.
 
         `deep` controls the second, deeper pass for the languages that have one (Python via
-        Jedi, C# via Roslyn) -- a fast structural pass first, then inferred types + resolved calls:
-          - "inline" (default): return only when the graph is fully deep. Simplest; use it
-            unless you want to start querying sooner.
-          - "background": return as soon as the fast graph is ready and deepen it in the
-            background -- you can query immediately (types/call edges land shortly after).
-            The graph reports its state per project as `depth` = "fast" then "deep".
+        Jedi, C# via Roslyn, Rust via rust-analyzer) -- a fast structural pass first, then inferred
+        types + resolved calls:
+          - "async" (default): return as soon as the fast graph is ready and deepen it in a detached
+            daemon -- you can query immediately; types/call edges land shortly after. The graph
+            reports its state per project as `depth` = "fast" then "deep", so check it before relying
+            on deep-only results (precise call resolution).
+          - "inline": return only when the graph is fully deep. Use it when you must not query until
+            resolution is complete.
           - "off": fast graph only (shallow types).
+        (An ad-hoc/embedded connection a detached daemon can't reach falls back to inline.)
 
         Same effect as the CLI `ingest`: after building the graph this registers the repo and
         sets up whatever resync trigger you chose at install time (`commit` -> git hooks, `save`
@@ -259,10 +262,13 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         with contextlib.ExitStack() as turn:
             turn.enter_context(sync_lock(resolve_project_root(path), queue_one=False))
             others = ingest.deep_threads()  # other repos' background deep passes, still running
+            # An ad-hoc (`--host`) server connection is one a detached daemon may not match (embed is
+            # forced inline for the same reason) -> deepen inline rather than queue a job it can't reach.
+            _deep = "inline" if deep == "async" and embed == "inline" else deep
             try:
-                report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep, embed=embed)
+                report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=_deep, embed=embed)
             finally:
-                if deep == "background":
+                if _deep == "background":
                     # That pass still writes the subgraph after this call has answered: a thread
                     # takes the lock over, waits for this call's pass (not the others') and only
                     # then releases it.
@@ -278,12 +284,12 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
     @tool(writes, "write")
     def ingest_repository(
         repo_uri: str, ref: str | None = None, project_name: str | None = None,
-        deep: str = "inline", graph: str | None = None
+        deep: str = "async", graph: str | None = None
     ) -> dict[str, Any]:
         """Like `index_repository`, but clones a GIT repository first (`repo_uri` is a path or
         any URI git understands; `ref` picks a branch/tag/commit). Use this for a remote repo;
         use `index_repository` for the working directory you're already in. `deep`
-        ("inline"|"background"|"off") works exactly as in `index_repository`.
+        ("async" default | "inline" | "off") works exactly as in `index_repository`.
 
         The same graph selection applies: `graph` targets an existing graph to EXTEND (co-locate a
         related repo so cross-repo references resolve) or a NEW name to ISOLATE (created on write).
@@ -293,8 +299,9 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         under `resync` -- but only a LOCAL path has a working tree to attach to; a remote clone
         has none, so `resync` will note that (clone locally to get commit/save resync)."""
         g, gname = _write_graph(graph)
+        _deep = "inline" if deep == "async" and embed == "inline" else deep  # ad-hoc -> daemon can't reach
         try:
-            report = ingest.ingest_repository(GraphWriter(g), repo_uri, ref=ref, project_name=project_name, deep=deep, embed=embed)
+            report = ingest.ingest_repository(GraphWriter(g), repo_uri, ref=ref, project_name=project_name, deep=_deep, embed=embed)
         except git.GitCommandError as e:
             raise ValueError(f"couldn't access git repository {repo_uri!r}: {e}") from e
         # Parity with the CLI: wire the resync trigger onto a local checkout when the URI is one;
