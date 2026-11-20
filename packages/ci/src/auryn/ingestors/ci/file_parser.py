@@ -60,12 +60,49 @@ def _split_tags(tags) -> list[str]:
     return [t.strip().strip("\"'") for t in items if t.strip()]
 
 
+# `docker push` options that consume the FOLLOWING token as their value (`--platform linux/amd64`),
+# so that value isn't mistaken for the positional image. The `--flag=value` form needs no entry (it's
+# a single `-`-prefixed token). `-a`/`--all-tags`/`-q`/`--quiet`/`--disable-content-trust` are booleans.
+_PUSH_VALUE_FLAGS = frozenset({"--platform"})
+
+
 def _first_non_flag(args: str) -> str:
-    """The first argument that isn't a `-flag` -- the image in `docker push [--flag ...] <image>`."""
-    for tok in args.split():
-        if not tok.startswith("-"):
-            return tok
+    """The first argument that is neither a `-flag` nor a flag's consumed value -- the image in
+    `docker push [--flag [value]] <image>`."""
+    toks = args.split()
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if tok in _PUSH_VALUE_FLAGS:  # skip the flag AND its value (`--platform linux/amd64`)
+            i += 2
+            continue
+        if tok.startswith("-"):  # a boolean flag or a `--flag=value` form
+            i += 1
+            continue
+        return tok
     return ""
+
+
+def _strip_comment(line: str) -> str:
+    """Drop a trailing shell comment from ONE physical line: a `#` that begins a word (at line start
+    or after whitespace) and is not inside single/double quotes. A `#` mid-token (`tag#sha`) or quoted
+    (`echo "a # b"`) is literal, not a comment. Done per physical line and BEFORE joining `\\`
+    continuations, because a shell comment is never continued by a trailing backslash."""
+    quote = ""
+    prev_ws = True  # line start is a word boundary
+    for i, ch in enumerate(line):
+        if quote:  # inside a quote: only the matching quote closes it
+            if ch == quote:
+                quote = ""
+            prev_ws = False
+        elif ch in "'\"":
+            quote = ch
+            prev_ws = False
+        elif ch == "#" and prev_ws:
+            return line[:i]
+        else:
+            prev_ws = ch in " \t"
+    return line
 
 
 def _images_from_step(step: dict) -> list[str]:
@@ -77,8 +114,11 @@ def _images_from_step(step: dict) -> list[str]:
             out += _split_tags(with_.get("tags"))
     run = _scalar(step.get("run"))
     if run:
-        run = run.replace("\\\n", " ")          # join shell line continuations before splitting
-        run = re.sub(r"(?m)(^|\s)#.*$", r"\1", run)  # drop shell comments (a commented-out docker cmd isn't real)
+        # Strip shell comments PER PHYSICAL LINE first (a comment isn't continued by a trailing `\`),
+        # THEN join `\`-continuations -- so a `# docker push x \` comment can't swallow the next line,
+        # and a real `docker build -t x \` <newline> `.` stays one command.
+        run = "\n".join(_strip_comment(ln) for ln in run.split("\n"))
+        run = run.replace("\\\n", " ")
         # per COMMAND (split on shell separators), so a `-t` or `push` only counts inside its own
         # `docker build`/`docker push` -- not a `-t` from an unrelated command in the same block.
         for cmd in re.split(r"&&|\|\||;|\n", run):

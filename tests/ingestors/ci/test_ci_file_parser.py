@@ -91,3 +91,22 @@ def test_shell_line_continuation_is_joined():
 def test_shell_comment_is_not_parsed():
     p = _p("  b:\n    steps:\n      - run: |\n          # docker push evil/x:1\n          docker push shop/api:1.0\n")
     assert p.built_images == ("shop/api:1.0",)
+
+
+def test_push_platform_flag_value_not_mistaken_for_image():
+    # `--platform` consumes the next token; the positional image comes after it.
+    p = _p("  b:\n    steps:\n      - run: docker push --platform linux/amd64 shop/api:1.0\n")
+    assert p.built_images == ("shop/api:1.0",)
+
+
+def test_comment_ending_in_backslash_does_not_swallow_next_line():
+    # A shell comment is NOT continued by a trailing `\`; the real push on the next line survives.
+    p = _p("  b:\n    steps:\n      - run: |\n          # docker push fake/x:9 \\\n          docker push shop/api:1.0\n")
+    assert p.built_images == ("shop/api:1.0",)
+
+
+def test_hash_inside_quotes_is_not_a_comment():
+    # A `#` inside a quoted string isn't a shell comment, so the following command still parses.
+    # (Uses a block scalar so YAML itself doesn't treat the ` #` as a YAML comment.)
+    p = _p('  b:\n    steps:\n      - run: |\n          echo "status # ready"; docker push shop/api:1.0\n')
+    assert p.built_images == ("shop/api:1.0",)
