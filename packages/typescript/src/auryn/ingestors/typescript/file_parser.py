@@ -224,6 +224,18 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             return (txt(prop) if prop is not None else None), recv
         return None, None
 
+    def _callee_line(fn) -> int:
+        """1-based line of the callee *identifier* -- what SCIP anchors a call occurrence to. For
+        `obj.method()` that's the `method` property's line (which can differ from the call expression's
+        first line in a multi-line `obj\n  .method()`), so the deep pass's line-precise gate matches."""
+        if fn is not None and fn.type == "member_expression":
+            prop = field(fn, "property")
+            if prop is not None:
+                return prop.start_point[0] + 1
+        if fn is not None:
+            return fn.start_point[0] + 1
+        return 0
+
     def _route_text(node) -> str:
         """URL text of a string / template-string arg, with `${...}` interpolations rendered as
         `{param}` so a templated URL matches an endpoint route template (`api/x/${id}` -> api/x/{param})."""
@@ -299,7 +311,8 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             n = stack.pop()
             if n.type in ("call_expression", "new_expression"):
                 is_new = n.type == "new_expression"
-                nm, recv = _callee(field(n, "constructor" if is_new else "function"))
+                callee = field(n, "constructor" if is_new else "function")
+                nm, recv = _callee(callee)
                 if nm:
                     key = (nm, recv, is_new)
                     if key not in seen:
@@ -307,8 +320,8 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                         http_url = http_method = None
                         if not is_new and _is_http_idiom(nm, recv, http_client_vars):  # gate the arg walk (perf)
                             http_url, http_method = _http_request(n, nm)
-                        out.append(RawCall(name=nm, receiver=recv, is_new=is_new,
-                                           http_url=http_url, http_method=http_method))
+                        out.append(RawCall(name=nm, receiver=recv, is_new=is_new, http_url=http_url,
+                                           http_method=http_method, line=_callee_line(callee)))
             stack.extend(n.children)
         return out
 

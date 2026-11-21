@@ -88,11 +88,33 @@ def test_callable_locations_match_resolution_node_ids():
     assert {loc.name for loc in locs} >= {"caller", "helper", "deep", "run"}
 
 
+# -- call-site recording (the line-precise gate's input) -----------------------------------------
+
+def test_callable_locations_record_call_sites_at_the_callee_identifier_line():
+    # The deep pass gates on (callee name, callee-identifier line). A member call's site line is the
+    # PROPERTY's line -- which for a multi-line chain differs from the call expression's first line --
+    # so a SCIP occurrence (anchored at the identifier) matches. A value reference is not a call site.
+    src = (
+        b"function caller(obj: any) {\n"       # line 1
+        b"  target();\n"                        # line 2  -- call `target`
+        b"  obj\n"                              # line 3  -- call expression starts here...
+        b"    .method();\n"                     # line 4  -- ...but `method` is on line 4
+        b"  const ref = target;\n"              # line 5  -- value reference, NOT a call site
+        b"}\n"
+        b"function target() {}\n"
+    )
+    locs = resolution.callable_locations([parse_source(src, "src/a.ts")], project_id("p"))
+    caller = next(l for l in locs if l.name == "caller")
+    assert ("target", 2) in caller.called_sites       # callee-identifier line of `target()`
+    assert ("method", 4) in caller.called_sites       # the property line, not the line-3 expr start
+    assert not any(name == "target" and line == 5 for name, line in caller.called_sites)  # value ref
+
+
 # -- the resolver: inferred-receiver dispatch, same-name disambiguation, cross-module ------------
 
 def test_resolve_calls_resolves_what_the_name_pass_cannot():
     locs = _fixture_locations()
-    deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True)  # as the TS overlay runs it
+    deep = resolve_calls(_SCIP.read_bytes(), locs, require_call_site=True)  # as the TS overlay runs it
     by_id = {loc.id: loc for loc in locs}
     for e in deep.edges:
         assert e.properties["resolution"] == "resolved"
@@ -112,7 +134,7 @@ def test_resolve_calls_resolves_what_the_name_pass_cannot():
 
 def test_resolve_calls_tracks_coverage_and_what_scip_resolved():
     locs = _fixture_locations()
-    deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True)
+    deep = resolve_calls(_SCIP.read_bytes(), locs, require_call_site=True)
     by_name = {loc.name: loc for loc in locs}
     # every fixture callable SCIP defined is covered (the overlay scope)
     assert {by_name[n].id for n in ("caller", "helper", "deep")} <= deep.covered_ids
@@ -123,15 +145,16 @@ def test_resolve_calls_tracks_coverage_and_what_scip_resolved():
 
 def test_value_reference_is_not_emitted_as_a_call_when_gated():
     # `getHelper` returns `helper` as a VALUE (no call). Without gating, SCIP's reference becomes a
-    # spurious CALLS edge; with require_syntactic_call it's dropped (helper isn't in getHelper's calls).
+    # spurious CALLS edge; both the name gate and the line-precise call-site gate (the overlay's) drop it.
     locs = _fixture_locations()
     by_name = {loc.name: loc for loc in locs}
     gh = by_name["getHelper"].id
     ungated = {(e.from_key["id"], e.to_key["id"]) for e in resolve_calls(_SCIP.read_bytes(), locs).edges}
-    gated = {(e.from_key["id"], e.to_key["id"])
-             for e in resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True).edges}
-    assert (gh, by_name["helper"].id) in ungated      # the false positive the gate removes
-    assert not any(frm == gh for frm, _ in gated)      # gated: getHelper makes no CALLS
+    assert (gh, by_name["helper"].id) in ungated      # the false positive the gates remove
+    for gate in ({"require_syntactic_call": True}, {"require_call_site": True}):
+        gated = {(e.from_key["id"], e.to_key["id"])
+                 for e in resolve_calls(_SCIP.read_bytes(), locs, **gate).edges}
+        assert not any(frm == gh for frm, _ in gated)  # gated: getHelper makes no CALLS
 
 
 def test_self_recursion_is_resolved_under_emit_self_calls():
@@ -145,8 +168,8 @@ def test_self_recursion_is_resolved_under_emit_self_calls():
         return any(e.from_key["id"] in fib and e.to_key["id"] in fib
                    for e in resolve_calls(_SCIP.read_bytes(), locs, **kw).edges)
 
-    assert has_self(require_syntactic_call=True, emit_self_calls=True)
-    assert not has_self(require_syntactic_call=True)
+    assert has_self(require_call_site=True, emit_self_calls=True)   # as the TS overlay runs it
+    assert not has_self(require_call_site=True)
 
 
 def test_resolve_calls_is_empty_without_matching_locations():
@@ -231,3 +254,33 @@ def test_deep_inline_resolves_calls_end_to_end(graph, tmp_path):
         "MATCH (:Function {name:'getHelper'})-[:CALLS]->(:Function {name:'helper'}) RETURN count(*)"
     ).result_set
     assert val == [[0]]
+
+
+@pytest.mark.skipif(not _scip_typescript_available(),
+                    reason="requires a working scip-typescript (npm i -g @sourcegraph/scip-typescript)")
+def test_deep_recovers_an_aliased_import_call_end_to_end(graph, tmp_path):
+    # `import { helper as h }; h()` -- the fast parse records the alias `h`, so a name-only gate (and the
+    # fast pass itself) can't tie the call to `helper`. The line-precise call-site gate accepts the sole
+    # call on that line, so deep resolves it. Prove it's a DEEP win: fast-only has no such edge.
+    proj = tmp_path / "aliaspkg"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "helpers.ts").write_text("export function helper() { return 1; }\n")
+    (proj / "src" / "main.ts").write_text(
+        'import { helper as h } from "./helpers";\n'
+        "export function caller() {\n"
+        "  return h();\n"
+        "}\n"
+    )
+
+    def _caller_to_helper(name):
+        return graph.query(
+            "MATCH (:Function {name:'caller'})-[e:CALLS]->(t:Function {name:'helper'}) "
+            f"WHERE t.id CONTAINS '{name}' RETURN e.resolution"
+        ).result_set
+
+    ingest.ingest_directory(GraphWriter(graph), str(proj), project_name="aliasfast", deep="off")
+    assert _caller_to_helper("aliasfast") == []  # the fast pass can't resolve the aliased import call
+
+    ingest.ingest_directory(GraphWriter(graph), str(proj), project_name="aliasdeep", deep="inline")
+    assert _depth(graph, "aliasdeep") == "deep"
+    assert _caller_to_helper("aliasdeep") == [["resolved"]]  # deep recovers it through the alias
