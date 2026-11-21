@@ -20,51 +20,35 @@ they are not deep-upgraded -- their fast name-edges are kept (no regression)."""
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
+
+from auryn.core import scip_runner
 
 _SCIP_TIMEOUT_SECONDS = int(os.environ.get("AURYN_SCIP_TYPESCRIPT_TIMEOUT", "900"))
 
 _PACKAGE = "@sourcegraph/scip-typescript"
 
+_INSTALL_HINT = (
+    f"scip-typescript not found on PATH. Install it globally (`npm install -g {_PACKAGE}`) or set "
+    f"AURYN_SCIP_TYPESCRIPT to its path. (A repo-local node_modules copy is intentionally not used -- "
+    f"running a binary from the indexed repo would execute untrusted code.)"
+)
 
-class ScipTypescriptUnavailable(RuntimeError):
+
+class ScipTypescriptUnavailable(scip_runner.ScipIndexerUnavailable):
     """scip-typescript could not be located or failed to produce a SCIP index -- the signal for git_sync
     to fall back to the tree-sitter fast pass."""
 
 
 def _tool_command() -> list[str]:
-    """Locate a usable scip-typescript from a TRUSTED location ONLY, in priority order:
-      1. `AURYN_SCIP_TYPESCRIPT` env override (an explicit, user-trusted binary path);
-      2. a `scip-typescript` on PATH (a user-controlled global / dev install).
-    Returned as an ABSOLUTE path so the subprocess never re-resolves it against its `cwd` (the indexed
-    repo). We deliberately DON'T consult the indexed repo's `node_modules/.bin`, nor let `npx` fetch or
-    resolve one, and run_scip further refuses any binary that resolves INSIDE the indexed tree: deep
-    analysis runs automatically on arbitrary (possibly untrusted) repositories, so executing a binary
-    shipped in the repo would run attacker-controlled code with the ingestor's privileges. Raises
-    ScipTypescriptUnavailable (with an install hint) if no trusted binary resolves."""
-    candidate = os.environ.get("AURYN_SCIP_TYPESCRIPT") or shutil.which("scip-typescript")
-    if candidate:
-        # realpath, not abspath: resolve symlinks too, so a trusted-looking path that is actually a symlink
-        # INTO the indexed tree is caught by run_scip's containment check (and the real binary is executed).
-        resolved = os.path.realpath(candidate)
-        if os.path.isfile(resolved):
-            return [resolved]
-    raise ScipTypescriptUnavailable(
-        f"scip-typescript not found on PATH. Install it globally (`npm install -g {_PACKAGE}`) or set "
-        f"AURYN_SCIP_TYPESCRIPT to its path. (A repo-local node_modules copy is intentionally not used -- "
-        f"running a binary from the indexed repo would execute untrusted code.)"
-    )
-
-
-def _is_inside(path: str, root: str) -> bool:
-    # realpath both sides so a symlinked binary (or a symlinked checkout) can't slip the containment check.
-    root_real = os.path.realpath(root)
-    try:
-        return os.path.commonpath([os.path.realpath(path), root_real]) == root_real
-    except ValueError:  # different drives (Windows) -> not inside
-        return False
+    """Locate a usable scip-typescript from a TRUSTED location: `AURYN_SCIP_TYPESCRIPT` override, else
+    `scip-typescript` on PATH (a user-controlled global/dev install). We deliberately DON'T consult the
+    indexed repo's `node_modules/.bin`, nor let `npx` fetch one; run_scip further refuses any binary that
+    resolves inside the indexed tree. See scip_runner.resolve_trusted_tool for the trust model."""
+    return scip_runner.resolve_trusted_tool(
+        env_var="AURYN_SCIP_TYPESCRIPT", which="scip-typescript",
+        unavailable=ScipTypescriptUnavailable, hint=_INSTALL_HINT)
 
 
 def run_scip(root: str) -> bytes:
@@ -89,7 +73,7 @@ def run_scip(root: str) -> bytes:
     `index.scip` as if it were our output. (A config created by an unrelated process DURING indexing is an
     inherent, narrow race; auryn's own ingests are serialized per repo by sync_lock.)"""
     cmd = _tool_command()
-    if _is_inside(cmd[0], root):  # never run a scip-typescript that lives inside the (untrusted) indexed tree
+    if scip_runner.is_inside(cmd[0], root):  # never run a scip-typescript from inside the (untrusted) tree
         raise ScipTypescriptUnavailable(f"refusing to run scip-typescript from inside the indexed tree: {cmd[0]}")
     stray = os.path.join(root, "index.scip")
     tsconfig = os.path.join(root, "tsconfig.json")
