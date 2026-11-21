@@ -177,10 +177,16 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
                         "still landing -- poll auryn_status until depth is 'deep'. If deep is disabled or "
                         "unavailable here, 'fast' is the final depth."}
 
-    def _attach_deepening(out: dict, note: dict | None) -> dict:
-        """Attach a deepening `note` -- snapshotted via _deepening() BEFORE the traversal ran, so a deep
-        pass landing between the traversal and the depth check can't drop it (a false-negative note would
-        hand back a shallow result with no warning) -- to a call-resolution-dependent result."""
+    def _attach_deepening(g, out: dict, note_before: dict | None) -> dict:
+        """Attach the deepening note to a call-resolution-dependent result, closing the TOCTOU in BOTH
+        directions around the traversal. `note_before` is _deepening(g) snapshotted BEFORE the traversal:
+        it catches a project that was shallow when the traversal read it even if a deep pass has since
+        landed (a conservative, still-correct note). If that was clean -- every project looked deep -- we
+        re-check AFTER the traversal too, because a concurrent resync could have downgraded a project to
+        "fast" between the snapshot and the traversal, and we'd otherwise hand back a shallow result with
+        no warning. The re-check costs one extra (cheap, Project-only) read, and only in the steady
+        all-deep state; while anything is still deepening, note_before already carries the note."""
+        note = note_before if note_before is not None else _deepening(g)
         if note is not None:
             out["deepening"] = note
         return out
@@ -231,7 +237,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         out = {"graph": gname, **status}
         if not status.get("has_data"):
             out["hint"] = _EMPTY_HINT
-        return _attach_deepening(out, deepening)  # surface whether a background deep pass is still landing
+        return _attach_deepening(g, out, deepening)  # surface whether a background deep pass is still landing
 
     @tool(read_only, "read")
     def list_graphs() -> dict[str, Any]:
@@ -452,7 +458,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         result = gq.callers(g, node_id, max_depth)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
-        return _attach_deepening({"graph": gname, **result}, deepening)
+        return _attach_deepening(g, {"graph": gname, **result}, deepening)
 
     @tool(read_only, "read")
     def callees(node_id: str, max_depth: int = gq.DEFAULT_CALL_DEPTH, graph: str | None = None) -> dict[str, Any]:
@@ -464,7 +470,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         result = gq.callees(g, node_id, max_depth)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
-        return _attach_deepening({"graph": gname, **result}, deepening)
+        return _attach_deepening(g, {"graph": gname, **result}, deepening)
 
     @tool(read_only, "read")
     def find_path(
@@ -488,7 +494,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         result = gq.shortest_path(g, from_id, to_id, max_depth, directed, edge_types)
         if result is None:
             raise ValueError("one of the endpoint ids doesn't exist -- call locate() first")
-        return _attach_deepening({"graph": gname, **result}, deepening)
+        return _attach_deepening(g, {"graph": gname, **result}, deepening)
 
     @tool(read_only, "read")
     def impact_of(
@@ -509,7 +515,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         result = gq.impact_of(g, node_id, direction, max_depth, edge_types, limit)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
-        return _attach_deepening({"graph": gname, **result}, deepening)
+        return _attach_deepening(g, {"graph": gname, **result}, deepening)
 
     @tool(read_only, "read", title="What will this change break?")
     def impact_of_diff(
@@ -562,7 +568,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         result = gq.trace_entrypoint(g, entry_id, max_depth, limit)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=entry_id, graph_name=gname))
-        return _attach_deepening({"graph": gname, **result}, deepening)
+        return _attach_deepening(g, {"graph": gname, **result}, deepening)
 
     # -- escape hatch --------------------------------------------------------------
 
