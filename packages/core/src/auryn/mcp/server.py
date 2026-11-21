@@ -51,7 +51,12 @@ of pulling whole files into context.
 Typical workflow:
   1. `auryn_status` -- is there a graph for this repo yet, and what's in it?
   2. If empty, `index_repository(path=".")` to build it (local dir; `ingest_repository`
-     for a git URL). Indexing is a one-time cost; queries afterward are cheap.
+     for a git URL). Indexing is a one-time cost; queries afterward are cheap. Deep analysis
+     (precise call resolution -- trait/generic dispatch, cross-module/crate, untyped receivers)
+     runs ASYNC by default: the graph is queryable immediately but keeps DEEPENING in the
+     background. While it does, `auryn_status` and the call/impact tools (who_calls, callees,
+     impact_of, find_path, trace_entrypoint) carry a `deepening` note -- so if precise call edges
+     matter, re-query or poll `auryn_status` until its `depth` is "deep".
   3. Find your starting symbol, then pivot on the `id` it returns (every other tool takes
      the internal `id`, never a display name):
        - `locate(name=...)` when you know the name (case-insensitive substring).
@@ -149,6 +154,33 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
             state["embedder"] = get_embedder()
         return state["embedder"]
 
+    def _deepening(g) -> dict | None:
+        """A note when the graph is still DEEPENING: any Project at depth="fast" has a background/async
+        deep pass (jedi / Roslyn / rust-analyzer) that hasn't landed yet, so its precise call edges
+        (trait/generic dispatch, untyped-receiver and cross-module/crate calls) may be missing. Returns
+        None once every two-phase project is "deep" (single-phase projects set no depth, so they never
+        trip this). With deep now async by default, this is what tells an agent a who_calls/impact result
+        might be incomplete -- so it can re-query or wait."""
+        try:
+            rows = g.ro_query("MATCH (p:Project) WHERE p.depth = 'fast' RETURN DISTINCT p.name").result_set
+        except Exception:
+            return None  # a malformed/empty graph must never break a read
+        pending = sorted({str(r[0]) for r in rows if r and r[0] is not None})
+        if not pending:
+            return None
+        return {"depth": "fast", "projects": pending,
+                "note": "this graph is still deepening in the background; call resolution is currently "
+                        "name-based, so deep-only edges (trait/generic dispatch, untyped-receiver and "
+                        "cross-module/crate calls) may be missing. Re-query shortly, or poll auryn_status "
+                        "until depth is 'deep'."}
+
+    def _with_deepening(g, out: dict) -> dict:
+        """Annotate a call-resolution-dependent result with the deepening note, when applicable."""
+        note = _deepening(g)
+        if note is not None:
+            out["deepening"] = note
+        return out
+
     def tool(annotations: ToolAnnotations, op: str, **tool_kwargs):
         """Register a tool AND record each call as a usage event (core/usage.py) -- so every graph
         access is counted by operation type. `tool_kwargs` (e.g. `title=`) pass through to the MCP
@@ -194,7 +226,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         out = {"graph": gname, **status}
         if not status.get("has_data"):
             out["hint"] = _EMPTY_HINT
-        return out
+        return _with_deepening(g, out)  # surface whether a background deep pass is still landing
 
     @tool(read_only, "read")
     def list_graphs() -> dict[str, Any]:
@@ -414,7 +446,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         result = gq.callers(g, node_id, max_depth)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
-        return {"graph": gname, **result}
+        return _with_deepening(g, {"graph": gname, **result})
 
     @tool(read_only, "read")
     def callees(node_id: str, max_depth: int = gq.DEFAULT_CALL_DEPTH, graph: str | None = None) -> dict[str, Any]:
@@ -425,7 +457,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         result = gq.callees(g, node_id, max_depth)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
-        return {"graph": gname, **result}
+        return _with_deepening(g, {"graph": gname, **result})
 
     @tool(read_only, "read")
     def find_path(
@@ -448,7 +480,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         result = gq.shortest_path(g, from_id, to_id, max_depth, directed, edge_types)
         if result is None:
             raise ValueError("one of the endpoint ids doesn't exist -- call locate() first")
-        return {"graph": gname, **result}
+        return _with_deepening(g, {"graph": gname, **result})
 
     @tool(read_only, "read")
     def impact_of(
@@ -468,7 +500,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         result = gq.impact_of(g, node_id, direction, max_depth, edge_types, limit)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
-        return {"graph": gname, **result}
+        return _with_deepening(g, {"graph": gname, **result})
 
     @tool(read_only, "read", title="What will this change break?")
     def impact_of_diff(
@@ -520,7 +552,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         result = gq.trace_entrypoint(g, entry_id, max_depth, limit)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=entry_id, graph_name=gname))
-        return {"graph": gname, **result}
+        return _with_deepening(g, {"graph": gname, **result})
 
     # -- escape hatch --------------------------------------------------------------
 

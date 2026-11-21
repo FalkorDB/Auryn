@@ -158,7 +158,10 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
     loc_by_id = {loc.id: loc for loc in locations}
     unresolved_by_id = {cid: _recompute_unresolved(loc_by_id[cid], deep.seen_by_caller.get(cid, set()))
                         for cid in deep.covered_ids}
-    project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "deep")
+    # Keep the project node at "fast" in the delta; the depth is bumped to "deep" by an ATOMIC guarded
+    # write AFTER the delta lands (see below), so a concurrent ingest that moved the commit can't be
+    # overwritten with a stale "deep" claim.
+    project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "fast")
 
     def make_target():  # a GENERATOR (not a materialized list) -- preserves stream_apply's bounded memory
         yield project_node
@@ -191,6 +194,10 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
 
     result = _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(files),
                     diff_extern_edges=not is_upgrade)
+    # Atomically stamp depth="deep" only if the graph is STILL at this commit -- a single guarded write
+    # (GraphWriter.set_if) that no-ops if a concurrent ingest moved the commit while we deepened, so the
+    # depth marker never makes a stale deep claim (closes the read-then-decide TOCTOU).
+    writer.set_if("Project", proj_id, "depth", "deep", "commit_sha", target_sha)
     logger.info("rust deep: %d resolved / %d external CALLS over %d/%d callables covered",
                 deep.metrics["resolved"], deep.metrics["external"], len(deep.covered_ids), len(locations))
     _reconcile_cargo(writer, proj_id, source, target_sha)
