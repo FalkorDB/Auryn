@@ -12,9 +12,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from auryn.core import ingest
+from auryn.core import ingest, scip
 from auryn.core.graph_client import GraphWriter
-from auryn.ingestors.rust import resolution, rust_analyzer, scip
+from auryn.core.scip_resolve import _is_callable_symbol, _simple_name, resolve_calls
+from auryn.ingestors.rust import resolution, rust_analyzer
 from auryn.ingestors.rust.file_parser import parse_source
 from auryn.ingestors.rust.ids import project_id
 
@@ -43,12 +44,12 @@ def test_scip_reader_decodes_documents_and_occurrences():
 
 
 def test_symbol_helpers():
-    assert rust_analyzer._is_callable_symbol("rust-analyzer cargo c 1.0 Fast#Run#run().")
-    assert not rust_analyzer._is_callable_symbol("rust-analyzer cargo c 1.0 via_dyn().(x)")  # a param
-    assert not rust_analyzer._is_callable_symbol("local 7")
-    assert rust_analyzer._simple_name("rust-analyzer cargo c 1.0 Fast#Run#run().") == "run"
-    assert rust_analyzer._simple_name("rust-analyzer cargo c 1.0 other/deep().") == "deep"
-    assert rust_analyzer._simple_name("rust-analyzer cargo c 1.0 helper().") == "helper"
+    assert _is_callable_symbol("rust-analyzer cargo c 1.0 Fast#Run#run().")
+    assert not _is_callable_symbol("rust-analyzer cargo c 1.0 via_dyn().(x)")  # a param
+    assert not _is_callable_symbol("local 7")
+    assert _simple_name("rust-analyzer cargo c 1.0 Fast#Run#run().") == "run"
+    assert _simple_name("rust-analyzer cargo c 1.0 other/deep().") == "deep"
+    assert _simple_name("rust-analyzer cargo c 1.0 helper().") == "helper"
 
 
 # -- callable_locations parity (deep edges must land on the fast pass's node ids) ----------------
@@ -70,7 +71,7 @@ def test_callable_locations_match_resolution_node_ids():
 
 def test_resolve_calls_resolves_what_the_name_pass_cannot():
     locs = _fixture_locations()
-    deep = rust_analyzer.resolve_calls(_SCIP.read_bytes(), locs)
+    deep = resolve_calls(_SCIP.read_bytes(), locs)
     assert deep.metrics["resolved"] == 5 and deep.metrics["external"] == 0
     by_id = {loc.id: loc for loc in locs}
     pairs = {(by_id[e.from_key["id"]].name, e.to_key["id"]) for e in deep.edges}
@@ -92,7 +93,7 @@ def test_resolve_calls_resolves_what_the_name_pass_cannot():
 
 def test_resolve_calls_tracks_coverage_and_what_scip_resolved():
     locs = _fixture_locations()
-    deep = rust_analyzer.resolve_calls(_SCIP.read_bytes(), locs)
+    deep = resolve_calls(_SCIP.read_bytes(), locs)
     by_name = {loc.name: loc for loc in locs}
     # every fixture callable is in the active crate, so all are covered (overlay scope)
     assert deep.covered_ids == {loc.id for loc in locs}
@@ -109,7 +110,7 @@ def test_fn_pointer_calls_stay_unresolved_after_deep():
     from auryn.ingestors.rust.git_sync import _recompute_unresolved
 
     locs = _fixture_locations()
-    deep = rust_analyzer.resolve_calls(_SCIP.read_bytes(), locs)
+    deep = resolve_calls(_SCIP.read_bytes(), locs)
     by_name = {loc.name: loc for loc in locs}
     for name in ("calls_param", "macro_fnptr"):
         loc = by_name[name]
@@ -120,7 +121,7 @@ def test_fn_pointer_calls_stay_unresolved_after_deep():
 
 def test_resolve_calls_is_empty_without_matching_locations():
     # SCIP for a different project (no overlapping files) resolves nothing -- never crashes.
-    deep = rust_analyzer.resolve_calls(_SCIP.read_bytes(), [])
+    deep = resolve_calls(_SCIP.read_bytes(), [])
     assert deep.edges == [] and deep.metrics["resolved"] == 0 and deep.covered_ids == set()
 
 
