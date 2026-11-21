@@ -1,8 +1,9 @@
 """The shared SCIP -> CALLS resolver (`core.scip_resolve`), driven at the core level with a synthetic
 `index.scip` built by a tiny in-test encoder -- no indexer toolchain, no language fixture. This pins the
 language-agnostic gate behavior the per-language deep passes rely on: the line-precise `require_call_site`
-gate (value references filtered, aliased imports recovered) versus the coarser `require_syntactic_call`
-name gate. Each language's own deep test covers its CallableLocation bridge against a real captured index."""
+gate (a reference is a call only on a line that has a syntactic call of that name) versus the coarser
+`require_syntactic_call` name gate. Each language's own deep test covers its CallableLocation bridge
+against a real captured index."""
 
 from __future__ import annotations
 
@@ -44,76 +45,94 @@ def _index(path: str, occs: list[bytes]) -> bytes:
     return _len_field(2, doc)
 
 
-def _sym(name: str) -> str:
-    return f"scip x pkg v {name}()."  # a callable descriptor -- ends `).`
+def _sym(name: str, pkg_path: str = "") -> str:
+    # a callable descriptor -- ends `).`; pkg_path lets two symbols share a simple name (`dup` vs `sub/dup`)
+    return f"scip x pkg v {pkg_path}{name}()."
 
 
 _FILE = "src/m.ts"
 
 
-def _scene() -> tuple[bytes, list[CallableLocation]]:
-    """`caller` (lines 1-10) makes: a real call `target()` on line 3; an ALIASED call on line 5 whose
-    fast name is `h` but which SCIP names `aliased`; and a VALUE reference `return target` on line 7
-    (no call site). `target`/`aliased`/`other` are defined far below. `other` is referenced as a value
-    on line 8 but never called."""
-    caller = CallableLocation(
-        "caller", "Function", _FILE, 1, 10, "caller",
-        called_names=frozenset({"target", "h"}),
-        called_sites=frozenset({("target", 3), ("h", 5)}),
-    )
-    defs = [CallableLocation(n, "Function", _FILE, ls, ls + 1, n, frozenset(), frozenset())
-            for n, ls in (("target", 20), ("aliased", 30), ("other", 40))]
-    occs = [
-        _occ(_sym("caller"), 0, is_def=True),   # line 1
-        _occ(_sym("target"), 2),                # line 3  -- real call
-        _occ(_sym("aliased"), 4),               # line 5  -- aliased call (fast saw `h`)
-        _occ(_sym("target"), 6),                # line 7  -- value reference (dedups to the line-3 edge)
-        _occ(_sym("other"), 7),                 # line 8  -- value reference, never called
-        _occ(_sym("target"), 19, is_def=True),
-        _occ(_sym("aliased"), 29, is_def=True),
-        _occ(_sym("other"), 39, is_def=True),
-    ]
-    return _index(_FILE, occs), [caller, *defs]
+def _loc(node_id: str, name: str, line_start: int, line_end: int,
+         sites: set[tuple[str, int]] = frozenset()) -> CallableLocation:
+    return CallableLocation(node_id, "Function", _FILE, line_start, line_end, name,
+                            frozenset(n for n, _ in sites), frozenset(sites))
 
 
-def _pairs(**kw) -> set[tuple[str, str]]:
-    scip_bytes, locs = _scene()
-    return {(e.from_key["id"], e.to_key["id"]) for e in resolve_calls(scip_bytes, locs, **kw).edges}
-
-
-def test_require_call_site_recovers_an_aliased_call_the_name_gate_drops():
-    # SCIP names the call `aliased`; the fast parse recorded the alias `h` on the same line. The name gate
-    # can't see through the rename; the line gate accepts the sole call on that line.
-    call_site = _pairs(require_call_site=True)
-    name_gate = _pairs(require_syntactic_call=True)
-    assert ("caller", "aliased") in call_site
-    assert ("caller", "aliased") not in name_gate
+def _edges(locations: list[CallableLocation], occs: list[bytes], **kw) -> set[tuple[str, str]]:
+    return {(e.from_key["id"], e.to_key["id"])
+            for e in resolve_calls(_index(_FILE, occs), locations, **kw).edges}
 
 
 def test_require_call_site_keeps_real_calls_and_filters_value_references():
-    pairs = _pairs(require_call_site=True)
-    assert ("caller", "target") in pairs        # the real call on line 3
-    assert ("caller", "other") not in pairs      # `return other` -- a value, no call site on its line
-    # the line-7 `return target` adds no distinct edge (it dedups onto the line-3 call), so no over-count
-    assert pairs == {("caller", "target"), ("caller", "aliased")}
+    # `caller` calls `target()` on line 3 and references `other` as a value on line 10 (never called).
+    caller = _loc("caller", "caller", 1, 12, {("target", 3)})
+    target = _loc("target", "target", 20, 21)
+    other = _loc("other", "other", 30, 31)
+    occs = [
+        _occ(_sym("caller"), 0, is_def=True),
+        _occ(_sym("target"), 2),            # line 3 -- real call
+        _occ(_sym("other"), 9),             # line 10 -- `return other`, a value use
+        _occ(_sym("target"), 19, is_def=True),
+        _occ(_sym("other"), 29, is_def=True),
+    ]
+    locs = [caller, target, other]
+    assert _edges(locs, occs, require_call_site=True) == {("caller", "target")}
+    # the baseline the gate fixes: ungated, the value reference becomes a spurious edge
+    assert _edges(locs, occs) == {("caller", "target"), ("caller", "other")}
 
 
-def test_ungated_admits_value_references_as_spurious_calls():
-    # The baseline the gates exist to fix: with neither gate, every reference becomes a CALLS edge.
-    assert _pairs() == {("caller", "target"), ("caller", "aliased"), ("caller", "other")}
+def test_require_call_site_does_not_emit_a_function_valued_argument_as_a_call():
+    # `callback(helper)` on line 5: the fast parse records the CALL `callback`, and `helper` is a value
+    # argument. SCIP reports both on line 5 -> `callback` is the call, `helper` must NOT become an edge.
+    caller = _loc("caller", "caller", 1, 10, {("callback", 5)})
+    callback = _loc("callback", "callback", 20, 21)
+    helper = _loc("helper", "helper", 30, 31)
+    occs = [
+        _occ(_sym("caller"), 0, is_def=True),
+        _occ(_sym("callback"), 4),          # line 5 -- the call
+        _occ(_sym("helper"), 4),            # line 5 -- a function-valued argument, not a call
+        _occ(_sym("callback"), 19, is_def=True),
+        _occ(_sym("helper"), 29, is_def=True),
+    ]
+    pairs = _edges([caller, callback, helper], occs, require_call_site=True)
+    assert ("caller", "callback") in pairs      # the real call
+    assert ("caller", "helper") not in pairs     # the value argument -- not a call
 
 
-def test_require_call_site_is_conservative_when_two_calls_share_the_aliased_line():
-    # Two distinct call sites on the aliased line -> the line gate can't tell which the SCIP name maps to,
-    # so it declines to recover the alias (the same-line residual that needs occurrence columns, #802).
-    scip_bytes, locs = _scene()
-    caller = locs[0]
-    locs[0] = CallableLocation(
-        caller.id, caller.label, caller.rel_path, caller.line_start, caller.line_end, caller.name,
-        called_names=caller.called_names | {"g"},
-        called_sites=caller.called_sites | {("g", 5)},  # a second call now shares line 5
-    )
-    pairs = {(e.from_key["id"], e.to_key["id"])
-             for e in resolve_calls(scip_bytes, locs, require_call_site=True).edges}
-    assert ("caller", "aliased") not in pairs
-    assert ("caller", "target") in pairs  # the unambiguous call is unaffected
+def test_require_call_site_is_stricter_than_the_body_wide_name_gate():
+    # `caller` calls `dup` (-> dupA) on line 4, and references a DIFFERENT same-named `dup` (-> dupB) as a
+    # value on line 8. The body-wide name gate admits both (the name `dup` is called somewhere); the
+    # line-precise gate admits only the real call -- line 8 has no `dup` call site.
+    caller = _loc("caller", "caller", 1, 10, {("dup", 4)})
+    dup_a = _loc("dupA", "dup", 20, 21)
+    dup_b = _loc("dupB", "dup", 30, 31)
+    occs = [
+        _occ(_sym("caller"), 0, is_def=True),
+        _occ(_sym("dup"), 3),                       # line 4 -- real call -> dupA
+        _occ(_sym("dup", "sub/"), 7),               # line 8 -- value use of a same-named dupB
+        _occ(_sym("dup"), 19, is_def=True),
+        _occ(_sym("dup", "sub/"), 29, is_def=True),
+    ]
+    locs = [caller, dup_a, dup_b]
+    assert _edges(locs, occs, require_call_site=True) == {("caller", "dupA")}
+    assert _edges(locs, occs, require_syntactic_call=True) == {("caller", "dupA"), ("caller", "dupB")}
+
+
+def test_require_call_site_needs_every_call_site_line_recorded():
+    # A call to `target` only on line 8. If the fast parse recorded that site's line, the SCIP reference on
+    # line 8 resolves; if a name-only dedup had dropped it (keeping only an earlier line), it would be lost.
+    target = _loc("target", "target", 20, 21)
+    occs = [
+        _occ(_sym("caller"), 0, is_def=True),
+        _occ(_sym("target"), 7),            # line 8 -- the call
+        _occ(_sym("target"), 19, is_def=True),
+    ]
+    recorded = _loc("caller", "caller", 1, 12, {("target", 8)})
+    assert _edges([recorded, target], occs, require_call_site=True) == {("caller", "target")}
+    dropped = _loc("caller", "caller", 1, 12, {("target", 3)})  # the site's real line 8 was lost
+    assert _edges([dropped, target], occs, require_call_site=True) == set()
+
+
+def test_resolve_calls_is_empty_without_matching_locations():
+    assert resolve_calls(_index(_FILE, [_occ(_sym("x"), 0)]), []).edges == []

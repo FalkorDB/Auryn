@@ -15,9 +15,12 @@ the `CallableLocation` bridge live in each language's ingestor; everything here 
 The join is (file, line)-granular: SCIP occurrence columns are indexer-specific (scip-typescript emits
 UTF-16 code units, rust-analyzer UTF-8), but the first range element is a plain line number, encoding-
 independent -- so a line-based containment join needs no column handling. A language that records each
-call site's line (`CallableLocation.called_sites`) additionally tells a real call from a value reference
-and recovers aliased imports via `resolve_calls(require_call_site=True)`. The last residual -- two calls
-to the *same* name on one line -- needs occurrence columns (scip-code.org v2, tracked in #802)."""
+call site's name+line (`CallableLocation.called_sites`) additionally tells a real call from a value
+reference via `resolve_calls(require_call_site=True)` -- a reference to a callable that sits on a line with
+no syntactic call of that name (`return helper`) is a value use, not a call. What a line alone CANNOT do
+is recognize an aliased call (`import {helper as h}; h()` -- SCIP names it `helper`, the fast parse `h`)
+or disambiguate two calls to the same name on one line: both need occurrence COLUMNS to tie a SCIP
+occurrence to a specific call site (scip-code.org v2, tracked in #802)."""
 
 from __future__ import annotations
 
@@ -46,13 +49,15 @@ class CallableLocation:
     called_names: frozenset[str]  # callee simple names the fast parse saw as CALLS in this body -- lets the
     # deep pass disambiguate same-line callers and recompute unresolved_calls from what SCIP resolved
     called_sites: frozenset[tuple[str, int]] = frozenset()
-    """(callee name, callee-identifier line) for every syntactic call the fast parse saw in this body,
+    """(callee name, callee-identifier line) for EVERY syntactic call the fast parse saw in this body,
     1-based -- the line-precise upgrade of `called_names`. Lets `resolve_calls(require_call_site=True)` tell a
-    real call from a value reference by the exact line (`return helper` carries no call site on its line) and
-    recover an aliased import (`import {helper as h}; h()` -- SCIP names the call `helper`, the fast parse `h`,
-    but both land on the same line). Empty when a language hasn't adopted call-site recording -- then the
-    coarser `require_syntactic_call` name gate applies instead. The line is the callee *identifier's* line
-    (what SCIP anchors an occurrence to), not the call expression's first line, so a multi-line call matches."""
+    real call from a value reference by the exact (name, line): `return helper` carries no call site on its
+    line, so SCIP's reference to `helper` there is not emitted as a call. Must record every call site's line
+    (a call to the same name on two lines needs both). Empty when a language hasn't adopted call-site
+    recording -- then the coarser `require_syntactic_call` name gate applies instead. The line is the callee
+    *identifier's* line (what SCIP anchors an occurrence to), not the call expression's first line, so a
+    multi-line call matches. (Recognizing an ALIASED call, where the SCIP name differs from the fast name,
+    needs occurrence columns -- see the module docstring and #802.)"""
 
 
 @dataclass
@@ -147,12 +152,13 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
     the overlay drops.
 
     `require_call_site`: the line-precise successor to `require_syntactic_call`. When True, only emit an edge
-    when the reference lands on a line where the fast parse recorded a syntactic call (`caller.called_sites`):
-    the callee name matches a site on that line, OR exactly one call site sits on that line (an aliased
-    import -- SCIP reports the canonical name, the fast parse the alias, but both occupy the same line). This
-    filters value references precisely (`return helper` on its own line carries no call site) AND recovers
-    aliases the name gate drops. A caller with no recorded call site on the reference's line admits nothing.
-    Requires each caller to populate `called_sites`; it takes precedence over `require_syntactic_call`.
+    when the fast parse recorded a syntactic call of that exact name on the reference's line
+    (`(callee_name, ref_line) in caller.called_sites`). This filters value references precisely -- `return
+    helper` on its own line carries no call site there, so SCIP's reference to `helper` is not a call -- and,
+    unlike the body-wide name gate, it drops a value reference to a callable whose name happens to match a
+    call elsewhere in the body. It does NOT recognize an aliased call (SCIP's name differs from the fast
+    name) -- that needs occurrence columns (#802); such a reference is simply left to the fast pass. Requires
+    each caller to populate `called_sites`; it takes precedence over `require_syntactic_call`.
 
     `require_syntactic_call`: the coarser name-only gate (pre-`called_sites`). When True, only emit an edge
     when the callee's name is one the fast parse recorded as a CALL anywhere in that caller's body
@@ -224,9 +230,8 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
             if target.id == caller.id and not emit_self_calls:
                 continue  # self-reference / recursion -- skipped only where the fast pass omits self-CALLS
             if require_call_site:
-                names_on_line = [n for n, ln in caller.called_sites if ln == ref_line]
-                if callee_name not in names_on_line and len(names_on_line) != 1:
-                    continue  # no call site on this line (value use), or ambiguous -> not an aliased call
+                if (callee_name, ref_line) not in caller.called_sites:
+                    continue  # no syntactic call to this name on this line -> a value reference, not a call
             elif require_syntactic_call and callee_name not in caller.called_names:
                 continue  # a reference, not a call (value use: `return helper` / `callback(helper)`)
             key = (caller.id, target.id)

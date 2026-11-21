@@ -110,6 +110,21 @@ def test_callable_locations_record_call_sites_at_the_callee_identifier_line():
     assert not any(name == "target" and line == 5 for name, line in caller.called_sites)  # value ref
 
 
+def test_call_sites_keep_every_line_of_a_repeated_call():
+    # The line-precise gate needs EVERY call site's line: a name-only dedup would keep just one, so a call
+    # to the same function on two lines must record both.
+    src = (
+        b"function caller() {\n"       # line 1
+        b"  target();\n"               # line 2
+        b"  target();\n"               # line 3
+        b"}\n"
+        b"function target() {}\n"
+    )
+    locs = resolution.callable_locations([parse_source(src, "src/a.ts")], project_id("p"))
+    caller = next(l for l in locs if l.name == "caller")
+    assert ("target", 2) in caller.called_sites and ("target", 3) in caller.called_sites
+
+
 # -- the resolver: inferred-receiver dispatch, same-name disambiguation, cross-module ------------
 
 def test_resolve_calls_resolves_what_the_name_pass_cannot():
@@ -254,33 +269,3 @@ def test_deep_inline_resolves_calls_end_to_end(graph, tmp_path):
         "MATCH (:Function {name:'getHelper'})-[:CALLS]->(:Function {name:'helper'}) RETURN count(*)"
     ).result_set
     assert val == [[0]]
-
-
-@pytest.mark.skipif(not _scip_typescript_available(),
-                    reason="requires a working scip-typescript (npm i -g @sourcegraph/scip-typescript)")
-def test_deep_recovers_an_aliased_import_call_end_to_end(graph, tmp_path):
-    # `import { helper as h }; h()` -- the fast parse records the alias `h`, so a name-only gate (and the
-    # fast pass itself) can't tie the call to `helper`. The line-precise call-site gate accepts the sole
-    # call on that line, so deep resolves it. Prove it's a DEEP win: fast-only has no such edge.
-    proj = tmp_path / "aliaspkg"
-    (proj / "src").mkdir(parents=True)
-    (proj / "src" / "helpers.ts").write_text("export function helper() { return 1; }\n")
-    (proj / "src" / "main.ts").write_text(
-        'import { helper as h } from "./helpers";\n'
-        "export function caller() {\n"
-        "  return h();\n"
-        "}\n"
-    )
-
-    def _caller_to_helper(name):
-        return graph.query(
-            "MATCH (:Function {name:'caller'})-[e:CALLS]->(t:Function {name:'helper'}) "
-            f"WHERE t.id CONTAINS '{name}' RETURN e.resolution"
-        ).result_set
-
-    ingest.ingest_directory(GraphWriter(graph), str(proj), project_name="aliasfast", deep="off")
-    assert _caller_to_helper("aliasfast") == []  # the fast pass can't resolve the aliased import call
-
-    ingest.ingest_directory(GraphWriter(graph), str(proj), project_name="aliasdeep", deep="inline")
-    assert _depth(graph, "aliasdeep") == "deep"
-    assert _caller_to_helper("aliasdeep") == [["resolved"]]  # deep recovers it through the alias

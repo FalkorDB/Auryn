@@ -196,11 +196,11 @@ def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, pro
         (_stamped(load_fn(sha), path) for path, sha in file_refs), proj_id)
     # require_call_site: a SCIP reference to a function isn't always a call -- `return helper` /
     # `callback(helper)` / `typeof helper` use it as a VALUE. Gating on the exact line where the fast parse
-    # recorded a call (not just the name, anywhere in the body) keeps deep from inventing CALLS edges for
-    # those (JS/TS lean on higher-order functions) AND recovers aliased imports (`import {helper as h}`:
-    # SCIP names the call `helper`, the fast parse `h`, but both land on the same line) that the old
-    # name-only gate dropped. The fast parse records every syntactic call site with its callee-identifier
-    # line, so the gate is precise.
+    # recorded a call of that name (not just the name, anywhere in the body) keeps deep from inventing CALLS
+    # edges for those (JS/TS lean on higher-order functions), including a value use of a name that IS called
+    # on another line. The fast parse records every syntactic call site with its callee-identifier line.
+    # (An aliased call -- `import {helper as h}; h()`, where SCIP's name `helper` differs from the fast name
+    # `h` -- needs occurrence columns to resolve; it's left to the fast pass for now. See #802.)
     # emit_self_calls: the TS fast pass emits self-CALLS, so deep must too -- it precisely replaces a fast
     # recursive edge, captures recursion even when a duplicate-named fast guess was dropped, and lets the
     # overlay drop a FALSE self-guess (e.g. `xs.map()` guessed as the enclosing `map`) that SCIP resolved

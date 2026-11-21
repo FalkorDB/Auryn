@@ -314,14 +314,18 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                 callee = field(n, "constructor" if is_new else "function")
                 nm, recv = _callee(callee)
                 if nm:
-                    key = (nm, recv, is_new)
+                    line = _callee_line(callee)
+                    # Dedup by line too: the deep pass's line-precise gate needs EVERY call site's line, so
+                    # `x.run()` on two lines must keep both (a name-only key would drop the second). Same
+                    # (name, receiver, kind) on the SAME line is still one call.
+                    key = (nm, recv, is_new, line)
                     if key not in seen:
                         seen.add(key)
                         http_url = http_method = None
                         if not is_new and _is_http_idiom(nm, recv, http_client_vars):  # gate the arg walk (perf)
                             http_url, http_method = _http_request(n, nm)
                         out.append(RawCall(name=nm, receiver=recv, is_new=is_new, http_url=http_url,
-                                           http_method=http_method, line=_callee_line(callee)))
+                                           http_method=http_method, line=line))
             stack.extend(n.children)
         return out
 
