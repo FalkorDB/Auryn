@@ -306,18 +306,16 @@ def callable_locations(raw_files: list[RawFile], project_id: str):
                                         r.line_start, r.line_end, r.name,
                                         frozenset(c.name for c in r.calls)))
 
-    # free functions (incl. degraded namespace-qualified defs): dedup by id (definition wins), keyed to def file
+    # free functions (incl. degraded namespace-qualified defs): dedup by id, definition wins. Keep the
+    # chosen record's file WITH it (the same (file, line span, calls) must stay together) -- separate
+    # first-def / last-def bookkeeping would pair one body's span with another TU's file.
     chosen: dict[str, tuple] = {}  # function_id -> (_FuncRec, def_file_id)
-    func_def_file: dict[str, str] = {}
     for path, fn in [(rf.path, fn) for rf in raw_files for fn in rf.functions] + extra_functions:
         fr = _make_func_rec(fn, project_id)
-        if fn.is_definition or fr.function_id not in func_def_file:
-            func_def_file[fr.function_id] = file_ids[path]
         prev = chosen.get(fr.function_id)
         if prev is None or (fr.raw.is_definition and not prev[0].raw.is_definition):
             chosen[fr.function_id] = (fr, file_ids[path])
-    for fr, _fid in chosen.values():
-        fid = func_def_file.get(fr.function_id, _fid)
+    for fr, fid in chosen.values():
         out.append(CallableLocation(fr.function_id, "Function", path_by_fid.get(fid, ""),
                                     fr.raw.line_start, fr.raw.line_end, fr.raw.name,
                                     frozenset(c.name for c in fr.raw.calls)))

@@ -173,6 +173,12 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
             return SyncStats(commit_sha=live or target_sha, elapsed_seconds=time.monotonic() - started)
         return None
 
+    try:  # cheap opt-in gate BEFORE the expensive working_tree() checkout: skip immediately if not opted in
+        scip_clang._tool_command()
+    except scip_clang.ScipClangUnavailable as exc:
+        logger.warning("cpp deep pass not opted in (%s); falling back to tree-sitter", exc)
+        return _fall_back()
+
     try:
         # scip-clang needs an on-disk checkout + a compile_commands.json whose absolute paths match it (so
         # in practice a LOCAL-directory source, the live tree where the build generated the compdb). It

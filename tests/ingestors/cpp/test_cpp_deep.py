@@ -89,6 +89,16 @@ def test_resolve_calls_resolves_what_the_name_pass_cannot():
     assert ("run", "Circle") in pairs
 
 
+def test_same_id_function_across_tus_keeps_file_and_span_together():
+    # Two TUs defining a same-signature free function share one function id; the location must pair the
+    # CHOSEN definition's file with its OWN line span (not another TU's file) so the SCIP join lands.
+    files = [parse_source(b"int helper() { return 1; }\n", "a.cpp"),
+             parse_source(b"\n\n\nint helper() { return 2; }\n", "b.cpp")]
+    helpers = [loc for loc in resolution.callable_locations(files, _PROJ) if loc.name == "helper"]
+    assert len(helpers) == 1
+    assert helpers[0].rel_path == "a.cpp" and helpers[0].line_start == 1  # chosen (first) def's file AND span
+
+
 def test_resolve_calls_tracks_coverage():
     locs = _fixture_locations()
     deep = resolve_calls(_SCIP.read_bytes(), locs, emit_self_calls=True)

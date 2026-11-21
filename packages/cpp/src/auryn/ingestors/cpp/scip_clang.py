@@ -97,8 +97,11 @@ def run_scip(root: str) -> bytes:
             raise ScipClangUnavailable(f"could not execute {argv[0]!r}: {exc}") from exc
         except subprocess.TimeoutExpired as exc:
             raise ScipClangUnavailable(f"scip-clang timed out after {_SCIP_TIMEOUT_SECONDS}s") from exc
-        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        # scip-clang indexes best-effort THROUGH per-TU compile diagnostics and still exits 0; a NON-zero
+        # exit is a real failure (bad compdb, crash) whose index may be truncated -- reject it rather than
+        # read a partial/corrupt index.
+        if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
             tail = (proc.stderr or b"").decode("utf-8", "replace")[-600:]
-            raise ScipClangUnavailable(f"scip-clang produced no index (exit {proc.returncode}): {tail}")
+            raise ScipClangUnavailable(f"scip-clang failed (exit {proc.returncode}): {tail}")
         with open(out_path, "rb") as fh:
             return fh.read()
