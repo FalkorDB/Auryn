@@ -23,7 +23,6 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from auryn.core.graph_model import GraphEdge, GraphNode
-from auryn.core.scip_resolve import CallableLocation as _BaseCallableLocation
 from auryn.ingestors.rust import cargo, ids
 from auryn.ingestors.rust.raw_model import RawConst, RawField, RawFunction, RawType
 
@@ -147,13 +146,23 @@ def resolve_incremental(emit_raws, project_id: str, index: RustGraphIndex) -> li
 
 
 @dataclass(frozen=True)
-class CallableLocation(_BaseCallableLocation):
-    """Rust's callable location: the shared SCIP-join fields (id/label/rel_path/line span/name/
-    called_names -- see core.scip_resolve.CallableLocation) PLUS Rust's `macro_calls`: call-like sites
-    inside macro invocations the fast parse can't name (not in `called_names`; counted, not parsed as
-    RawCalls). The deep pass reconciles these against SCIP's macro-expanded refs when recomputing
-    unresolved_calls (git_sync._recompute_unresolved). `resolve_calls` reads only the shared fields."""
+class CallableLocation:
+    """Where a project callable lives, keyed by its graph node id -- the join the deep (rust-analyzer /
+    SCIP) pass needs. Structurally matches core.scip_resolve.CallableLocation (id/label/rel_path/1-based
+    line span/name/called_names), which `resolve_calls` consumes by duck-typing -- declared standalone
+    (not a subclass) so importing this fast-pass module never requires core.scip_resolve, keeping the fast
+    graph buildable even against an older auryn-core. Adds Rust's `macro_calls`: call-like sites inside
+    macro invocations the fast parse can't name (not in `called_names`; counted, not parsed as RawCalls);
+    the deep pass reconciles these against SCIP's macro-expanded refs when recomputing unresolved_calls
+    (git_sync._recompute_unresolved)."""
 
+    id: str
+    label: str  # "Function" | "Method"
+    rel_path: str
+    line_start: int  # 1-based inclusive
+    line_end: int
+    name: str
+    called_names: frozenset[str]
     macro_calls: int = 0
 
 

@@ -181,7 +181,10 @@ def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, pro
 
     locations = resolution.callable_locations(
         (_stamped(load_fn(sha), path) for path, sha in file_refs), proj_id)
-    deep = resolve_calls(scip_bytes, locations)
+    # require_syntactic_call: a SCIP reference to a function isn't always a call -- `return helper` /
+    # `callback(helper)` / `typeof helper` use it as a VALUE. Gating on the fast parse's recorded call
+    # names keeps deep from inventing CALLS edges for those (JS/TS lean on higher-order functions).
+    deep = resolve_calls(scip_bytes, locations, require_syntactic_call=True)
     if locations and not deep.covered_ids:
         # scip-typescript ran but analyzed none of our callables (no tsconfig/deps, unsupported project):
         # don't make a hollow depth="deep" claim -- fall back to the fast graph.
@@ -202,10 +205,13 @@ def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, pro
         for item in resolution.emit_streaming(plan, load_fn, proj_id):
             if _is_name_calls_edge(item):
                 frm = item.from_key["id"]
-                callee = loc_by_id.get(item.to_key["id"])
+                to = item.to_key["id"]
+                callee = loc_by_id.get(to)
                 # drop a fast name-edge where deep identified that intra-project call (a resolved deep edge
-                # replaces it). Extern/other-repo callees (callee is None -> not a local callable) are kept.
-                if (frm in deep.covered_ids and callee is not None
+                # replaces it). Extern/other-repo callees (callee is None -> not a local callable) are kept;
+                # a SELF edge (recursion: fib -> fib) is kept too, since resolve_calls never emits a
+                # self-edge replacement and dropping it would erase the recursive call entirely.
+                if (to != frm and frm in deep.covered_ids and callee is not None
                         and callee.name in deep.seen_by_caller.get(frm, set())):
                     continue
             yield item

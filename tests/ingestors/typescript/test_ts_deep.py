@@ -56,8 +56,21 @@ def test_symbol_helpers_on_typescript_symbols():
     assert _simple_name(pre + "src/`lib.ts`/Fast#run().") == "run"
     assert _simple_name(pre + "src/`other.ts`/deep().") == "deep"
     assert _simple_name(pre + "src/`lib.ts`/helper().") == "helper"
-    # backtick-escaped names (e.g. filenames, <constructor>) are unwrapped
+    # backtick-escaped names (e.g. filenames, <constructor>, TS private members) are unwrapped
     assert _simple_name(pre + "src/`lib.ts`/Fast#`<constructor>`().") == "<constructor>"
+    assert _simple_name(pre + "src/`lib.ts`/C#`#priv`().") == "#priv"
+
+
+def test_symbol_helpers_handle_overload_disambiguators():
+    # Java packs an overload index into the parens (`(+1)`), scip-clang a hash (`(9b79fb6aee4c0440)`);
+    # both still end `).` and must yield the bare name -- the shared helpers are cross-indexer.
+    assert _is_callable_symbol("scip-java maven . . minimized/Methods#overload(+1).")
+    assert _is_callable_symbol("cxx . pkg v0$ arithmetic/multiply(9b79fb6aee4c0440).")
+    assert _simple_name("scip-java maven . . minimized/Methods#overload(+1).") == "overload"
+    assert _simple_name("cxx . pkg v0$ arithmetic/multiply(9b79fb6aee4c0440).") == "multiply"
+    assert _simple_name("scip-java maven . . minimized/Methods#`<init>`().") == "<init>"
+    assert not _is_callable_symbol("scip-java maven . . minimized/Methods#field.")   # a term, not a call
+    assert not _is_callable_symbol("rust-analyzer cargo c 1.0 via_dyn().(x)")        # a parameter
 
 
 # -- callable_locations parity (deep edges must land on the fast pass's node ids) ----------------
@@ -79,7 +92,7 @@ def test_callable_locations_match_resolution_node_ids():
 
 def test_resolve_calls_resolves_what_the_name_pass_cannot():
     locs = _fixture_locations()
-    deep = resolve_calls(_SCIP.read_bytes(), locs)
+    deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True)  # as the TS overlay runs it
     by_id = {loc.id: loc for loc in locs}
     for e in deep.edges:
         assert e.properties["resolution"] == "resolved"
@@ -99,13 +112,35 @@ def test_resolve_calls_resolves_what_the_name_pass_cannot():
 
 def test_resolve_calls_tracks_coverage_and_what_scip_resolved():
     locs = _fixture_locations()
-    deep = resolve_calls(_SCIP.read_bytes(), locs)
+    deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True)
     by_name = {loc.name: loc for loc in locs}
     # every fixture callable SCIP defined is covered (the overlay scope)
     assert {by_name[n].id for n in ("caller", "helper", "deep")} <= deep.covered_ids
     # SCIP tied caller's two calls to concrete callables
     assert deep.seen_by_caller[by_name["caller"].id] == {"run", "deep"}
     assert deep.metrics["resolved"] == 3 and deep.metrics["external"] == 0
+
+
+def test_value_reference_is_not_emitted_as_a_call_when_gated():
+    # `getHelper` returns `helper` as a VALUE (no call). Without gating, SCIP's reference becomes a
+    # spurious CALLS edge; with require_syntactic_call it's dropped (helper isn't in getHelper's calls).
+    locs = _fixture_locations()
+    by_name = {loc.name: loc for loc in locs}
+    gh = by_name["getHelper"].id
+    ungated = {(e.from_key["id"], e.to_key["id"]) for e in resolve_calls(_SCIP.read_bytes(), locs).edges}
+    gated = {(e.from_key["id"], e.to_key["id"])
+             for e in resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True).edges}
+    assert (gh, by_name["helper"].id) in ungated      # the false positive the gate removes
+    assert not any(frm == gh for frm, _ in gated)      # gated: getHelper makes no CALLS
+
+
+def test_self_recursion_emits_no_deep_edge():
+    # The resolver never emits a self-edge (fib -> fib); the overlay keeps the fast recursive edge instead
+    # (verified end-to-end below), so recursion is never lost.
+    locs = _fixture_locations()
+    fib = {loc.id for loc in locs if loc.name == "fib"}
+    deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True)
+    assert not any(e.from_key["id"] in fib and e.to_key["id"] in fib for e in deep.edges)
 
 
 def test_resolve_calls_is_empty_without_matching_locations():
@@ -147,7 +182,7 @@ def test_fast_rerun_does_not_downgrade_a_deep_graph(graph):
 
 def _scip_typescript_available() -> bool:
     try:
-        cmd = scip_typescript._tool_command(".")
+        cmd = scip_typescript._tool_command()
     except scip_typescript.ScipTypescriptUnavailable:
         return False
     try:
@@ -182,3 +217,11 @@ def test_deep_inline_resolves_calls_end_to_end(graph, tmp_path):
         "RETURN count(*)"
     ).result_set
     assert wrong == [[0]]
+    # recursion survives deep (the self CALLS edge is preserved, not dropped by the overlay)
+    rec = graph.query("MATCH (f:Function {name:'fib'})-[:CALLS]->(f) RETURN 1").result_set
+    assert rec == [[1]]
+    # a function used as a VALUE (`return helper`) is not a call -- no CALLS edge from getHelper
+    val = graph.query(
+        "MATCH (:Function {name:'getHelper'})-[:CALLS]->(:Function {name:'helper'}) RETURN count(*)"
+    ).result_set
+    assert val == [[0]]

@@ -58,26 +58,59 @@ class DeepCalls:
     metrics: dict
 
 
+# A method/function descriptor in SCIP is `<name> '(' <disambiguator>? ')' '.'` -- it always ends `).`.
+# The disambiguator is empty for rust-analyzer / scip-typescript (`name().`) but scip-clang packs an
+# overload hash into it (`name(9b79fb6aee4c0440).`). Params end `)` (no dot), terms/arrow-consts `.`,
+# types `#`, locals `local N` -- all correctly excluded by the `).` test / stripped by the regex.
+_METHOD_SUFFIX = re.compile(r"\([^()]*\)\.$")
+
+
 def _is_callable_symbol(symbol: str) -> bool:
-    """A SCIP symbol that names a function/method (its descriptor ends `().`). Excludes params
-    (`...().(x)`), types (`...#`), terms/fields and arrow-function consts (`...name.`), locals
-    (`local N`), and macros. (Arrow-function consts emit a term descriptor, so they're conservatively
-    not deep-upgraded -- their fast name-edges are kept.)"""
-    return symbol.endswith("().")
+    """A SCIP symbol that names a function/method: its descriptor ends `).` (an optional overload
+    disambiguator sits inside the parens). Excludes parameters (`...(x)` -- ends `)`, no dot), types
+    (`...#`), terms/fields and arrow-function consts (`...name.`), and locals (`local N`). (Arrow-function
+    consts emit a term descriptor, so they're conservatively not deep-upgraded -- their fast name-edges are
+    kept.)"""
+    return symbol.endswith(").")
 
 
 def _simple_name(symbol: str) -> str:
-    """The callee's bare name from a SCIP symbol:
-    `rust-analyzer cargo crate 1.0 Fast#Run#run().` -> `run`,
-    `scip-typescript npm pkg 1.0 src/`lib.ts`/Fast#run().` -> `run`.
-    Takes the descriptor (the 5th space-separated field), strips the `().` callable suffix, keeps the last
-    `#`/`/`-delimited component, and unwraps SCIP's backtick-escaping (filenames and names with special
-    characters are backtick-wrapped, e.g. `<constructor>`). A backtick'd filename holds no `#`/`/`, so the
-    split is safe."""
-    descriptor = symbol.split(" ", 4)[-1]
-    descriptor = descriptor.removesuffix("().")
-    last = re.split(r"[#/]", descriptor)[-1] if descriptor else ""
-    return last.strip("`")
+    """The callee's bare name from a SCIP symbol, across indexers:
+    `rust-analyzer cargo crate 1.0 Fast#Run#run().`          -> `run`
+    `scip-typescript npm pkg 1.0 src/`lib.ts`/Fast#run().`   -> `run`
+    `cxx . pkg v0$ arithmetic/multiply(9b79fb6aee4c0440).`   -> `multiply`
+    `scip-typescript npm pkg 1.0 src/`m.ts`/C#`#priv`().`     -> `#priv`  (TS private member)
+    Takes the descriptor (the 5th space-separated field), strips the trailing `(<disambiguator>?).` method
+    group, then returns the last `#`/`/`-delimited component with SCIP's backtick-escaping unwrapped. The
+    split respects backticks: a quoted name (a filename, `<constructor>`, `#priv`, `operator()`) may itself
+    contain `#`/`/`/`.`, so it is never split."""
+    descriptor = _METHOD_SUFFIX.sub("", symbol.split(" ", 4)[-1])
+    return _last_descriptor_component(descriptor)
+
+
+def _last_descriptor_component(descriptor: str) -> str:
+    """The final `#`/`/`-delimited component of a SCIP descriptor, honoring backtick-escaping (a quoted
+    name is wrapped in backticks, with internal backticks doubled, and may contain the separators)."""
+    if not descriptor:
+        return ""
+    if descriptor.endswith("`"):  # a backtick-quoted final component: find its matching opening quote
+        i = len(descriptor) - 1
+        j = i - 1
+        while j >= 0:
+            if descriptor[j] == "`":
+                k = j
+                while k >= 0 and descriptor[k] == "`":
+                    k -= 1
+                if (j - k) % 2 == 1:  # odd run of backticks ending here -> the opening quote
+                    return descriptor[k + 2 : i].replace("``", "`")
+                j = k
+            else:
+                j -= 1
+        return descriptor.strip("`")  # malformed -- best-effort
+    for idx in range(len(descriptor) - 1, -1, -1):  # bare final component: tail after the last #/ /
+        if descriptor[idx] in "#/":
+            return descriptor[idx + 1 :]
+    return descriptor
 
 
 def _norm_path(path: str) -> str:
@@ -88,7 +121,8 @@ def _span(loc: CallableLocation) -> int:
     return loc.line_end - loc.line_start
 
 
-def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepCalls:
+def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
+                  *, require_syntactic_call: bool = False) -> DeepCalls:
     """Derive precise intra-project CALLS from a SCIP index + the fast pass's callable locations.
 
     A reference occurrence of a callable symbol is attributed to a containing callable (preferring one
@@ -99,7 +133,15 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepC
     same-named callables on one line) is left UNRESOLVED -- no edge, not counted as identified, and the
     caller's fast edge to it is kept. `covered_ids` are the callables SCIP analyzed, so the overlay
     touches only those; `seen_by_caller` drives both the unresolved recompute and which fast name-edges
-    the overlay drops."""
+    the overlay drops.
+
+    `require_syntactic_call`: when True, only emit an edge when the callee's name is one the fast parse
+    actually recorded as a CALL in that caller's body (`callee in caller.called_names`). A SCIP reference
+    is NOT always a call -- `return helper` / `callback(helper)` / `typeof helper` reference a callable as a
+    VALUE -- so without this gate those become spurious CALLS edges. Languages whose fast pass records every
+    syntactic call site (TypeScript) pass True; languages that rely on SCIP to surface calls the fast pass
+    can't see at all (Rust macro expansions) leave it False. `seen_by_caller` still records the reference
+    either way (so the drop/unresolved logic is unaffected)."""
     documents = scip.parse_index(scip_bytes)
     by_path: dict[str, list[CallableLocation]] = defaultdict(list)
     for loc in locations:
@@ -153,6 +195,8 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepC
             seen_by_caller[caller.id].add(callee_name)  # SCIP tied a concrete in-source callable to this call
             if target.id == caller.id:
                 continue  # self-reference / recursion (the fast passes skip self-CALLS too)
+            if require_syntactic_call and callee_name not in caller.called_names:
+                continue  # a reference, not a call (value use: `return helper` / `callback(helper)`)
             key = (caller.id, target.id)
             if key not in edges:
                 edges[key] = GraphEdge(

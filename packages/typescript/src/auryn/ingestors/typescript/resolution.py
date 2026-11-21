@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 
 from auryn.core import http_seam
 from auryn.core.graph_model import GraphEdge, GraphNode
-from auryn.core.scip_resolve import CallableLocation
 from auryn.ingestors.typescript import ids
 from auryn.ingestors.typescript.raw_model import RawFile, RawMethod
 
@@ -251,7 +250,7 @@ def emit_streaming(plan: StreamPlan, load_fn, proj_id: str):
         del rf, buf
 
 
-def callable_locations(files, proj_id: str) -> list[CallableLocation]:
+def callable_locations(files, proj_id: str):
     """Every project callable's SCIP-join location (graph id, file, 1-based line span, name, called
     names) -- the bridge the deep (scip-typescript / SCIP) pass needs. Reuses the SAME id builders as
     the fast pass (module/function/class/interface ids + method ids embed param names via _param_names),
@@ -259,8 +258,12 @@ def callable_locations(files, proj_id: str) -> list[CallableLocation]:
     -- no type inference here. `files` is an iterable of RawFile with `.path` set (the deep pass streams
     them from the parse cache, re-stamping path exactly as build_plan/emit_streaming do); each RawFile is
     dropped after its locations are extracted, so only the small location list stays resident. Interface
-    methods are included -- they have no body (no calls) but can be deep-resolved call TARGETS."""
-    out: list[CallableLocation] = []
+    methods are included -- they have no body (no calls) but can be deep-resolved call TARGETS. The
+    core.scip_resolve import is deferred to here (deep-only) so the fast pass never requires it -- the fast
+    graph stays buildable even against an older auryn-core without scip_resolve."""
+    from auryn.core.scip_resolve import CallableLocation
+
+    out: list = []
     for rf in files:
         mid = ids.module_id(proj_id, rf.path)
         rel = _norm(rf.path)

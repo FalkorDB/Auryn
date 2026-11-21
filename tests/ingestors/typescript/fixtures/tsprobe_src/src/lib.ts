@@ -13,3 +13,11 @@ export function caller(): number {
   const f = new Fast();        // inferred type Fast -- deep resolves f.run to Fast#run
   return f.run() + deep();     // name pass: ".run" is ambiguous (Fast#run vs Slow#run) -> dropped
 }
+
+export function fib(n: number): number {
+  return n <= 1 ? n : fib(n - 1) + fib(n - 2);   // recursion: the self CALLS edge must survive deep
+}
+
+export function getHelper(): () => number {
+  return helper;               // `helper` used as a VALUE, not called -- deep must NOT emit a CALLS edge
+}

@@ -34,31 +34,24 @@ class ScipTypescriptUnavailable(RuntimeError):
     to fall back to the tree-sitter fast pass."""
 
 
-def _tool_command(root: str) -> list[str]:
-    """Locate a usable scip-typescript, in priority order (mirrors rust_analyzer._tool_command):
-      1. `AURYN_SCIP_TYPESCRIPT` env override (an explicit binary path);
-      2. the project's own `node_modules/.bin/scip-typescript` (a repo that depends on it directly);
-      3. a plain `scip-typescript` on PATH (a global `npm i -g @sourcegraph/scip-typescript`);
-      4. `npx --no-install @sourcegraph/scip-typescript` (installed somewhere npx can resolve, without
-         letting npx silently download it over the network).
-    Raises ScipTypescriptUnavailable (with an install hint) if none resolve. The chosen command is still
-    validated by use -- an npx that can't resolve the package fails at index time and is turned into
-    ScipTypescriptUnavailable there."""
+def _tool_command() -> list[str]:
+    """Locate a usable scip-typescript from a TRUSTED location ONLY, in priority order:
+      1. `AURYN_SCIP_TYPESCRIPT` env override (an explicit, user-trusted binary path);
+      2. a `scip-typescript` on PATH (a user-controlled global / dev install).
+    We deliberately DON'T run the indexed repo's `node_modules/.bin/scip-typescript`, nor let `npx` fetch
+    or resolve one: deep analysis runs automatically on arbitrary (possibly untrusted) repositories, so
+    executing a binary shipped inside the repo would run attacker-controlled code with the ingestor's
+    privileges. Raises ScipTypescriptUnavailable (with an install hint) if neither trusted source resolves."""
     override = os.environ.get("AURYN_SCIP_TYPESCRIPT")
     if override:
         return [override]
-    local = os.path.join(root, "node_modules", ".bin", "scip-typescript")
-    if os.path.exists(local):
-        return [local]
     found = shutil.which("scip-typescript")
     if found:
         return [found]
-    npx = shutil.which("npx")
-    if npx:
-        return [npx, "--no-install", _PACKAGE]
     raise ScipTypescriptUnavailable(
-        f"scip-typescript not found. Install it with `npm install -g {_PACKAGE}` "
-        f"(or add it to the project's devDependencies), or set AURYN_SCIP_TYPESCRIPT to its path."
+        f"scip-typescript not found on PATH. Install it globally (`npm install -g {_PACKAGE}`) or set "
+        f"AURYN_SCIP_TYPESCRIPT to its path. (A repo-local node_modules copy is intentionally not used -- "
+        f"running a binary from the indexed repo would execute untrusted code.)"
     )
 
 
@@ -67,10 +60,13 @@ def run_scip(root: str) -> bytes:
     ScipTypescriptUnavailable on any failure (tool missing, non-zero exit, no output) so the caller can
     fall back to the fast pass. `root` must be a project directory on disk.
 
-    `--infer-tsconfig` lets config-less / JS-only projects index; `--no-progress-bar` keeps the subprocess
-    quiet. scip-typescript's exit code is lenient (it indexes best-effort through type errors), so success
-    is gated on a non-empty index file existing -- and whether that index actually analyzed our callables
-    is decided downstream (git_sync falls back if SCIP covered nothing).
+    `--no-progress-bar` keeps the subprocess quiet. `--infer-tsconfig` is added ONLY when the project has
+    neither a `tsconfig.json` nor a `jsconfig.json` -- it synthesizes a TS config for config-less / JS-only
+    projects, but forcing it when a `jsconfig.json` exists would make scip-typescript ignore that config's
+    path aliases / includes, so we honor an existing config instead. scip-typescript's exit code is lenient
+    (it indexes best-effort through type errors), so success is gated on a non-empty index file existing --
+    and whether that index actually analyzed our callables is decided downstream (git_sync falls back if
+    SCIP covered nothing).
 
     scip-typescript mutates the indexed dir: it can write a stray `index.scip` (regardless of `--output`),
     and `--infer-tsconfig` writes an inferred `tsconfig.json` when none exists. For a git source the dir is
@@ -79,10 +75,12 @@ def run_scip(root: str) -> bytes:
     user's own `index.scip` / `tsconfig.json` / `jsconfig.json`, and never reading a pre-existing
     `index.scip` as if it were our output. (A config created by an unrelated process DURING indexing is an
     inherent, narrow race; auryn's own ingests are serialized per repo by sync_lock.)"""
-    cmd = _tool_command(root)
+    cmd = _tool_command()
     stray = os.path.join(root, "index.scip")
-    artifacts = [stray, os.path.join(root, "tsconfig.json"), os.path.join(root, "jsconfig.json")]
+    config_paths = [os.path.join(root, "tsconfig.json"), os.path.join(root, "jsconfig.json")]
+    artifacts = [stray, *config_paths]
     pre_existing = {p for p in artifacts if os.path.exists(p)}
+    has_config = any(p in pre_existing for p in config_paths)  # honor an existing ts/jsconfig; infer only if none
 
     def _cleanup_artifacts() -> None:
         for p in artifacts:
@@ -91,7 +89,9 @@ def run_scip(root: str) -> bytes:
 
     with tempfile.TemporaryDirectory() as tmp:
         out_path = os.path.join(tmp, "index.scip")
-        argv = [*cmd, "index", "--output", out_path, "--no-progress-bar", "--infer-tsconfig"]
+        argv = [*cmd, "index", "--output", out_path, "--no-progress-bar"]
+        if not has_config:
+            argv.append("--infer-tsconfig")
         try:
             proc = subprocess.run(
                 argv, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
