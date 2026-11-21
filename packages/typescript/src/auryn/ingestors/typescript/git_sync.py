@@ -55,12 +55,28 @@ class SyncStats:
     broken_files: list[str] = field(default_factory=list)
 
 
+# Two-phase depth (mirrors Rust/C#/Python): the fast tree-sitter pass stamps the Project `depth="fast"`,
+# the deep scip-typescript pass `depth="deep"`. A re-run short-circuits only when the commit matches AND
+# the existing depth is at least the requested one -- so a fast re-run never downgrades a deep graph, but
+# the deep phase still runs right after the fast one at the same commit.
+_DEPTH_RANK = {None: 0, "": 0, "fast": 1, "deep": 2}
+
+
+def _project_node(proj_id: str, project_name: str, repo_uri: str, target_sha: str, ref: str | None,
+                  depth: str) -> GraphNode:
+    return GraphNode(
+        "Project", {"id": proj_id},
+        {"name": project_name, "repo_uri": repo_uri, "commit_sha": target_sha, "ref": ref, "depth": depth},
+    )
+
+
 def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, ref: str | None,
-            cache_root: Path | None = None) -> SyncStats:
+            cache_root: Path | None = None, engine: str = "treesitter") -> SyncStats:
     """Move the whole JS/TS subgraph to `target_sha`. Takes the incremental path (ADR 0002)
     when a prior graph exists at a different state and git can name the change; otherwise a
     full recompute + delta. `source` is duck-typed (GitRepoCache / LocalDirectorySource /
-    WorkingTreeSource).
+    WorkingTreeSource). `engine`: "treesitter" (fast, blob-streamed) or "scip_typescript" (deep,
+    SCIP over an on-disk checkout, falling back to tree-sitter if scip-typescript is unavailable).
 
     The full-recompute path is memory-bounded: files are parsed straight into the blob-sha
     cache and dropped (never all held at once), then resolution.build_plan reads that cache
@@ -68,15 +84,23 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
     large first ingest doesn't hold every file's declaration source in memory."""
     started = time.monotonic()
     proj_id = project_id(project_name)
+    requested_depth = "deep" if engine == "scip_typescript" else "fast"
 
     writer.setup_schema(NODE_SCHEMAS)  # brings the graph key into existence before the first read
     current_sha = writer.get_property("Project", {"id": proj_id}, "commit_sha")
-    if current_sha == target_sha:
+    current_depth = writer.get_property("Project", {"id": proj_id}, "depth")
+    if current_sha == target_sha and _DEPTH_RANK.get(current_depth, 0) >= _DEPTH_RANK[requested_depth]:
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
-    if current_sha:  # a prior graph exists -> try to move it incrementally (single-phase, no depth marker)
+    # Incremental resync (fast engine only; the deep pass always re-analyzes the whole project, like Rust/
+    # Roslyn). A prior graph at a different commit is moved by the git diff + its blast radius.
+    if engine == "treesitter" and current_sha and current_sha != target_sha:
         incr = _route(writer, source, target_sha, project_name, repo_uri, ref, current_sha)
         if incr is not None:
+            # A fast incremental resync degrades a deep graph (changed callables drop to name resolution),
+            # so stamp depth="fast" -- else a later deep phase would see commit==target & depth=="deep" and
+            # short-circuit, leaving the changes shallow.
+            writer.query("MATCH (p:Project {id: $id}) SET p.depth = 'fast'", {"id": proj_id})
             return _finish(writer, proj_id, source, incr)
 
     parse_cache_dir = (cache_root or cache_home()) / f"parse_cache_ts.v{_PARSE_CACHE_VERSION}"
@@ -90,9 +114,17 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
         return cached
 
     plan = resolution.build_plan(file_refs, load_fn, proj_id)
-    project_node = GraphNode(
-        "Project", {"id": proj_id}, {"name": project_name, "repo_uri": repo_uri, "commit_sha": target_sha, "ref": ref}
-    )
+
+    if engine == "scip_typescript":
+        is_upgrade = current_sha == target_sha and current_depth == "fast"
+        deep = _deep_sync_at(writer, source, target_sha, file_refs, load_fn, plan, proj_id, project_name,
+                             repo_uri, ref, started, is_upgrade=is_upgrade, entry_sha=current_sha,
+                             files_parsed=files_parsed, files_cached=files_cached)
+        if deep is not None:
+            return deep
+        # scip-typescript unavailable / analyzed nothing -> fall through to the tree-sitter fast pass.
+
+    project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "fast")
 
     def make_target():  # re-iterable: stream_apply runs it once for nodes, once for edges
         return itertools.chain([project_node], resolution.emit_streaming(plan, load_fn, proj_id))
@@ -100,6 +132,99 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
     return _finish(writer, proj_id, source,
                    _apply(writer, proj_id, make_target, target_sha, started,
                           files_parsed=files_parsed, files_cached=files_cached, broken=plan.broken))
+
+
+def _stamped(rf: RawFile, path: str) -> RawFile:
+    """Re-stamp a cache-loaded RawFile with its authoritative path (as build_plan/emit_streaming do) --
+    the cached object's own `.path` is re-stamped at use, so it can't be trusted for id derivation."""
+    rf.path = path
+    return rf
+
+
+def _is_name_calls_edge(item) -> bool:
+    return (type(item).__name__ == "GraphEdge" and item.rel_type == "CALLS"
+            and (item.properties or {}).get("resolution") == "name")
+
+
+def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, proj_id: str,
+                  project_name: str, repo_uri: str, ref: str | None, started: float, *,
+                  is_upgrade: bool, entry_sha, files_parsed: int, files_cached: int) -> "SyncStats | None":
+    """Deep pass: resolve CALLS precisely via scip-typescript's SCIP index, layered over the fast pass's
+    structural subgraph (same node ids). Returns None (caller falls back to tree-sitter) if scip-typescript
+    can't run or analyzed none of our callables. The overlay is SURGICAL -- it only drops a fast name-CALLS
+    where deep IDENTIFIED that call (resolved it in-source, or identified it as an external the fast pass
+    guessed as a local); a call deep couldn't identify (ambiguous same-line def) keeps its fast edge. On an
+    upgrade (fast->deep at the same commit) extern:// placeholders are left alone (diff_extern_edges=False),
+    so cross-repo reconciliation isn't disturbed."""
+    from auryn.core.scip_resolve import resolve_calls
+    from auryn.ingestors.typescript import scip_typescript
+
+    def moved() -> "str | None":
+        # the graph moved off the revision we started from (a concurrent ingest) -> our result is stale.
+        # Compare against ENTRY, not target: a direct A->B deep sync legitimately still reads A here.
+        live = writer.get_property("Project", {"id": proj_id}, "commit_sha")
+        return str(live) if live is not None and live != entry_sha else None
+
+    try:
+        # scip-typescript needs an on-disk checkout. A git source yields an immutable checkout at
+        # target_sha; a LOCAL directory yields the live tree (as the fast parse also reads it), so an edit
+        # landing between the parse and this SCIP read can skew the join -- worst case a few calls fall
+        # back to fast. A content snapshot would close that live-dir window (v2).
+        with source.working_tree(target_sha) as workdir:
+            scip_bytes = scip_typescript.run_scip(str(workdir))
+    except scip_typescript.ScipTypescriptUnavailable as exc:
+        live = moved()  # don't roll a newer concurrent revision back via the fast fallback: no-op if moved
+        if live is not None:
+            return SyncStats(commit_sha=live, elapsed_seconds=time.monotonic() - started)
+        logger.warning("typescript deep pass unavailable (%s); falling back to tree-sitter", exc)
+        return None
+
+    locations = resolution.callable_locations(
+        (_stamped(load_fn(sha), path) for path, sha in file_refs), proj_id)
+    deep = resolve_calls(scip_bytes, locations)
+    if locations and not deep.covered_ids:
+        # scip-typescript ran but analyzed none of our callables (no tsconfig/deps, unsupported project):
+        # don't make a hollow depth="deep" claim -- fall back to the fast graph.
+        live = moved()
+        if live is not None:
+            return SyncStats(commit_sha=live, elapsed_seconds=time.monotonic() - started)
+        logger.warning("typescript deep pass: scip-typescript covered no callables; falling back to tree-sitter")
+        return None
+
+    loc_by_id = {loc.id: loc for loc in locations}
+    # Keep the project node at "fast" in the delta; depth is bumped to "deep" by an ATOMIC guarded write
+    # AFTER the delta lands, so a concurrent ingest that moved the commit can't be overwritten with a stale
+    # "deep" claim.
+    project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "fast")
+
+    def make_target():  # a GENERATOR -- preserves emit_streaming's bounded memory
+        yield project_node
+        for item in resolution.emit_streaming(plan, load_fn, proj_id):
+            if _is_name_calls_edge(item):
+                frm = item.from_key["id"]
+                callee = loc_by_id.get(item.to_key["id"])
+                # drop a fast name-edge where deep identified that intra-project call (a resolved deep edge
+                # replaces it). Extern/other-repo callees (callee is None -> not a local callable) are kept.
+                if (frm in deep.covered_ids and callee is not None
+                        and callee.name in deep.seen_by_caller.get(frm, set())):
+                    continue
+            yield item
+        yield from deep.edges
+
+    live = moved()  # freshness guard before the write: discard a stale revision rather than clobber a newer one
+    if live is not None:
+        logger.warning("typescript deep pass: graph moved to %s while analyzing %s; discarding stale result",
+                       live, target_sha)
+        return SyncStats(commit_sha=live, elapsed_seconds=time.monotonic() - started)
+
+    result = _apply(writer, proj_id, make_target, target_sha, started, files_parsed=files_parsed,
+                    files_cached=files_cached, broken=plan.broken, diff_extern_edges=not is_upgrade)
+    # Atomically stamp depth="deep" only if the graph is STILL at this commit (GraphWriter.set_if), so the
+    # depth marker never makes a stale deep claim if a concurrent ingest moved the commit while we deepened.
+    writer.set_if("Project", proj_id, "depth", "deep", "commit_sha", target_sha)
+    logger.info("typescript deep: %d resolved / %d external CALLS over %d/%d callables covered",
+                deep.metrics["resolved"], deep.metrics["external"], len(deep.covered_ids), len(locations))
+    return _finish(writer, proj_id, source, result)
 
 
 def _route(writer, source, target_sha, project_name, repo_uri, ref, current_sha) -> SyncStats | None:
@@ -134,14 +259,18 @@ def _finish(writer, proj_id: str, source, result: SyncStats) -> SyncStats:
 
 
 def _apply(writer, proj_id: str, make_target, target_sha: str, started: float,
-           files_parsed: int, files_cached: int = 0, broken: list[str] | None = None) -> SyncStats:
+           files_parsed: int, files_cached: int = 0, broken: list[str] | None = None,
+           *, diff_extern_edges: bool = True) -> SyncStats:
     # Cross-repo reconciliation (ADR 0004); the incremental path gets it via incremental_scoped.
     from auryn.core.linkage import reconcile_linkages
 
     # stream_apply writes the delta without materialising the target graph, and returns the
-    # linkage strings collected inline (see graph_sync.stream_apply / core.linkage).
+    # linkage strings collected inline (see graph_sync.stream_apply / core.linkage). The deep pass
+    # passes diff_extern_edges=False on an upgrade so it doesn't prune the fast pass's extern://
+    # placeholder CALLS (it can't author cross-repo edges; reconcile_linkages heals them later).
     labels = [s.label for s in NODE_SCHEMAS]
-    stats, reals, placeholders = stream_apply(writer, proj_id, labels, make_target)
+    stats, reals, placeholders = stream_apply(writer, proj_id, labels, make_target,
+                                              diff_extern_edges=diff_extern_edges)
     reconcile_linkages(writer, reals, placeholders)
 
     return SyncStats(
@@ -217,11 +346,13 @@ def _git_language_sync(
     solution_name: str | None,
     ref: str | None,
     cache_root=None,
+    engine: str = "treesitter",
 ) -> LanguageIngestResult:
     """GitLanguage adapter for the multi-language endpoint (TS has no solution knob -- accepted
-    for the shared interface and ignored; cache_root is used for the blob-sha parse cache)."""
+    for the shared interface and ignored; cache_root is used for the blob-sha parse cache).
+    `engine` selects the fast tree-sitter or deep scip-typescript pass."""
     s = sync_at(writer, source, target_sha, project_name=project_name, repo_uri=repo_uri, ref=ref,
-                cache_root=cache_root)
+                cache_root=cache_root, engine=engine)
     return LanguageIngestResult(
         nodes_added=s.nodes_added,
         nodes_updated=s.nodes_updated,
@@ -237,6 +368,16 @@ def _git_language_sync(
     )
 
 
-# The GitLanguage is registered by the import-light plugin.py (the entry-point target), whose
-# lazy `sync` thunk calls `_git_language_sync` above -- so importing this tree-sitter engine
-# module is deferred until a source actually contains JS/TS files.
+def treesitter_language_sync(writer, source, target_sha, **kwargs) -> LanguageIngestResult:
+    """Fast-phase GitLanguage `sync` thunk (the default engine)."""
+    return _git_language_sync(writer, source, target_sha, engine="treesitter", **kwargs)
+
+
+def scip_typescript_language_sync(writer, source, target_sha, **kwargs) -> LanguageIngestResult:
+    """Deep-phase GitLanguage `deep_sync` thunk (scip-typescript / SCIP, degrading to the fast pass)."""
+    return _git_language_sync(writer, source, target_sha, engine="scip_typescript", **kwargs)
+
+
+# The GitLanguage is registered by the import-light plugin.py (the entry-point target), whose lazy
+# `sync`/`deep_sync` thunks call the adapters above -- so importing this tree-sitter engine module
+# (and, for the deep phase, scip-typescript) is deferred until a source actually contains JS/TS files.

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from auryn.core import http_seam
 from auryn.core.graph_model import GraphEdge, GraphNode
+from auryn.core.scip_resolve import CallableLocation
 from auryn.ingestors.typescript import ids
 from auryn.ingestors.typescript.raw_model import RawFile, RawMethod
 
@@ -248,6 +249,38 @@ def emit_streaming(plan: StreamPlan, load_fn, proj_id: str):
         _emit_calls(scope, buf)
         yield from buf
         del rf, buf
+
+
+def callable_locations(files, proj_id: str) -> list[CallableLocation]:
+    """Every project callable's SCIP-join location (graph id, file, 1-based line span, name, called
+    names) -- the bridge the deep (scip-typescript / SCIP) pass needs. Reuses the SAME id builders as
+    the fast pass (module/function/class/interface ids + method ids embed param names via _param_names),
+    so deep-pass CALLS edges built from these land byte-identically on the nodes the fast pass authored
+    -- no type inference here. `files` is an iterable of RawFile with `.path` set (the deep pass streams
+    them from the parse cache, re-stamping path exactly as build_plan/emit_streaming do); each RawFile is
+    dropped after its locations are extracted, so only the small location list stays resident. Interface
+    methods are included -- they have no body (no calls) but can be deep-resolved call TARGETS."""
+    out: list[CallableLocation] = []
+    for rf in files:
+        mid = ids.module_id(proj_id, rf.path)
+        rel = _norm(rf.path)
+        for fn in rf.functions:
+            out.append(CallableLocation(
+                ids.function_id(mid, fn.name, _param_names(fn)), "Function", rel,
+                fn.line_start, fn.line_end, fn.name, frozenset(c.name for c in fn.calls)))
+        for c in rf.classes:
+            cid = ids.class_id(mid, c.name)
+            for m in c.methods:
+                out.append(CallableLocation(
+                    ids.method_id(cid, m.name, _param_names(m)), "Method", rel,
+                    m.line_start, m.line_end, m.name, frozenset(cc.name for cc in m.calls)))
+        for it in rf.interfaces:
+            iid = ids.interface_id(mid, it.name)
+            for m in it.methods:
+                out.append(CallableLocation(
+                    ids.method_id(iid, m.name, _param_names(m)), "Method", rel,
+                    m.line_start, m.line_end, m.name, frozenset()))
+    return out
 
 
 # -- emitters -----------------------------------------------------------------------------
