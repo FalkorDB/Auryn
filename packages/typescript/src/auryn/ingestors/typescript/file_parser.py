@@ -44,6 +44,10 @@ from auryn.ingestors.typescript.raw_model import (
     RawTypeAlias,
 )
 
+# Callee wrappers that are transparent to a call's target -- unwrapped so the inner identifier is the
+# recorded call site (what SCIP anchors its occurrence to): `(f)()`, `f!()`, `(f as T)()`, `(f satisfies T)()`.
+_TRANSPARENT_CALLEES = {"parenthesized_expression", "non_null_expression", "as_expression",
+                        "satisfies_expression"}
 _CLASS_DECLS = {"class_declaration", "abstract_class_declaration"}
 _FUNC_VALUE_KINDS = {"arrow_function": "ARROW", "function_expression": "FUNCTION_EXPR"}
 _LEXICAL = {"lexical_declaration", "variable_declaration"}
@@ -312,8 +316,11 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             if n.type in ("call_expression", "new_expression"):
                 is_new = n.type == "new_expression"
                 callee = field(n, "constructor" if is_new else "function")
-                while callee is not None and callee.type == "parenthesized_expression":
-                    callee = next((c for c in callee.named_children), None)  # `(b.run)()` -> b.run
+                # Unwrap callee wrappers that are transparent to the call target, so the call site is
+                # recorded (and SCIP's occurrence, anchored at the inner identifier, matches): `(b.run)()`,
+                # `b.run!()` (non-null assertion), `(f as T)()` / `(f satisfies T)()`.
+                while callee is not None and callee.type in _TRANSPARENT_CALLEES:
+                    callee = next((c for c in callee.named_children), None)
                 nm, recv = _callee(callee)
                 if nm:
                     line = _callee_line(callee)

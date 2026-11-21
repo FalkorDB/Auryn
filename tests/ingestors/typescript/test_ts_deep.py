@@ -125,17 +125,20 @@ def test_call_sites_keep_every_line_of_a_repeated_call():
     assert ("target", 2) in caller.called_sites and ("target", 3) in caller.called_sites
 
 
-def test_call_sites_record_a_parenthesized_callee():
-    # `(b.run)()` wraps the callee in a parenthesized_expression; unwrap it so the call site is recorded
-    # (otherwise the line-precise gate would filter SCIP's resolved `run` call).
+def test_call_sites_record_transparent_callee_wrappers():
+    # Callees wrapped in a parenthesized / non-null-assertion / `as` expression are transparent to the call
+    # target; unwrap them so the call site is recorded (else the line-precise gate filters SCIP's resolved
+    # call). Each inner identifier line is what SCIP anchors its occurrence to.
     src = (
         b"function caller(b: any) {\n"   # line 1
-        b"  (b.run)();\n"                # line 2
+        b"  (b.run)();\n"                # line 2 -- parenthesized
+        b"  b.ping!();\n"                # line 3 -- non-null assertion
+        b"  (b.send as any)();\n"        # line 4 -- `as` cast
         b"}\n"
     )
     locs = resolution.callable_locations([parse_source(src, "src/a.ts")], project_id("p"))
     caller = next(l for l in locs if l.name == "caller")
-    assert ("run", 2) in caller.called_sites
+    assert {("run", 2), ("ping", 3), ("send", 4)} <= caller.called_sites
 
 
 # -- the resolver: inferred-receiver dispatch, same-name disambiguation, cross-module ------------
