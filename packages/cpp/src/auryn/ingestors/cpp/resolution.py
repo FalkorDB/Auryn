@@ -253,6 +253,77 @@ def resolve(raw_files: list[RawFile], project_id: str) -> Iterator[GraphNode | G
     yield from _emit_includes(raw_files, file_ids, _build_include_index(raw_files, file_ids))
 
 
+def callable_locations(raw_files: list[RawFile], project_id: str):
+    """Every C++ function/method's SCIP-join location (graph id, DEFINITION file, 1-based def line span,
+    name, called names) -- the bridge the deep (scip-clang / SCIP) pass needs. Reuses the fast pass's own
+    _flatten / _merge_methods / _make_func_rec / _resolve_type so ids are byte-identical, and keys each
+    location to the DEFINITION file: scip-clang reports a callable's occurrences (its def AND the calls in
+    its body) in the file where the body lives, which for an out-of-line member (`Class::m` in a .cc,
+    declared in a .h) is NOT the declaring file. A parity test asserts these ids subset resolve()'s
+    Function/Method node ids. The core.scip_resolve import is deferred here (deep-only) so the fast pass
+    never requires it."""
+    from auryn.core.scip_resolve import CallableLocation
+
+    raw_files = sorted(raw_files, key=lambda rf: _norm(rf.path))
+    file_ids = {rf.path: ids.file_id(project_id, rf.path) for rf in raw_files}
+    path_by_fid = {fid: _norm(p) for p, fid in file_ids.items()}
+
+    entries: list[_Entry] = []
+    for rf in raw_files:
+        for rt in rf.types:
+            _flatten(rt, file_ids[rf.path], project_id, None, entries)
+    type_index: dict[str, list[_Entry]] = defaultdict(list)
+    for e in entries:
+        type_index[e.name].append(e)
+
+    # def file per callable id -- the file whose occurrence is_definition (a body), preferred over a decl.
+    def_file: dict[str, str] = {}
+    for e in entries:  # in-class declarations / inline definitions
+        for m in e.raw_type.methods:
+            mid = ids.method_id(e.type_id, m.name, [p.type for p in m.params])
+            if m.is_definition or mid not in def_file:
+                def_file[mid] = e.file_id
+
+    defs_by_type: dict[str, list[RawMethod]] = defaultdict(list)
+    extra_functions: list[tuple[str, RawFunction]] = []
+    for rf in raw_files:  # out-of-line member definitions
+        for md in rf.member_defs:
+            inferred_ns = _join_ns([md.namespace, *md.owner_scope[:-1]])
+            owner = _resolve_type(md.owner_name or "", inferred_ns, type_index)
+            if owner is not None:
+                defs_by_type[owner.type_id].append(md)
+                mid = ids.method_id(owner.type_id, md.name, [p.type for p in md.params])
+                if md.is_definition:  # the out-of-line body wins
+                    def_file[mid] = file_ids[rf.path]
+            else:
+                extra_functions.append((rf.path, _method_to_function(md, inferred_ns)))
+
+    out = []
+    for e in entries:  # methods: merged decl+def (def-preferred line span), keyed to the def file
+        for r in _merge_methods(e, defs_by_type.get(e.type_id, [])):
+            fid = def_file.get(r.method_id, e.file_id)
+            out.append(CallableLocation(r.method_id, "Method", path_by_fid.get(fid, ""),
+                                        r.line_start, r.line_end, r.name,
+                                        frozenset(c.name for c in r.calls)))
+
+    # free functions (incl. degraded namespace-qualified defs): dedup by id (definition wins), keyed to def file
+    chosen: dict[str, tuple] = {}  # function_id -> (_FuncRec, def_file_id)
+    func_def_file: dict[str, str] = {}
+    for path, fn in [(rf.path, fn) for rf in raw_files for fn in rf.functions] + extra_functions:
+        fr = _make_func_rec(fn, project_id)
+        if fn.is_definition or fr.function_id not in func_def_file:
+            func_def_file[fr.function_id] = file_ids[path]
+        prev = chosen.get(fr.function_id)
+        if prev is None or (fr.raw.is_definition and not prev[0].raw.is_definition):
+            chosen[fr.function_id] = (fr, file_ids[path])
+    for fr, _fid in chosen.values():
+        fid = func_def_file.get(fr.function_id, _fid)
+        out.append(CallableLocation(fr.function_id, "Function", path_by_fid.get(fid, ""),
+                                    fr.raw.line_start, fr.raw.line_end, fr.raw.name,
+                                    frozenset(c.name for c in fr.raw.calls)))
+    return out
+
+
 def resolve_incremental(emit_raws: list[RawFile], project_id: str, index: CppGraphIndex) -> Iterator[GraphNode | GraphEdge]:
     """Emit graph items for ONLY `emit_raws`, resolving cross-file references against `index` (the
     graph-seeded non-emit symbols) merged with the emit files' own. The blast-radius analogue of
