@@ -122,7 +122,7 @@ def _span(loc: CallableLocation) -> int:
 
 
 def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
-                  *, require_syntactic_call: bool = False) -> DeepCalls:
+                  *, require_syntactic_call: bool = False, emit_self_calls: bool = False) -> DeepCalls:
     """Derive precise intra-project CALLS from a SCIP index + the fast pass's callable locations.
 
     A reference occurrence of a callable symbol is attributed to a containing callable (preferring one
@@ -141,7 +141,12 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
     VALUE -- so without this gate those become spurious CALLS edges. Languages whose fast pass records every
     syntactic call site (TypeScript) pass True; languages that rely on SCIP to surface calls the fast pass
     can't see at all (Rust macro expansions) leave it False. `seen_by_caller` still records the reference
-    either way (so the drop/unresolved logic is unaffected)."""
+    either way (so the drop/unresolved logic is unaffected).
+
+    `emit_self_calls`: when True, a call resolved to the ENCLOSING callable yields a self-edge (recursion).
+    Languages whose fast pass emits self-CALLS (TypeScript) pass True so the overlay can replace a fast
+    recursive edge with a precise one AND so real recursion survives even when a duplicate-named fast guess
+    was dropped; languages whose fast pass omits self-CALLS (Rust) leave it False to stay consistent."""
     documents = scip.parse_index(scip_bytes)
     by_path: dict[str, list[CallableLocation]] = defaultdict(list)
     for loc in locations:
@@ -165,8 +170,11 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
                            and loc.name == _simple_name(occ.symbol)), key=_span)
             if not hits:
                 continue
-            if len(hits) >= 2 and _span(hits[0]) == _span(hits[1]):
-                ambiguous_defs.add(occ.symbol)  # can't tell B.run from A.run on one line -> don't risk it
+            if len(hits) >= 2:
+                # 2+ same-named callables span this definition line -- the line-only join can't tell which
+                # symbol defines which (whatever their body lengths), so leave them to the fast pass rather
+                # than risk mapping both symbols to the shortest-span location.
+                ambiguous_defs.add(occ.symbol)
             else:
                 symbol_to_loc[occ.symbol] = hits[0]
     covered_ids = {loc.id for loc in symbol_to_loc.values()}
@@ -193,8 +201,8 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
                     metrics["external"] += 1
                 continue
             seen_by_caller[caller.id].add(callee_name)  # SCIP tied a concrete in-source callable to this call
-            if target.id == caller.id:
-                continue  # self-reference / recursion (the fast passes skip self-CALLS too)
+            if target.id == caller.id and not emit_self_calls:
+                continue  # self-reference / recursion -- skipped only where the fast pass omits self-CALLS
             if require_syntactic_call and callee_name not in caller.called_names:
                 continue  # a reference, not a call (value use: `return helper` / `callback(helper)`)
             key = (caller.id, target.id)

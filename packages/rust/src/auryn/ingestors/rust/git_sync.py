@@ -129,7 +129,12 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
     from what SCIP resolved (so a fn-pointer call `f()` stays counted). A callable SCIP never saw
     (feature-gated-out / unlinked) keeps its fast resolution untouched. `diff_extern_edges=False` on an
     upgrade leaves the fast pass's extern:// placeholders alone."""
-    from auryn.core.scip_resolve import resolve_calls
+    try:
+        from auryn.core.scip_resolve import resolve_calls
+    except ImportError:  # a plugin-only upgrade left an older auryn-core without the resolver
+        logger.warning("rust deep pass: this auryn-core lacks core.scip_resolve (upgrade auryn-core); "
+                       "falling back to tree-sitter")
+        return None
     from auryn.ingestors.rust import rust_analyzer
 
     def moved() -> "str | None":

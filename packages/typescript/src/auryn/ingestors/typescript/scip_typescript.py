@@ -38,21 +38,29 @@ def _tool_command() -> list[str]:
     """Locate a usable scip-typescript from a TRUSTED location ONLY, in priority order:
       1. `AURYN_SCIP_TYPESCRIPT` env override (an explicit, user-trusted binary path);
       2. a `scip-typescript` on PATH (a user-controlled global / dev install).
-    We deliberately DON'T run the indexed repo's `node_modules/.bin/scip-typescript`, nor let `npx` fetch
-    or resolve one: deep analysis runs automatically on arbitrary (possibly untrusted) repositories, so
-    executing a binary shipped inside the repo would run attacker-controlled code with the ingestor's
-    privileges. Raises ScipTypescriptUnavailable (with an install hint) if neither trusted source resolves."""
-    override = os.environ.get("AURYN_SCIP_TYPESCRIPT")
-    if override:
-        return [override]
-    found = shutil.which("scip-typescript")
-    if found:
-        return [found]
+    Returned as an ABSOLUTE path so the subprocess never re-resolves it against its `cwd` (the indexed
+    repo). We deliberately DON'T consult the indexed repo's `node_modules/.bin`, nor let `npx` fetch or
+    resolve one, and run_scip further refuses any binary that resolves INSIDE the indexed tree: deep
+    analysis runs automatically on arbitrary (possibly untrusted) repositories, so executing a binary
+    shipped in the repo would run attacker-controlled code with the ingestor's privileges. Raises
+    ScipTypescriptUnavailable (with an install hint) if no trusted binary resolves."""
+    candidate = os.environ.get("AURYN_SCIP_TYPESCRIPT") or shutil.which("scip-typescript")
+    if candidate:
+        resolved = os.path.abspath(candidate)  # absolute -> not re-resolved against the subprocess cwd
+        if os.path.isfile(resolved):
+            return [resolved]
     raise ScipTypescriptUnavailable(
         f"scip-typescript not found on PATH. Install it globally (`npm install -g {_PACKAGE}`) or set "
         f"AURYN_SCIP_TYPESCRIPT to its path. (A repo-local node_modules copy is intentionally not used -- "
         f"running a binary from the indexed repo would execute untrusted code.)"
     )
+
+
+def _is_inside(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
+    except ValueError:  # different drives (Windows) -> not inside
+        return False
 
 
 def run_scip(root: str) -> bytes:
@@ -61,12 +69,13 @@ def run_scip(root: str) -> bytes:
     fall back to the fast pass. `root` must be a project directory on disk.
 
     `--no-progress-bar` keeps the subprocess quiet. `--infer-tsconfig` is added ONLY when the project has
-    neither a `tsconfig.json` nor a `jsconfig.json` -- it synthesizes a TS config for config-less / JS-only
-    projects, but forcing it when a `jsconfig.json` exists would make scip-typescript ignore that config's
-    path aliases / includes, so we honor an existing config instead. scip-typescript's exit code is lenient
-    (it indexes best-effort through type errors), so success is gated on a non-empty index file existing --
-    and whether that index actually analyzed our callables is decided downstream (git_sync falls back if
-    SCIP covered nothing).
+    no `tsconfig.json` -- it synthesizes a TS config for config-less / JS-only projects (scip-typescript
+    indexes nothing for a jsconfig-only project without it, verified), while an existing `tsconfig.json` is
+    used as-is. (A jsconfig-only project still gets `--infer-tsconfig` so it indexes at all; the inferred
+    config won't honor jsconfig's path aliases -- a known limitation, better than indexing nothing.)
+    scip-typescript's exit code is lenient (it indexes best-effort through type errors), so success is gated
+    on a non-empty index file existing -- and whether that index actually analyzed our callables is decided
+    downstream (git_sync falls back if SCIP covered nothing).
 
     scip-typescript mutates the indexed dir: it can write a stray `index.scip` (regardless of `--output`),
     and `--infer-tsconfig` writes an inferred `tsconfig.json` when none exists. For a git source the dir is
@@ -76,24 +85,27 @@ def run_scip(root: str) -> bytes:
     `index.scip` as if it were our output. (A config created by an unrelated process DURING indexing is an
     inherent, narrow race; auryn's own ingests are serialized per repo by sync_lock.)"""
     cmd = _tool_command()
+    if _is_inside(cmd[0], root):  # never run a scip-typescript that lives inside the (untrusted) indexed tree
+        raise ScipTypescriptUnavailable(f"refusing to run scip-typescript from inside the indexed tree: {cmd[0]}")
     stray = os.path.join(root, "index.scip")
-    config_paths = [os.path.join(root, "tsconfig.json"), os.path.join(root, "jsconfig.json")]
+    tsconfig = os.path.join(root, "tsconfig.json")
+    config_paths = [tsconfig, os.path.join(root, "jsconfig.json")]
     artifacts = [stray, *config_paths]
     pre_existing = {p for p in artifacts if os.path.exists(p)}
-    has_config = any(p in pre_existing for p in config_paths)  # honor an existing ts/jsconfig; infer only if none
+    has_tsconfig = tsconfig in pre_existing  # use an existing tsconfig as-is; otherwise infer one
 
     def _cleanup_artifacts() -> None:
         if stray not in pre_existing:
             _cleanup(stray)  # the stray index.scip scip-typescript may drop -- only if we created it
-        if not has_config:  # we passed --infer-tsconfig, so a config now present is one we inferred;
-            for p in config_paths:  # when the project HAS a config we never pass it, so never touch one
+        if not has_tsconfig:  # we passed --infer-tsconfig, so an inferred tsconfig now present is ours;
+            for p in config_paths:  # with a tsconfig present we never pass the flag, so never touch a config
                 if p not in pre_existing:
                     _cleanup(p)
 
     with tempfile.TemporaryDirectory() as tmp:
         out_path = os.path.join(tmp, "index.scip")
         argv = [*cmd, "index", "--output", out_path, "--no-progress-bar"]
-        if not has_config:
+        if not has_tsconfig:
             argv.append("--infer-tsconfig")
         try:
             proc = subprocess.run(

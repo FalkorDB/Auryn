@@ -134,13 +134,19 @@ def test_value_reference_is_not_emitted_as_a_call_when_gated():
     assert not any(frm == gh for frm, _ in gated)      # gated: getHelper makes no CALLS
 
 
-def test_self_recursion_emits_no_deep_edge():
-    # The resolver never emits a self-edge (fib -> fib); the overlay keeps the fast recursive edge instead
-    # (verified end-to-end below), so recursion is never lost.
+def test_self_recursion_is_resolved_under_emit_self_calls():
+    # The TS overlay runs with emit_self_calls=True, so the resolver authors the recursive self-edge
+    # (fib -> fib) -- precisely replacing the fast guess and surviving even a dropped duplicate-name guess.
+    # Without the flag (Rust's mode, whose fast pass omits self-CALLS) no self-edge is emitted.
     locs = _fixture_locations()
     fib = {loc.id for loc in locs if loc.name == "fib"}
-    deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True)
-    assert not any(e.from_key["id"] in fib and e.to_key["id"] in fib for e in deep.edges)
+
+    def has_self(**kw):
+        return any(e.from_key["id"] in fib and e.to_key["id"] in fib
+                   for e in resolve_calls(_SCIP.read_bytes(), locs, **kw).edges)
+
+    assert has_self(require_syntactic_call=True, emit_self_calls=True)
+    assert not has_self(require_syntactic_call=True)
 
 
 def test_resolve_calls_is_empty_without_matching_locations():
