@@ -83,9 +83,12 @@ def run_scip(root: str) -> bytes:
     has_config = any(p in pre_existing for p in config_paths)  # honor an existing ts/jsconfig; infer only if none
 
     def _cleanup_artifacts() -> None:
-        for p in artifacts:
-            if p not in pre_existing:  # only what WE caused to appear -- never the user's own file
-                _cleanup(p)
+        if stray not in pre_existing:
+            _cleanup(stray)  # the stray index.scip scip-typescript may drop -- only if we created it
+        if not has_config:  # we passed --infer-tsconfig, so a config now present is one we inferred;
+            for p in config_paths:  # when the project HAS a config we never pass it, so never touch one
+                if p not in pre_existing:
+                    _cleanup(p)
 
     with tempfile.TemporaryDirectory() as tmp:
         out_path = os.path.join(tmp, "index.scip")

@@ -165,6 +165,16 @@ def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, pro
         live = writer.get_property("Project", {"id": proj_id}, "commit_sha")
         return str(live) if live is not None and live != entry_sha else None
 
+    def _fall_back() -> "SyncStats | None":
+        # Deep can't proceed. If a concurrent ingest moved the commit, no-op (don't roll it back). On a
+        # same-commit UPGRADE the fast graph already exists at this commit, so return a no-change result
+        # rather than re-emitting it; a standalone deep sync at a NEW commit returns None to fall through
+        # and build the fast graph via the tree-sitter pass.
+        live = moved()
+        if live is not None or is_upgrade:
+            return SyncStats(commit_sha=live or target_sha, elapsed_seconds=time.monotonic() - started)
+        return None
+
     try:
         # scip-typescript needs an on-disk checkout. A git source yields an immutable checkout at
         # target_sha; a LOCAL directory yields the live tree (as the fast parse also reads it), so an edit
@@ -173,11 +183,8 @@ def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, pro
         with source.working_tree(target_sha) as workdir:
             scip_bytes = scip_typescript.run_scip(str(workdir))
     except scip_typescript.ScipTypescriptUnavailable as exc:
-        live = moved()  # don't roll a newer concurrent revision back via the fast fallback: no-op if moved
-        if live is not None:
-            return SyncStats(commit_sha=live, elapsed_seconds=time.monotonic() - started)
         logger.warning("typescript deep pass unavailable (%s); falling back to tree-sitter", exc)
-        return None
+        return _fall_back()
 
     locations = resolution.callable_locations(
         (_stamped(load_fn(sha), path) for path, sha in file_refs), proj_id)
@@ -188,11 +195,8 @@ def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, pro
     if locations and not deep.covered_ids:
         # scip-typescript ran but analyzed none of our callables (no tsconfig/deps, unsupported project):
         # don't make a hollow depth="deep" claim -- fall back to the fast graph.
-        live = moved()
-        if live is not None:
-            return SyncStats(commit_sha=live, elapsed_seconds=time.monotonic() - started)
         logger.warning("typescript deep pass: scip-typescript covered no callables; falling back to tree-sitter")
-        return None
+        return _fall_back()
 
     loc_by_id = {loc.id: loc for loc in locations}
     # Keep the project node at "fast" in the delta; depth is bumped to "deep" by an ATOMIC guarded write
