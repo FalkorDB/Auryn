@@ -76,7 +76,7 @@ def test_callable_locations_match_resolution_node_ids():
 
 def test_resolve_calls_selects_the_right_overload():
     locs = _fixture_locations()
-    deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True, emit_self_calls=True)
+    deep = resolve_calls(_SCIP.read_bytes(), locs, require_call_site=True, emit_self_calls=True)
     by_id = {loc.id: loc for loc in locs}
     for e in deep.edges:
         assert e.properties["resolution"] == "resolved"
@@ -110,11 +110,34 @@ def test_constructor_new_calls_are_recorded_as_init():
     locs = resolution.callable_locations(raw, _PROJ)
     make = next(loc for loc in locs if loc.name == "make")
     assert "<init>" in make.called_names and "Thing" not in make.called_names
+    # the normalization also carries to called_sites (with the `new Thing(1)` line), so the line-precise
+    # gate matches scip-java's `Thing#<init>().` occurrence on that line.
+    assert ("<init>", 3) in make.called_sites and not any(n == "Thing" for n, _ in make.called_sites)
+
+
+def test_call_sites_record_callee_identifier_lines_including_repeats():
+    # called_sites feeds the line-precise gate: it records each call at its callee-identifier line, and
+    # keeps EVERY line of a repeated call (a name-only dedup would drop one).
+    src = {
+        "src/main/java/com/example/A.java":
+            "package com.example;\n"      # line 1
+            "public class A {\n"          # line 2
+            "  void caller(B b) {\n"      # line 3
+            "    b.run();\n"              # line 4
+            "    b.run();\n"              # line 5 -- repeated call on another line
+            "    helper();\n"            # line 6
+            "  }\n"
+            "  void helper() {}\n"
+            "}\n",
+    }
+    raw = [parse_source(s.encode(), p) for p, s in src.items()]
+    caller = next(loc for loc in resolution.callable_locations(raw, _PROJ) if loc.name == "caller")
+    assert {("run", 4), ("run", 5), ("helper", 6)} <= caller.called_sites
 
 
 def test_resolve_calls_tracks_coverage():
     locs = _fixture_locations()
-    deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True, emit_self_calls=True)
+    deep = resolve_calls(_SCIP.read_bytes(), locs, require_call_site=True, emit_self_calls=True)
     by_name = {loc.name: loc for loc in locs}
     assert {by_name[n].id for n in ("save", "saveMany", "count")} <= deep.covered_ids
     assert deep.metrics["resolved"] >= 5

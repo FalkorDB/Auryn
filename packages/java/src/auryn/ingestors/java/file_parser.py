@@ -190,16 +190,21 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                 elif obj is not None and obj.type == "identifier":
                     recv = txt(obj)
                 nm = txt(name_node)
-                key = (nm, recv, False)
+                line = (name_node.start_point[0] + 1) if name_node is not None else 0
+                # the line is part of the dedup key: the deep pass's line-precise gate needs EVERY call
+                # site's line, so `store.put()` on two lines keeps both (a name-only key would drop one).
+                key = (nm, recv, False, line)
                 if nm and key not in seen:
                     seen.add(key)
-                    out.append(RawCall(name=nm, receiver=recv, is_new=False))
+                    out.append(RawCall(name=nm, receiver=recv, is_new=False, line=line))
             elif n.type == "object_creation_expression":
-                nm = first_type_name(field(n, "type"))
-                key = (nm, None, True)
+                type_node = field(n, "type")
+                nm = first_type_name(type_node)
+                line = (type_node.start_point[0] + 1) if type_node is not None else 0
+                key = (nm, None, True, line)
                 if nm and key not in seen:
                     seen.add(key)
-                    out.append(RawCall(name=nm, receiver=None, is_new=True))
+                    out.append(RawCall(name=nm, receiver=None, is_new=True, line=line))
             stack.extend(n.children)
         return out
 

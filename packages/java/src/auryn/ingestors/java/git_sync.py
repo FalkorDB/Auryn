@@ -157,7 +157,13 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
         return _fall_back()
 
     locations = resolution.callable_locations(files, proj_id)
-    deep = resolve_calls(scip_bytes, locations, require_syntactic_call=True, emit_self_calls=True)
+    # require_call_site: a SCIP reference isn't always a call -- a method reference (`Foo::bar`) uses the
+    # method as a VALUE. Gating on the exact line where the fast parse recorded a call of that name (the
+    # method name, or `<init>` for a `new X()`) keeps deep from inventing CALLS edges for those, including a
+    # value use of a name that is called on another line. The fast parse records every call site's line.
+    # emit_self_calls: the Java fast pass emits self-CALLS, so deep must too (it precisely replaces the fast
+    # recursive edge and survives a dropped duplicate-name guess).
+    deep = resolve_calls(scip_bytes, locations, require_call_site=True, emit_self_calls=True)
     if locations and not deep.covered_ids:
         logger.warning("java deep pass: scip-java covered no callables; falling back to tree-sitter")
         return _fall_back()
