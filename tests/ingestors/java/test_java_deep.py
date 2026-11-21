@@ -115,6 +115,24 @@ def test_constructor_new_calls_are_recorded_as_init():
     assert ("<init>", 3) in make.called_sites and not any(n == "Thing" for n, _ in make.called_sites)
 
 
+def test_qualified_constructor_call_site_is_at_the_final_type_name():
+    # `new com.example.Thing()` split across lines: the `<init>` site must sit on the FINAL `Thing`
+    # identifier (where scip-java anchors the constructor occurrence), not the scoped type's `com` start.
+    src = {
+        "src/main/java/com/example/Mk.java":
+            "package com.example;\n"      # line 1
+            "public class Mk {\n"         # line 2
+            "  Object make() {\n"         # line 3
+            "    return new com.example\n"  # line 4
+            "        .Thing();\n"         # line 5 -- `Thing` is here
+            "  }\n"
+            "}\n",
+    }
+    raw = [parse_source(s.encode(), p) for p, s in src.items()]
+    make = next(loc for loc in resolution.callable_locations(raw, _PROJ) if loc.name == "make")
+    assert ("<init>", 5) in make.called_sites
+
+
 def test_call_sites_record_callee_identifier_lines_including_repeats():
     # called_sites feeds the line-precise gate: it records each call at its callee-identifier line, and
     # keeps EVERY line of a repeated call (a name-only dedup would drop one).

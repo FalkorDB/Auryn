@@ -64,30 +64,36 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
     def field(node, name):
         return node.child_by_field_name(name) if node is not None else None
 
-    def first_type_name(node) -> str | None:
-        """The bare simple name a type node denotes: `Base` for `Base`, `Base<T>`
-        (generic_type), or `pkg.Base` (scoped_type_identifier). None if it names nothing."""
+    def first_type_name_node(node):
+        """The NODE of the bare simple name a type denotes: `Base` for `Base`, `Base<T>` (generic_type),
+        or the FINAL segment `Base` for `pkg.Base` (scoped_type_identifier). None if it names nothing. The
+        node (not just its text) is what a constructor call site needs for its line -- SCIP anchors the
+        `<init>` occurrence at this final identifier, which for a multiline `new pkg.\n Base()` sits on a
+        different line than the scoped type's start."""
         if node is None:
             return None
         if node.type == "type_identifier":
-            return txt(node)
+            return node
         if node.type == "generic_type":
-            return first_type_name(node.child(0))
+            return first_type_name_node(node.child(0))
         if node.type == "scoped_type_identifier":
-            # last segment is the simple name
-            last = None
+            last = None  # last segment is the simple name
             for c in node.children:
                 if c.type == "type_identifier":
                     last = c
-            return txt(last) if last is not None else None
-        # descend to the first type_identifier we can find
-        stack = list(node.children)
+            return last
+        stack = list(node.children)  # descend to the first type_identifier we can find
         while stack:
             n = stack.pop(0)
             if n.type == "type_identifier":
-                return txt(n)
+                return n
             stack.extend(n.children)
         return None
+
+    def first_type_name(node) -> str | None:
+        """The bare simple name a type node denotes (see first_type_name_node). None if it names nothing."""
+        n = first_type_name_node(node)
+        return txt(n) if n is not None else None
 
     def modifiers_of(node) -> tuple[list[str], list[RawAnnotation]]:
         """(keyword modifiers, annotations) from a declaration's `modifiers` child."""
@@ -198,9 +204,9 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                     seen.add(key)
                     out.append(RawCall(name=nm, receiver=recv, is_new=False, line=line))
             elif n.type == "object_creation_expression":
-                type_node = field(n, "type")
-                nm = first_type_name(type_node)
-                line = (type_node.start_point[0] + 1) if type_node is not None else 0
+                name_node = first_type_name_node(field(n, "type"))  # the FINAL type identifier, not the
+                nm = txt(name_node) if name_node is not None else None  # scoped type's start -- SCIP anchors
+                line = (name_node.start_point[0] + 1) if name_node is not None else 0  # <init> here
                 key = (nm, None, True, line)
                 if nm and key not in seen:
                     seen.add(key)
