@@ -17,44 +17,29 @@ follow-up. Needs a Go toolchain (>=1.26, or GOTOOLCHAIN=auto to auto-provision o
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 import tempfile
+
+from auryn.core import scip_runner
 
 _SCIP_TIMEOUT_SECONDS = int(os.environ.get("AURYN_SCIP_GO_TIMEOUT", "900"))
 
+_INSTALL_HINT = (
+    "scip-go not found on PATH. Install it with "
+    "`go install github.com/scip-code/scip-go/cmd/scip-go@latest` (needs Go >=1.26, or GOTOOLCHAIN=auto), "
+    "or set AURYN_SCIP_GO to its path."
+)
 
-class ScipGoUnavailable(RuntimeError):
+
+class ScipGoUnavailable(scip_runner.ScipIndexerUnavailable):
     """scip-go could not be located or failed to produce a SCIP index -- the signal for git_sync to fall
     back to the tree-sitter fast pass."""
 
 
 def _tool_command() -> list[str]:
-    """Locate a usable scip-go from a TRUSTED location ONLY:
-      1. `AURYN_SCIP_GO` env override (an explicit, user-trusted binary path);
-      2. a `scip-go` on PATH (a user-controlled `go install .../scip-go` into GOPATH/bin).
-    Returned as an ABSOLUTE realpath (symlinks resolved) so the subprocess never re-resolves it against
-    its cwd and run_scip can refuse a binary inside the indexed tree -- deep analysis runs automatically on
-    arbitrary (possibly untrusted) repositories, so a repo-shipped binary must never execute. Raises
-    ScipGoUnavailable if no trusted binary resolves."""
-    candidate = os.environ.get("AURYN_SCIP_GO") or shutil.which("scip-go")
-    if candidate:
-        resolved = os.path.realpath(candidate)
-        if os.path.isfile(resolved):
-            return [resolved]
-    raise ScipGoUnavailable(
-        "scip-go not found on PATH. Install it with "
-        "`go install github.com/scip-code/scip-go/cmd/scip-go@latest` (needs Go >=1.26, or GOTOOLCHAIN=auto), "
-        "or set AURYN_SCIP_GO to its path."
-    )
-
-
-def _is_inside(path: str, root: str) -> bool:
-    root_real = os.path.realpath(root)
-    try:
-        return os.path.commonpath([os.path.realpath(path), root_real]) == root_real
-    except ValueError:  # different drives (Windows) -> not inside
-        return False
+    """Locate a usable scip-go from a TRUSTED location: `AURYN_SCIP_GO` override, else `scip-go` on PATH
+    (a user-controlled `go install`). See scip_runner.resolve_trusted_tool for the trust model."""
+    return scip_runner.resolve_trusted_tool(
+        env_var="AURYN_SCIP_GO", which="scip-go", unavailable=ScipGoUnavailable, hint=_INSTALL_HINT)
 
 
 def run_scip(root: str) -> bytes:
@@ -71,24 +56,12 @@ def run_scip(root: str) -> bytes:
     made scip-go emit an occurrence-less index here; it defaults version to the git short-sha, or "." with
     no git, which is fine for the containment join -- paths, not versions, drive it.)"""
     cmd = _tool_command()
-    if _is_inside(cmd[0], root):  # never run a scip-go that lives inside the (untrusted) indexed tree
+    if scip_runner.is_inside(cmd[0], root):  # never run a scip-go that lives inside the (untrusted) tree
         raise ScipGoUnavailable(f"refusing to run scip-go from inside the indexed tree: {cmd[0]}")
     env = {**os.environ}
     env.setdefault("GOTOOLCHAIN", "auto")
     with tempfile.TemporaryDirectory() as tmp:
         out_path = os.path.join(tmp, "index.scip")
         argv = [*cmd, "index", "-q", f"--module-root={root}", "-o", out_path]
-        try:
-            proc = subprocess.run(
-                argv, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE, timeout=_SCIP_TIMEOUT_SECONDS, check=False, env=env,
-            )
-        except OSError as exc:  # FileNotFoundError, PermissionError (non-executable override), etc.
-            raise ScipGoUnavailable(f"could not execute {argv[0]!r}: {exc}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ScipGoUnavailable(f"scip-go timed out after {_SCIP_TIMEOUT_SECONDS}s") from exc
-        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-            tail = (proc.stderr or b"").decode("utf-8", "replace")[-600:]
-            raise ScipGoUnavailable(f"scip-go index produced no output (exit {proc.returncode}): {tail}")
-        with open(out_path, "rb") as fh:
-            return fh.read()
+        return scip_runner.run_indexer(argv, cwd=root, out_path=out_path, timeout=_SCIP_TIMEOUT_SECONDS,
+                                       tool="scip-go", unavailable=ScipGoUnavailable, env=env)

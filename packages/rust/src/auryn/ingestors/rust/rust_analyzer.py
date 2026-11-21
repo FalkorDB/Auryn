@@ -21,15 +21,19 @@ import shutil
 import subprocess
 import tempfile
 
+from auryn.core.scip_runner import ScipIndexerUnavailable
+
 # The SCIP->CALLS derivation (resolve_calls and the symbol helpers) is shared infrastructure -- import it
 # from core.scip_resolve directly at the call sites (git_sync / tests), not via this runner module.
 
 _SCIP_TIMEOUT_SECONDS = int(os.environ.get("AURYN_RUST_ANALYZER_TIMEOUT", "900"))
 
 
-class RustAnalyzerUnavailable(RuntimeError):
+class RustAnalyzerUnavailable(ScipIndexerUnavailable):
     """rust-analyzer could not be located or failed to produce a SCIP index -- the signal for git_sync
-    to fall back to the tree-sitter fast pass."""
+    to fall back to the tree-sitter fast pass. (rust-analyzer is a trusted toolchain binary resolved via
+    rustup, so this runner keeps its own discovery and output-fallback rather than using scip_runner's
+    PATH/opt-in helpers.)"""
 
 
 def _tool_command() -> list[str]:

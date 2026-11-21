@@ -21,13 +21,20 @@ INTRA-project calls only; one integration can later serve C and CUDA (shared eng
 from __future__ import annotations
 
 import os
-import subprocess
 import tempfile
+
+from auryn.core import scip_runner
 
 _SCIP_TIMEOUT_SECONDS = int(os.environ.get("AURYN_SCIP_CLANG_TIMEOUT", "1800"))
 
+_INSTALL_HINT = (
+    "deep C++ analysis is OFF: set AURYN_SCIP_CLANG to a scip-clang binary to opt in. It is not "
+    "auto-discovered on PATH because it runs Clang with the repo's compile_commands.json flags "
+    "(which can execute arbitrary code). Download it from github.com/sourcegraph/scip-clang/releases."
+)
 
-class ScipClangUnavailable(RuntimeError):
+
+class ScipClangUnavailable(scip_runner.ScipIndexerUnavailable):
     """scip-clang could not be located, no compilation database was found, or indexing failed -- the
     signal for git_sync to fall back to the tree-sitter fast pass."""
 
@@ -36,18 +43,9 @@ def _tool_command() -> list[str]:
     """Locate scip-clang -- ONLY via an explicit `AURYN_SCIP_CLANG` path, deliberately NOT from PATH.
     `scip-clang` runs Clang per the repo's `compile_commands.json`, whose flags (`-fplugin=...`, `@response`
     files, include paths) are attacker-controllable in an untrusted repo and can execute arbitrary code, so
-    deep C++ is a deliberate per-environment OPT-IN. Returned as an absolute realpath (never re-resolved
-    against the subprocess cwd); run_scip further refuses a binary inside the indexed tree."""
-    override = os.environ.get("AURYN_SCIP_CLANG")
-    if override:
-        resolved = os.path.realpath(override)
-        if os.path.isfile(resolved):
-            return [resolved]
-    raise ScipClangUnavailable(
-        "deep C++ analysis is OFF: set AURYN_SCIP_CLANG to a scip-clang binary to opt in. It is not "
-        "auto-discovered on PATH because it runs Clang with the repo's compile_commands.json flags "
-        "(which can execute arbitrary code). Download it from github.com/sourcegraph/scip-clang/releases."
-    )
+    deep C++ is a deliberate per-environment OPT-IN (which=None). See scip_runner.resolve_trusted_tool."""
+    return scip_runner.resolve_trusted_tool(
+        env_var="AURYN_SCIP_CLANG", which=None, unavailable=ScipClangUnavailable, hint=_INSTALL_HINT)
 
 
 def _find_compdb(root: str) -> str | None:
@@ -63,21 +61,17 @@ def _find_compdb(root: str) -> str | None:
     return None
 
 
-def _is_inside(path: str, root: str) -> bool:
-    root_real = os.path.realpath(root)
-    try:
-        return os.path.commonpath([os.path.realpath(path), root_real]) == root_real
-    except ValueError:  # different drives (Windows) -> not inside
-        return False
-
-
 def run_scip(root: str) -> bytes:
     """Run scip-clang over the project at `root` and return the raw `index.scip` bytes. Raises
     ScipClangUnavailable on any failure (not opted in, no compile_commands.json, non-zero exit, no output)
     so the caller can fall back to the fast pass. The index is written to a tempdir, never into `root`;
-    scip-clang reads the sources read-only (it produces no object files)."""
+    scip-clang reads the sources read-only (it produces no object files).
+
+    require_zero_exit: scip-clang indexes best-effort THROUGH per-TU compile diagnostics and still exits 0;
+    a NON-zero exit is a real failure (bad compdb, crash) whose index may be truncated, so reject it rather
+    than read a partial/corrupt index."""
     cmd = _tool_command()
-    if _is_inside(cmd[0], root):  # never run a scip-clang that lives inside the (untrusted) indexed tree
+    if scip_runner.is_inside(cmd[0], root):  # never run a scip-clang that lives inside the (untrusted) tree
         raise ScipClangUnavailable(f"refusing to run scip-clang from inside the indexed tree: {cmd[0]}")
     compdb = _find_compdb(root)
     if compdb is None:
@@ -88,20 +82,6 @@ def run_scip(root: str) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         out_path = os.path.join(tmp, "index.scip")
         argv = [*cmd, f"--compdb-path={compdb}", f"--index-output-path={out_path}"]
-        try:
-            proc = subprocess.run(
-                argv, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE, timeout=_SCIP_TIMEOUT_SECONDS, check=False,
-            )
-        except OSError as exc:  # FileNotFoundError, PermissionError (non-executable override), etc.
-            raise ScipClangUnavailable(f"could not execute {argv[0]!r}: {exc}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ScipClangUnavailable(f"scip-clang timed out after {_SCIP_TIMEOUT_SECONDS}s") from exc
-        # scip-clang indexes best-effort THROUGH per-TU compile diagnostics and still exits 0; a NON-zero
-        # exit is a real failure (bad compdb, crash) whose index may be truncated -- reject it rather than
-        # read a partial/corrupt index.
-        if proc.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-            tail = (proc.stderr or b"").decode("utf-8", "replace")[-600:]
-            raise ScipClangUnavailable(f"scip-clang failed (exit {proc.returncode}): {tail}")
-        with open(out_path, "rb") as fh:
-            return fh.read()
+        return scip_runner.run_indexer(argv, cwd=root, out_path=out_path, timeout=_SCIP_TIMEOUT_SECONDS,
+                                       tool="scip-clang", unavailable=ScipClangUnavailable,
+                                       require_zero_exit=True)

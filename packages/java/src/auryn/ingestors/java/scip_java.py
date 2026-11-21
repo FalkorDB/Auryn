@@ -22,10 +22,19 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import tempfile
 
+from auryn.core import scip_runner
+
 _SCIP_TIMEOUT_SECONDS = int(os.environ.get("AURYN_SCIP_JAVA_TIMEOUT", "1800"))  # a build can be slow
+
+_INSTALL_HINT = (
+    "deep Java analysis is OFF: set AURYN_SCIP_JAVA to a scip-java launcher to opt in. It is not "
+    "auto-discovered on PATH because `scip-java index` runs the project's build (executing the repo's "
+    "build scripts/plugins). Install e.g. `cs bootstrap --standalone -o scip-java "
+    "-M org.scip_code.scip_java.ScipJava org.scip-code:scip-java:latest.release`; needs a JDK (17+) "
+    "and the project's build tool."
+)
 
 # Build-output dirs to skip when staging a build sandbox -- but ONLY where they're build output (beside a
 # project/subproject `src/`), NEVER a same-named SOURCE package (`src/main/java/com/acme/build/`). `.git`
@@ -47,40 +56,20 @@ def _copy_ignore(root: str):
     return ignore
 
 
-class ScipJavaUnavailable(RuntimeError):
+class ScipJavaUnavailable(scip_runner.ScipIndexerUnavailable):
     """scip-java could not be located or failed to produce a SCIP index (not opted in, missing JDK/build
     tool, or a build failure) -- the signal for git_sync to fall back to the tree-sitter fast pass."""
 
 
 def _tool_command() -> list[str]:
     """Locate scip-java -- ONLY via an explicit `AURYN_SCIP_JAVA` launcher path, deliberately NOT from
-    PATH. Unlike the parse-only indexers (scip-typescript, scip-go), `scip-java index` RUNS THE PROJECT'S
-    BUILD (Maven/Gradle/Bazel), executing the repository's own build scripts, plugins, and annotation
-    processors -- i.e. arbitrary code from the (possibly untrusted) indexed repo, with the ingest process's
-    filesystem access and credentials. Since deep runs automatically (async by default), auto-discovering
-    scip-java on PATH would silently execute untrusted builds; requiring the explicit env var makes running
-    the build a deliberate per-environment OPT-IN. The launcher must be an absolute realpath (never re-
-    resolved against the subprocess cwd); run_scip further refuses one inside the indexed tree."""
-    override = os.environ.get("AURYN_SCIP_JAVA")
-    if override:
-        resolved = os.path.realpath(override)
-        if os.path.isfile(resolved):
-            return [resolved]
-    raise ScipJavaUnavailable(
-        "deep Java analysis is OFF: set AURYN_SCIP_JAVA to a scip-java launcher to opt in. It is not "
-        "auto-discovered on PATH because `scip-java index` runs the project's build (executing the repo's "
-        "build scripts/plugins). Install e.g. `cs bootstrap --standalone -o scip-java "
-        "-M org.scip_code.scip_java.ScipJava org.scip-code:scip-java:latest.release`; needs a JDK (17+) "
-        "and the project's build tool."
-    )
-
-
-def _is_inside(path: str, root: str) -> bool:
-    root_real = os.path.realpath(root)
-    try:
-        return os.path.commonpath([os.path.realpath(path), root_real]) == root_real
-    except ValueError:  # different drives (Windows) -> not inside
-        return False
+    PATH (which=None). Unlike the parse-only indexers (scip-typescript, scip-go), `scip-java index` RUNS THE
+    PROJECT'S BUILD (Maven/Gradle/Bazel), executing the repository's own build scripts, plugins, and
+    annotation processors -- i.e. arbitrary code from the (possibly untrusted) indexed repo. Since deep runs
+    automatically (async by default), auto-discovering on PATH would silently execute untrusted builds, so
+    the explicit env var makes it a deliberate per-environment OPT-IN. See scip_runner.resolve_trusted_tool."""
+    return scip_runner.resolve_trusted_tool(
+        env_var="AURYN_SCIP_JAVA", which=None, unavailable=ScipJavaUnavailable, hint=_INSTALL_HINT)
 
 
 def run_scip(root: str) -> bytes:
@@ -97,7 +86,9 @@ def run_scip(root: str) -> bytes:
     fails, so success is gated on a non-empty index file. The subprocess inherits the environment
     (JAVA_HOME / PATH for the JDK + build tool)."""
     cmd = _tool_command()
-    if _is_inside(cmd[0], root):  # never run a scip-java that lives inside the (untrusted) indexed tree
+    # Refuse a launcher inside the ORIGINAL (untrusted) tree -- checked against `root`, not the build copy
+    # we run in below (the copy would contain a repo-shipped binary too).
+    if scip_runner.is_inside(cmd[0], root):
         raise ScipJavaUnavailable(f"refusing to run scip-java from inside the indexed tree: {cmd[0]}")
     with tempfile.TemporaryDirectory() as tmp:
         build_dir = os.path.join(tmp, "proj")
@@ -107,17 +98,5 @@ def run_scip(root: str) -> bytes:
             raise ScipJavaUnavailable(f"could not stage a build copy of {root!r}: {exc}") from exc
         out_path = os.path.join(tmp, "index.scip")
         argv = [*cmd, "index", f"--output={out_path}"]
-        try:
-            proc = subprocess.run(
-                argv, cwd=build_dir, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE, timeout=_SCIP_TIMEOUT_SECONDS, check=False,
-            )
-        except OSError as exc:  # FileNotFoundError, PermissionError (non-executable override), etc.
-            raise ScipJavaUnavailable(f"could not execute {argv[0]!r}: {exc}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ScipJavaUnavailable(f"scip-java timed out after {_SCIP_TIMEOUT_SECONDS}s") from exc
-        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
-            tail = (proc.stderr or b"").decode("utf-8", "replace")[-600:]
-            raise ScipJavaUnavailable(f"scip-java index produced no output (exit {proc.returncode}): {tail}")
-        with open(out_path, "rb") as fh:
-            return fh.read()
+        return scip_runner.run_indexer(argv, cwd=build_dir, out_path=out_path, timeout=_SCIP_TIMEOUT_SECONDS,
+                                       tool="scip-java", unavailable=ScipJavaUnavailable)
