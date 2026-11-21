@@ -20,8 +20,7 @@ import time
 from dataclasses import dataclass
 
 from auryn.core.parallel import parse_blobs_ordered
-from auryn.core.deep_sync import (DEPTH_RANK as _DEPTH_RANK, is_name_calls_edge as _is_name_calls_edge,
-                                  project_node as _project_node, should_drop_name_edge)
+from auryn.core.graph_model import GraphNode
 from auryn.core.graph_sync import stream_apply
 from auryn.core.registry import LanguageIngestResult
 from auryn.ingestors.cpp import resolution
@@ -56,8 +55,20 @@ class SyncStats:
     files_cached: int = 0
 
 
+# Two-phase depth (mirrors Rust/C#/Python/TS/Go/Java): the fast tree-sitter pass stamps the Project
+# `depth="fast"`, the deep scip-clang pass `depth="deep"`. A re-run short-circuits only when the commit
+# matches AND the existing depth is at least the requested one -- so a fast re-run never downgrades a deep
+# graph, but the deep phase still runs right after the fast one at the same commit.
+_DEPTH_RANK = {None: 0, "": 0, "fast": 1, "deep": 2}
 
 
+def _project_node(proj_id: str, project_name: str, repo_uri: str, target_sha: str, ref: str | None,
+                  depth: str) -> GraphNode:
+    # stream_apply merges props, so adding `depth` leaves the provenance `delta_format` marker intact.
+    return GraphNode(
+        "Project", {"id": proj_id},
+        {"name": project_name, "repo_uri": repo_uri, "commit_sha": target_sha, "ref": ref, "depth": depth},
+    )
 
 
 def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, ref: str | None,
@@ -142,6 +153,7 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
     name for a constructor-construction / complex receiver (so require_syntactic_call would drop those), but
     it emits self-CALLS -- so deep does NOT gate but DOES author self-edges."""
     try:
+        from auryn.core.deep_sync import is_name_calls_edge as _is_name_calls_edge, should_drop_name_edge
         from auryn.core.scip_resolve import resolve_calls
     except ImportError:  # a plugin-only upgrade left an older auryn-core without the resolver
         logger.warning("cpp deep pass: this auryn-core lacks core.scip_resolve (upgrade auryn-core); "

@@ -8,7 +8,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from auryn.core import deep_sync
-from auryn.core.graph_model import GraphEdge, GraphNode
+from auryn.core.graph_model import GraphEdge, GraphNode  # GraphNode: a non-edge item the predicate rejects
 
 
 def _name_edge(frm: str, to: str) -> GraphEdge:
@@ -44,15 +44,3 @@ def test_should_drop_name_edge_keeps_what_deep_did_not_identify():
     assert deep_sync.should_drop_name_edge(_name_edge("a", "b"), _deep({"a"}, {"a": set()}), loc_by_id) is False
     # the target is not a known project callable (extern / other-repo: loc_by_id miss) -> keep
     assert deep_sync.should_drop_name_edge(_name_edge("a", "x"), _deep({"a"}, {"a": {"x"}}), loc_by_id) is False
-
-
-def test_project_node_carries_identity_and_depth():
-    n = deep_sync.project_node("pid", "proj", "repo://u", "sha1", "refs/heads/main", "deep")
-    assert isinstance(n, GraphNode) and n.label == "Project" and n.key == {"id": "pid"}
-    assert n.properties == {"name": "proj", "repo_uri": "repo://u", "commit_sha": "sha1",
-                            "ref": "refs/heads/main", "depth": "deep"}
-
-
-def test_depth_rank_orders_unsynced_fast_deep():
-    assert deep_sync.DEPTH_RANK[None] == deep_sync.DEPTH_RANK[""] == 0
-    assert deep_sync.DEPTH_RANK["fast"] < deep_sync.DEPTH_RANK["deep"]

@@ -1,32 +1,16 @@
-"""Shared primitives for the per-language two-phase deep passes (each ingestor's `git_sync.py`).
+"""The deep-pass OVERLAY invariant, shared by every language's deep `git_sync`.
 
-The deep OVERLAY -- which fast, name-resolved CALLS edges a resolved SCIP pass is allowed to delete -- is a
-correctness-sensitive invariant that must stay IDENTICAL across languages: drift here silently corrupts the
-graph (a real call edge dropped with no replacement, or a wrong name-guess kept). That invariant lived
-copied verbatim in all five deep passes; it lives here now, defined once.
+Which fast, name-resolved `CALLS` edges a resolved SCIP pass is allowed to DELETE is correctness-sensitive:
+drift across languages silently corrupts the graph (a real call edge dropped with no deep replacement, or a
+wrong name-guess kept). That logic lived copied verbatim in all five deep passes; it lives here now, once.
 
-Deliberately small. The larger orchestration around it (`sync_at` / `_deep_sync_at` / `_apply` / `_finish`)
-genuinely differs per language -- C++ stamps `.h` headers and writes a delta-format marker, TypeScript
-streams from a parse plan, Go threads a module map, Rust recomputes `unresolved_calls` -- so it stays
-per-language rather than forced behind a hook-heavy abstraction."""
+Imported lazily on the DEEP path only (inside each `_deep_sync_at`, behind the same `ImportError` guard as
+`core.scip_resolve`), so a plugin-only upgrade against an older core degrades to the fast pass rather than
+breaking it -- the fast pass never imports this module. The rest of the two-phase shell (`sync_at`,
+`_deep_sync_at`, `_apply`, `_finish`, and the trivial `_DEPTH_RANK` / `_project_node`) genuinely differs per
+language and stays there."""
 
 from __future__ import annotations
-
-from auryn.core.graph_model import GraphNode
-
-# Depth rank for the two-phase short-circuit: a sync requested at depth D is skipped when the graph already
-# sits at the same commit with depth >= D. None/"" = never synced, "fast" = tree-sitter, "deep" = SCIP.
-DEPTH_RANK = {None: 0, "": 0, "fast": 1, "deep": 2}
-
-
-def project_node(proj_id: str, project_name: str, repo_uri: str, target_sha: str, ref: str | None,
-                 depth: str) -> GraphNode:
-    """The Project node carrying the sync's identity + `depth`. stream_apply merges props, so adding `depth`
-    leaves the provenance `delta_format` marker (written separately) intact."""
-    return GraphNode(
-        "Project", {"id": proj_id},
-        {"name": project_name, "repo_uri": repo_uri, "commit_sha": target_sha, "ref": ref, "depth": depth},
-    )
 
 
 def is_name_calls_edge(item) -> bool:
