@@ -46,7 +46,9 @@ def _tool_command() -> list[str]:
     ScipTypescriptUnavailable (with an install hint) if no trusted binary resolves."""
     candidate = os.environ.get("AURYN_SCIP_TYPESCRIPT") or shutil.which("scip-typescript")
     if candidate:
-        resolved = os.path.abspath(candidate)  # absolute -> not re-resolved against the subprocess cwd
+        # realpath, not abspath: resolve symlinks too, so a trusted-looking path that is actually a symlink
+        # INTO the indexed tree is caught by run_scip's containment check (and the real binary is executed).
+        resolved = os.path.realpath(candidate)
         if os.path.isfile(resolved):
             return [resolved]
     raise ScipTypescriptUnavailable(
@@ -57,8 +59,10 @@ def _tool_command() -> list[str]:
 
 
 def _is_inside(path: str, root: str) -> bool:
+    # realpath both sides so a symlinked binary (or a symlinked checkout) can't slip the containment check.
+    root_real = os.path.realpath(root)
     try:
-        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
+        return os.path.commonpath([os.path.realpath(path), root_real]) == root_real
     except ValueError:  # different drives (Windows) -> not inside
         return False
 
