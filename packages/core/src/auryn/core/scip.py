@@ -95,17 +95,20 @@ def _packed_varints(data: bytes) -> list[int]:
 
 def _sub_field1_varint(data: bytes) -> int:
     """The first varint field (field 1) of a sub-message -- the start line of a SingleLineRange (`line`)
-    or MultiLineRange (`start_line`)."""
+    or MultiLineRange (`start_line`). Field 1 is a proto3 scalar, so a producer OMITS it when it is 0
+    (line 0 = a file's first line); the sub-message's mere presence establishes a typed range, so an
+    absent field 1 means line 0, not 'missing'."""
     for field_num, wire, value in _fields(data):
         if field_num == 1 and wire == _WIRE_VARINT:
             return value
-    return -1
+    return 0
 
 
 def _parse_occurrence(data: bytes) -> Occurrence | None:
     symbol = ""
-    packed_line = -1  # deprecated range(1)
-    typed_line = -1   # single_line_range(8) / multi_line_range(9); takes precedence per the proto
+    packed_line = -1       # deprecated range(1)
+    typed_line = -1        # single_line_range(8) / multi_line_range(9) line, once a typed range is seen
+    has_typed = False      # whether a typed-range field was present (it takes precedence per the proto)
     roles = 0
     for field_num, wire, value in _fields(data):
         if field_num == 1:  # deprecated packed range: [line, startCol, endCol(, endLine, endCol)]
@@ -116,12 +119,13 @@ def _parse_occurrence(data: bytes) -> Occurrence | None:
             elif wire == _WIRE_VARINT and packed_line < 0:  # non-packed: first entry is the start line
                 packed_line = value
         elif field_num in (8, 9) and wire == _WIRE_LEN:  # single_line_range / multi_line_range
+            has_typed = True
             typed_line = _sub_field1_varint(value)
         elif field_num == 2 and wire == _WIRE_LEN:  # symbol
             symbol = value.decode("utf-8", "replace")
         elif field_num == 3 and wire == _WIRE_VARINT:  # symbol_roles
             roles = value
-    start_line = typed_line if typed_line >= 0 else packed_line
+    start_line = typed_line if has_typed else packed_line  # a present typed range wins, even at line 0
     if not symbol or start_line < 0:
         return None
     return Occurrence(symbol=symbol, start_line=start_line, is_definition=bool(roles & SYMBOL_ROLE_DEFINITION))

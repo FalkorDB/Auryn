@@ -77,7 +77,7 @@ def test_callable_locations_match_resolution_node_ids():
 
 def test_resolve_calls_resolves_what_the_name_pass_cannot():
     locs = _fixture_locations()
-    deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True)  # as the Go overlay runs it
+    deep = resolve_calls(_SCIP.read_bytes(), locs)  # as the Go overlay runs it (no syntactic-call gate)
     by_id = {loc.id: loc for loc in locs}
     for e in deep.edges:
         assert e.properties["resolution"] == "resolved"
@@ -90,16 +90,20 @@ def test_resolve_calls_resolves_what_the_name_pass_cannot():
     # such edge at all); deep resolves both to the concrete Service methods.
     assert to_id("Run", ".struct.Service.method.Save(")
     assert to_id("Run", ".struct.Service.method.Count(")
-    # `model.New()` -- a cross-PACKAGE call the fast pass marks external; deep resolves it in-source.
+    # chained-selector calls (`svc.store.Put()` / `svc.store.Size()`) -- the fast parser omits these (the
+    # receiver is too complex to name), so deep is the ONLY source of these method-dispatch edges.
+    assert to_id("Save", ".struct.Store.method.Put(")
+    assert to_id("Count", ".struct.Store.method.Size(")
+    # `model.New()` -- a cross-PACKAGE call; deep resolves it to the in-source function.
     assert to_id("NewService", ".func.New(")
 
 
 def test_resolve_calls_tracks_coverage():
     locs = _fixture_locations()
-    deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True)
+    deep = resolve_calls(_SCIP.read_bytes(), locs)
     by_name = {loc.name: loc for loc in locs}
     assert {by_name[n].id for n in ("Run", "NewService", "Save")} <= deep.covered_ids
-    assert deep.metrics["resolved"] >= 5
+    assert deep.metrics["resolved"] >= 5 and deep.metrics["external"] >= 1  # genuine stdlib externals kept
 
 
 def test_resolve_calls_is_empty_without_matching_locations():
@@ -123,6 +127,7 @@ def test_deep_falls_back_to_treesitter_when_unavailable(graph, monkeypatch):
 
     go = next(r for r in report.languages if r.language == "go")
     assert go.error is None
+    assert go.deep_status != "error"  # ScipGoUnavailable is HANDLED (not an escaped error)
     assert _depth(graph, "gofb") == "fast"  # deep couldn't run -> stayed at the fast graph
 
 
@@ -166,14 +171,15 @@ def test_deep_inline_resolves_calls_end_to_end(graph, tmp_path):
         "WHERE m.id CONTAINS '.struct.Service.method.Save' RETURN 1"
     ).result_set
     assert hit == [[1]]
-    # cross-package model.New resolved in-source, AND the stale external placeholder for it retired.
+    # a chained-selector call (`svc.store.Put()`) the fast parser omits entirely -- deep is its only source.
+    chained = graph.query(
+        "MATCH (:Method {name:'Save'})-[:CALLS {resolution:'resolved'}]->(m:Method {name:'Put'}) "
+        "WHERE m.id CONTAINS '.struct.Store.method.Put' RETURN 1"
+    ).result_set
+    assert chained == [[1]]
+    # cross-package model.New resolved in-source.
     real = graph.query(
         "MATCH (:Function {name:'NewService'})-[:CALLS {resolution:'resolved'}]->(f:Function {name:'New'}) "
         "WHERE f.id CONTAINS '.func.New' RETURN 1"
     ).result_set
     assert real == [[1]]
-    stale = graph.query(
-        "MATCH (:Function {name:'NewService'})-[:CALLS]->(x) WHERE x.id STARTS WITH 'extern://go/' "
-        "AND x.id CONTAINS 'model.New' RETURN count(*)"
-    ).result_set
-    assert stale == [[0]]

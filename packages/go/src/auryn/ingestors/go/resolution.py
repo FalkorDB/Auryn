@@ -119,10 +119,14 @@ def callable_locations(raw_files: list[RawFile], project_id: str):
     (dir-keyed package -> type/func/method ids), so deep CALLS edges land byte-identically on the nodes
     resolve() authored -- no module map or type inference needed: ids are dir-keyed, and a Go method's
     receiver type is always in the method's own package, so a per-(package-key, type-name) index resolves
-    the owner type exactly as _resolve's (import_path, name) index does. Interface method specs are
-    included (deep-resolvable call TARGETs; no body -> no calls). A parity test asserts these ids are a
-    subset of resolve()'s Function/Method node ids. The core.scip_resolve import is deferred here
-    (deep-only) so the fast pass never requires it (buildable against an older auryn-core)."""
+    the owner type exactly as _resolve's (import_path, name) index does. A parity test asserts these ids
+    are a subset of resolve()'s Function/Method node ids. The core.scip_resolve import is deferred here
+    (deep-only) so the fast pass never requires it (buildable against an older auryn-core).
+
+    Interface method SPECS are deliberately excluded: scip-go encodes them as *term* descriptors
+    (`Reader#Read.`, not `Read().`), so they never match the callable-symbol gate and a call through an
+    interface-typed receiver resolves (in scip-go) to the interface term rather than a concrete method --
+    interface-dispatch deep resolution is a follow-up, so including these locations would be dead weight."""
     from auryn.core.scip_resolve import CallableLocation
 
     raw_files = sorted(raw_files, key=lambda rf: _norm(rf.path))
@@ -155,12 +159,6 @@ def callable_locations(raw_files: list[RawFile], project_id: str):
                 cid, label = ids.method_id(owner_tid, rfn.name, ptypes), "Method"
             out.append(CallableLocation(cid, label, rel, rfn.line_start, rfn.line_end, rfn.name,
                                         frozenset(c.name for c in rfn.calls)))
-        for rt in rf.types:  # interface method specs: deep-resolvable TARGETs, no body (no calls)
-            if rt.kind == "Interface":
-                tid = type_id_by_pkey_name[(pkey, rt.name)]
-                for m in rt.methods:
-                    out.append(CallableLocation(ids.method_id(tid, m.name, [p.type for p in m.parameters]),
-                                                "Method", rel, m.line_start, m.line_end, m.name, frozenset()))
     return out
 
 

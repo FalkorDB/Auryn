@@ -132,17 +132,6 @@ def _is_name_calls_edge(item) -> bool:
             and (item.properties or {}).get("resolution") == "name")
 
 
-def _is_extern_calls_edge(item) -> bool:
-    return (type(item).__name__ == "GraphEdge" and item.rel_type == "CALLS"
-            and (item.properties or {}).get("resolution") == "external")
-
-
-def _extern_callee_name(extern_id: str) -> str:
-    """The bare callee name from a Go extern:// placeholder id (`extern://go/pkg.Func` or
-    `extern://go/pkg.Type.Method`) -- its last dotted component."""
-    return extern_id.rsplit(".", 1)[-1]
-
-
 def _deep_sync_at(writer, source, target_sha: str, files, module_map, modules, proj_id: str,
                   project_name: str, repo_uri: str, ref: str | None, started: float, *,
                   is_upgrade: bool, entry_sha) -> "SyncStats | None":
@@ -184,7 +173,12 @@ def _deep_sync_at(writer, source, target_sha: str, files, module_map, modules, p
         return _fall_back()
 
     locations = resolution.callable_locations(files, proj_id)
-    deep = resolve_calls(scip_bytes, locations, require_syntactic_call=True)
+    # NO require_syntactic_call for Go: its fast parser omits a RawCall for a chained-selector call
+    # (`svc.store.Put()` -- a receiver too complex to name), so gating on the fast call-name set would drop
+    # those genuine deep-resolved method calls (the deep pass's main win). The cost is that a function used
+    # as a VALUE could yield a spurious edge; recovering that precision needs the fast parser to record
+    # every call-site name (shared v2 follow-up with the line-precise work).
+    deep = resolve_calls(scip_bytes, locations)
     if locations and not deep.covered_ids:
         # scip-go ran but analyzed none of our callables (module won't load, no toolchain): don't make a
         # hollow depth="deep" claim -- fall back to the fast graph.
@@ -192,12 +186,6 @@ def _deep_sync_at(writer, source, target_sha: str, files, module_map, modules, p
         return _fall_back()
 
     loc_by_id = {loc.id: loc for loc in locations}
-    # Names deep RESOLVED to an in-source callable, per caller -- used to retire a false-external: Go's fast
-    # pass marks every cross-PACKAGE call external (it can't resolve across packages), but many are
-    # intra-REPO; where deep resolves one in-source, its extern:// placeholder edge is stale.
-    resolved_names: dict[str, set[str]] = {}
-    for e in deep.edges:
-        resolved_names.setdefault(e.from_key["id"], set()).add(loc_by_id[e.to_key["id"]].name)
     # Keep the project node at "fast" in the delta; depth is bumped to "deep" by an ATOMIC guarded write
     # AFTER the delta lands, so a concurrent ingest that moved the commit can't be overwritten with a stale
     # "deep" claim.
@@ -212,11 +200,6 @@ def _deep_sync_at(writer, source, target_sha: str, files, module_map, modules, p
                 if (frm in deep.covered_ids and callee is not None
                         and callee.name in deep.seen_by_caller.get(frm, set())):
                     continue  # deep identified this call -> drop the fast name-edge (deep edge replaces it)
-            elif _is_extern_calls_edge(item):
-                frm = item.from_key["id"]
-                if (frm in deep.covered_ids
-                        and _extern_callee_name(item.to_key["id"]) in resolved_names.get(frm, set())):
-                    continue  # deep resolved this cross-package call in-source -> drop the false-external
             yield item
         yield from deep.edges
 
