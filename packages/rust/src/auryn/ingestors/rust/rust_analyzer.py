@@ -21,14 +21,8 @@ import shutil
 import subprocess
 import tempfile
 
-# Re-exported for the engine + tests: the SCIP->CALLS derivation is shared infrastructure (core), not
-# Rust-specific. git_sync calls rust_analyzer.resolve_calls; test_rust_deep drives the helpers here.
-from auryn.core.scip_resolve import (  # noqa: F401
-    DeepCalls,
-    _is_callable_symbol,
-    _simple_name,
-    resolve_calls,
-)
+# The SCIP->CALLS derivation (resolve_calls and the symbol helpers) is shared infrastructure -- import it
+# from core.scip_resolve directly at the call sites (git_sync / tests), not via this runner module.
 
 _SCIP_TIMEOUT_SECONDS = int(os.environ.get("AURYN_RUST_ANALYZER_TIMEOUT", "900"))
 

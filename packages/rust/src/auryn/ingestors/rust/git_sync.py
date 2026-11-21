@@ -129,6 +129,7 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
     from what SCIP resolved (so a fn-pointer call `f()` stays counted). A callable SCIP never saw
     (feature-gated-out / unlinked) keeps its fast resolution untouched. `diff_extern_edges=False` on an
     upgrade leaves the fast pass's extern:// placeholders alone."""
+    from auryn.core.scip_resolve import resolve_calls
     from auryn.ingestors.rust import rust_analyzer
 
     def moved() -> "str | None":
@@ -154,7 +155,7 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
         return None
 
     locations = resolution.callable_locations(files, proj_id)
-    deep = rust_analyzer.resolve_calls(scip_bytes, locations)
+    deep = resolve_calls(scip_bytes, locations)
     loc_by_id = {loc.id: loc for loc in locations}
     unresolved_by_id = {cid: _recompute_unresolved(loc_by_id[cid], deep.seen_by_caller.get(cid, set()))
                         for cid in deep.covered_ids}

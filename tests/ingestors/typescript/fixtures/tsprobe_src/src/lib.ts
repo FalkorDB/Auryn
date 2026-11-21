@@ -2,10 +2,10 @@ import { deep } from "./other";
 
 function helper(): number { return 1; }
 
-class Fast {
+export class Fast {
   run(): number { return helper(); }
 }
-class Slow {
+export class Slow {       // a decoy: same method name `run`, so the fast name pass can't disambiguate f.run()
   run(): number { return 0; }
 }
 

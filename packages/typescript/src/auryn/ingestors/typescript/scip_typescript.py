@@ -72,22 +72,21 @@ def run_scip(root: str) -> bytes:
     is gated on a non-empty index file existing -- and whether that index actually analyzed our callables
     is decided downstream (git_sync falls back if SCIP covered nothing).
 
-    scip-typescript mutates the indexed dir: it writes a stray `index.scip` (regardless of `--output`), and
-    `--infer-tsconfig` writes an inferred `tsconfig.json` when none exists. For a git source the dir is a
-    throwaway checkout, but for a LOCAL-directory source it is the user's LIVE tree, so we clean both up
-    afterward -- removing an inferred config ONLY when the project didn't already have one (never the
-    user's own tsconfig/jsconfig)."""
+    scip-typescript mutates the indexed dir: it can write a stray `index.scip` (regardless of `--output`),
+    and `--infer-tsconfig` writes an inferred `tsconfig.json` when none exists. For a git source the dir is
+    a throwaway checkout, but for a LOCAL-directory source it is the user's LIVE tree. So we snapshot which
+    of those files already existed and afterward remove ONLY the ones we caused to appear -- never the
+    user's own `index.scip` / `tsconfig.json` / `jsconfig.json`, and never reading a pre-existing
+    `index.scip` as if it were our output. (A config created by an unrelated process DURING indexing is an
+    inherent, narrow race; auryn's own ingests are serialized per repo by sync_lock.)"""
     cmd = _tool_command(root)
     stray = os.path.join(root, "index.scip")
-    # --infer-tsconfig writes an inferred config into the indexed root iff none exists; snapshot what was
-    # already there so cleanup removes only what WE caused to be inferred.
-    inferable = [os.path.join(root, n) for n in ("tsconfig.json", "jsconfig.json")]
-    pre_existing = {p for p in inferable if os.path.exists(p)}
+    artifacts = [stray, os.path.join(root, "tsconfig.json"), os.path.join(root, "jsconfig.json")]
+    pre_existing = {p for p in artifacts if os.path.exists(p)}
 
     def _cleanup_artifacts() -> None:
-        _cleanup(stray)  # the stray index.scip scip-typescript drops in the indexed dir
-        for p in inferable:
-            if p not in pre_existing:  # an inferred config we caused -- never the user's own
+        for p in artifacts:
+            if p not in pre_existing:  # only what WE caused to appear -- never the user's own file
                 _cleanup(p)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -104,9 +103,16 @@ def run_scip(root: str) -> bytes:
         except subprocess.TimeoutExpired as exc:
             _cleanup_artifacts()
             raise ScipTypescriptUnavailable(f"scip-typescript timed out after {_SCIP_TIMEOUT_SECONDS}s") from exc
-        produced = out_path if os.path.exists(out_path) else stray
+        # Our output is the explicit --output path. Only fall back to a root/index.scip that WE created
+        # (an old scip-typescript ignoring --output) -- never a pre-existing one the user put there.
+        if os.path.exists(out_path):
+            produced = out_path
+        elif os.path.exists(stray) and stray not in pre_existing:
+            produced = stray
+        else:
+            produced = None
         try:
-            if proc.returncode != 0 or not os.path.exists(produced) or os.path.getsize(produced) == 0:
+            if proc.returncode != 0 or produced is None or os.path.getsize(produced) == 0:
                 tail = (proc.stderr or b"").decode("utf-8", "replace")[-600:]
                 raise ScipTypescriptUnavailable(f"scip-typescript index exited {proc.returncode}: {tail}")
             with open(produced, "rb") as fh:
