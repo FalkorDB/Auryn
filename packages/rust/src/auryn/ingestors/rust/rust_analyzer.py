@@ -3,11 +3,11 @@ Roslyn and Python's jedi deep passes).
 
 The fast tree-sitter pass resolves CALLS *by name*, so a method on a `dyn`/`impl`/generic receiver, an
 untyped local, or a cross-module/crate callee is dropped or guessed (see `unresolved_calls`, #792/#794).
-rust-analyzer resolves them precisely. We ask it for a SCIP index (`rust-analyzer scip <root>`), then
-derive CALLS by occurrence containment: a *reference* occurrence of a callable symbol that falls inside
-a callable's line span is a call from that callable to the referenced one. Node ids come from the fast
-pass (`resolution.callable_locations`) -- ids embed only syntactic signatures, so a deep edge lands on
-the exact Function/Method node the fast pass authored.
+rust-analyzer resolves them precisely. We ask it for a SCIP index (`rust-analyzer scip <root>`); the
+index is then turned into resolved CALLS by the shared, language-agnostic `core.scip_resolve` (occurrence
+containment over the fast pass's `CallableLocation`s) -- the same code scip-typescript and other SCIP
+indexers use. This module is just the Rust-specific RUNNER: locate rust-analyzer and produce the
+`index.scip` bytes.
 
 Graceful degradation is the contract (as with Roslyn's `RoslynUnavailable`): if rust-analyzer isn't
 available or the crate can't be analyzed, `RustAnalyzerUnavailable` is raised and git_sync falls back to
@@ -17,16 +17,18 @@ placeholders untouched (so stdlib/other-crate edges and cross-repo reconciliatio
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import tempfile
-from collections import defaultdict
-from dataclasses import dataclass
 
-from auryn.core.graph_model import GraphEdge
-from auryn.ingestors.rust import scip
-from auryn.ingestors.rust.resolution import CallableLocation
+# Re-exported for the engine + tests: the SCIP->CALLS derivation is shared infrastructure (core), not
+# Rust-specific. git_sync calls rust_analyzer.resolve_calls; test_rust_deep drives the helpers here.
+from auryn.core.scip_resolve import (  # noqa: F401
+    DeepCalls,
+    _is_callable_symbol,
+    _simple_name,
+    resolve_calls,
+)
 
 _SCIP_TIMEOUT_SECONDS = int(os.environ.get("AURYN_RUST_ANALYZER_TIMEOUT", "900"))
 
@@ -96,114 +98,3 @@ def run_scip(root: str) -> bytes:
             except OSError:
                 pass  # best-effort cleanup -- a leftover index.scip in the checkout is harmless
     return data
-
-
-# -- pure SCIP -> CALLS derivation (unit-testable without the toolchain) ----------------------------
-
-def _is_callable_symbol(symbol: str) -> bool:
-    """A SCIP symbol that names a function/method (its descriptor ends `().`). Excludes params
-    (`...().(x)`), types (`...#`), locals (`local N`), and macros."""
-    return symbol.endswith("().")
-
-
-def _simple_name(symbol: str) -> str:
-    """The callee's bare name from a SCIP symbol: `rust-analyzer cargo crate 1.0 Fast#Run#run().` -> `run`."""
-    descriptor = symbol.split(" ", 4)[-1]
-    descriptor = descriptor.removesuffix("().")
-    return re.split(r"[#/]", descriptor)[-1] if descriptor else ""
-
-
-def _norm_path(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
-
-
-def _span(loc: CallableLocation) -> int:
-    return loc.line_end - loc.line_start
-
-
-@dataclass
-class DeepCalls:
-    """The result of resolving CALLS from a SCIP index against the fast pass's callables."""
-
-    edges: list[GraphEdge]               # resolved intra-project CALLS (resolution="resolved")
-    seen_by_caller: dict[str, set[str]]  # caller id -> callee names SCIP IDENTIFIED (resolved in-source OR
-    # external). Drives unresolved_calls AND tells the overlay which fast name-CALLS to drop: an identified
-    # call is either replaced by a deep edge (in-source) or was a wrong local guess for an external callee
-    # (drop it) -- while a NON-identified call (ambiguous same-line def / fn-pointer) keeps its fast edge.
-    covered_ids: set[str]                # callable ids SCIP defined (analyzed) -- the overlay scope
-    metrics: dict
-
-
-def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation]) -> DeepCalls:
-    """Derive precise intra-project CALLS from a SCIP index + the fast pass's callable locations.
-
-    A reference occurrence of a callable symbol is attributed to a containing callable (preferring one
-    whose fast parse actually called that name, so same-line siblings disambiguate) and resolved to the
-    in-source callable the symbol defines (`resolution:"resolved"`). A reference whose symbol isn't
-    defined in this project (stdlib / other-crate) is counted but gets no edge -- the fast pass's
-    extern:// placeholder covers it. A symbol whose definition the line-only join can't disambiguate
-    (2+ same-named callables on one line) is left UNRESOLVED -- no edge, not counted as identified, and
-    the caller's fast edge to it is kept (not in `resolved_names_by_caller`). `covered_ids` are the
-    callables SCIP analyzed, so the overlay touches only those; `seen_by_caller` drives the
-    unresolved_calls recompute; `resolved_names_by_caller` says which fast name-edges deep replaced."""
-    documents = scip.parse_index(scip_bytes)
-    by_path: dict[str, list[CallableLocation]] = defaultdict(list)
-    for loc in locations:
-        by_path[_norm_path(loc.rel_path)].append(loc)
-
-    def attribute(locs, line_1based, callee_name):  # a reference -> its enclosing CALLER
-        hits = [loc for loc in locs if loc.line_start <= line_1based <= loc.line_end]
-        # prefer a containing callable that the fast parse saw call this name -- disambiguates callers
-        # sharing a line; fall back to innermost so a macro-internal call (no RawCall) still attributes.
-        pool = [loc for loc in hits if callee_name in loc.called_names] or hits
-        return min(pool, key=_span) if pool else None
-
-    symbol_to_loc: dict[str, CallableLocation] = {}
-    ambiguous_defs: set[str] = set()  # same-line same-name defs we couldn't pin -> leave to the fast pass
-    for doc in documents:
-        locs = by_path.get(_norm_path(doc.relative_path), [])
-        for occ in doc.occurrences:
-            if not (occ.is_definition and _is_callable_symbol(occ.symbol)):
-                continue
-            hits = sorted((loc for loc in locs if loc.line_start <= occ.start_line + 1 <= loc.line_end
-                           and loc.name == _simple_name(occ.symbol)), key=_span)
-            if not hits:
-                continue
-            if len(hits) >= 2 and _span(hits[0]) == _span(hits[1]):
-                ambiguous_defs.add(occ.symbol)  # can't tell B::run from A::run on one line -> don't risk it
-            else:
-                symbol_to_loc[occ.symbol] = hits[0]
-    covered_ids = {loc.id for loc in symbol_to_loc.values()}
-
-    edges: dict[tuple[str, str], GraphEdge] = {}
-    seen_by_caller: dict[str, set[str]] = defaultdict(set)
-    metrics = {"resolved": 0, "external": 0, "ambiguous": 0, "unattributed": 0}
-    for doc in documents:
-        locs = by_path.get(_norm_path(doc.relative_path), [])
-        for occ in doc.occurrences:
-            if occ.is_definition or not _is_callable_symbol(occ.symbol):
-                continue
-            callee_name = _simple_name(occ.symbol)
-            caller = attribute(locs, occ.start_line + 1, callee_name)
-            if caller is None:
-                metrics["unattributed"] += 1
-                continue
-            target = symbol_to_loc.get(occ.symbol)
-            if target is None:
-                if occ.symbol in ambiguous_defs:
-                    metrics["ambiguous"] += 1  # NOT identified: counts as unresolved, fast edge kept
-                else:
-                    seen_by_caller[caller.id].add(callee_name)  # identified external (stdlib / other-crate)
-                    metrics["external"] += 1
-                continue
-            seen_by_caller[caller.id].add(callee_name)  # SCIP tied a concrete in-source callable to this call
-            if target.id == caller.id:
-                continue  # self-reference / recursion (the fast pass skips self-CALLS too)
-            key = (caller.id, target.id)
-            if key not in edges:
-                edges[key] = GraphEdge(
-                    "CALLS", caller.label, {"id": caller.id}, target.label, {"id": target.id},
-                    {"resolution": "resolved"},
-                )
-                metrics["resolved"] += 1
-    return DeepCalls(list(edges.values()), dict(seen_by_caller), covered_ids, metrics)

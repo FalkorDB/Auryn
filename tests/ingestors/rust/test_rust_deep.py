@@ -12,9 +12,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from auryn.core import ingest
+from auryn.core import ingest, scip
 from auryn.core.graph_client import GraphWriter
-from auryn.ingestors.rust import resolution, rust_analyzer, scip
+from auryn.ingestors.rust import resolution, rust_analyzer
 from auryn.ingestors.rust.file_parser import parse_source
 from auryn.ingestors.rust.ids import project_id
 

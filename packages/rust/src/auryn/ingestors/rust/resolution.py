@@ -23,6 +23,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from auryn.core.graph_model import GraphEdge, GraphNode
+from auryn.core.scip_resolve import CallableLocation as _BaseCallableLocation
 from auryn.ingestors.rust import cargo, ids
 from auryn.ingestors.rust.raw_model import RawConst, RawField, RawFunction, RawType
 
@@ -146,23 +147,14 @@ def resolve_incremental(emit_raws, project_id: str, index: RustGraphIndex) -> li
 
 
 @dataclass(frozen=True)
-class CallableLocation:
-    """Where a project callable lives, keyed by its graph node id -- the join the deep (rust-analyzer
-    / SCIP) pass needs: SCIP reports a resolved call by (file, line); this maps that back to the fast
-    pass's Function/Method node, and its [line_start, line_end] span attributes a call site to the
-    enclosing callable by containment."""
+class CallableLocation(_BaseCallableLocation):
+    """Rust's callable location: the shared SCIP-join fields (id/label/rel_path/line span/name/
+    called_names -- see core.scip_resolve.CallableLocation) PLUS Rust's `macro_calls`: call-like sites
+    inside macro invocations the fast parse can't name (not in `called_names`; counted, not parsed as
+    RawCalls). The deep pass reconciles these against SCIP's macro-expanded refs when recomputing
+    unresolved_calls (git_sync._recompute_unresolved). `resolve_calls` reads only the shared fields."""
 
-    id: str
-    label: str  # "Function" | "Method" -- the node label the deep CALLS edge must point at
-    rel_path: str
-    line_start: int  # 1-based inclusive (as RawFunction records them)
-    line_end: int
-    name: str
-    called_names: frozenset[str]  # callee simple names the fast parse saw as CALLS in this body --
-    # lets the deep pass disambiguate same-line callers and recompute unresolved_calls from what SCIP
-    # actually resolved (macro-internal calls aren't here; they're counted, not parsed as RawCalls)
-    macro_calls: int = 0  # call-like sites inside macro invocations (fast parse can't name them) -- the
-    # deep pass reconciles these against SCIP's macro-expanded refs when recomputing unresolved_calls
+    macro_calls: int = 0
 
 
 def callable_locations(raw_files, project_id: str) -> list[CallableLocation]:

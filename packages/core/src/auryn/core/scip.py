@@ -1,11 +1,12 @@
 """A tiny, dependency-free reader for the subset of SCIP (Sourcegraph Code Intelligence Protocol,
-https://github.com/sourcegraph/scip) that the Rust deep pass needs: per document, every occurrence's
+https://github.com/sourcegraph/scip) that the deep passes need: per document, every occurrence's
 symbol, its start line, and whether that occurrence is the symbol's definition.
 
-`rust-analyzer scip` emits an `index.scip` protobuf (there is no JSON form), and the repo deliberately
-carries no protobuf runtime (lean-install ethos -- see why pyright was dropped). SCIP's wire schema for
-the handful of fields we read is small and stable, so we decode the varint / length-delimited wire
-format by hand rather than taking a `protobuf` dependency. Field numbers are from scip.proto:
+SCIP indexers (`rust-analyzer scip`, `scip-typescript index`, scip-java/scip-go, ...) all emit an
+`index.scip` protobuf (there is no JSON form) in the SAME wire format, and the repo deliberately carries
+no protobuf runtime (lean-install ethos -- see why pyright was dropped). SCIP's wire schema for the
+handful of fields we read is small and stable, so we decode the varint / length-delimited wire format by
+hand rather than taking a `protobuf` dependency. Field numbers are from scip.proto:
 
     Index.documents            = 2   (repeated Document)
     Document.relative_path     = 1   (string)
@@ -16,7 +17,7 @@ format by hand rather than taking a `protobuf` dependency. Field numbers are fro
     Occurrence.symbol_roles    = 3   (int32 bitmask; Definition = 0x1)
 
 Everything else in the index (symbols, relationships, diagnostics, external_symbols) is ignored -- the
-deep pass derives calls from occurrence containment, not from the symbol table."""
+deep passes derive calls from occurrence containment, not from the symbol table (see core.scip_resolve)."""
 
 from __future__ import annotations
 
