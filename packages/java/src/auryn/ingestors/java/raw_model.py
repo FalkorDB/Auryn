@@ -42,6 +42,8 @@ class RawCall:
     to name -- a field_access or method chain). resolution.py uses it to prefer resolving
     against a field's declared type over a same-name coincidence."""
     is_new: bool = False  # `new Widget()` -> resolves against a constructor
+    line: int = 0  # 1-based line of the callee identifier (method name, or the created type) -- what SCIP
+    # anchors an occurrence to; feeds the deep pass's line-precise call-site gate. 0 = not captured.
 
 
 @dataclass

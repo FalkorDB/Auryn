@@ -137,12 +137,13 @@ def callable_locations(raw_files: list[RawFile], project_id: str):
         for m in e.raw_type.methods:
             name = "<init>" if m.kind == "CONSTRUCTOR" else m.name
             # Normalize a `new X()` call (RawCall.is_new, recorded under the type name X) to `<init>` --
-            # scip-java reports the constructor reference as `X#<init>().`, so with require_syntactic_call
-            # the gate must see `<init>` in called_names, else the resolved constructor edge is filtered AND
-            # the fast ctor edge dropped with no replacement.
+            # scip-java reports the constructor reference as `X#<init>().`, so the gate must see `<init>`
+            # (by name AND on the right line), else the resolved constructor edge is filtered AND the fast
+            # ctor edge dropped with no replacement.
             called = frozenset("<init>" if c.is_new else c.name for c in m.calls)
+            called_sites = frozenset(("<init>" if c.is_new else c.name, c.line) for c in m.calls)
             out.append(CallableLocation(_method_id(e.type_id, m), "Method", rel,
-                                        m.line_start, m.line_end, name, called))
+                                        m.line_start, m.line_end, name, called, called_sites))
     return out
 
 
