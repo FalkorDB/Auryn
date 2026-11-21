@@ -27,9 +27,24 @@ import tempfile
 
 _SCIP_TIMEOUT_SECONDS = int(os.environ.get("AURYN_SCIP_JAVA_TIMEOUT", "1800"))  # a build can be slow
 
-# Dirs copied-but-excluded when staging a build sandbox (build output, VCS, deps) -- the build regenerates
-# what it needs, and we never want the user's build output or history in the throwaway copy.
-_COPY_EXCLUDE = ("target", "build", ".gradle", ".git", "node_modules", "out", "bin", ".idea", ".vscode")
+# Build-output dirs to skip when staging a build sandbox -- but ONLY where they're build output (beside a
+# project/subproject `src/`), NEVER a same-named SOURCE package (`src/main/java/com/acme/build/`). `.git`
+# is skipped at any level (root repo or a submodule). See _copy_ignore.
+_ARTIFACT_DIRS = frozenset({"target", "build", ".gradle", "out", "bin", ".idea", ".vscode", "node_modules"})
+_VCS_DIRS = frozenset({".git"})
+
+
+def _copy_ignore(root: str):
+    """A copytree `ignore` callable that drops build-output dirs only OUTSIDE a `src/` tree (build output
+    sits beside src/, at the root or a subproject root -- never inside it), so a legitimate source package
+    named `build`/`target`/etc. is preserved. `.git` is dropped anywhere."""
+    def ignore(dirpath: str, names: list[str]) -> set[str]:
+        drop = {n for n in names if n in _VCS_DIRS}
+        rel_parts = set(os.path.relpath(dirpath, root).split(os.sep))
+        if "src" not in rel_parts:  # not inside a source tree -> a `build`/`target` here is build output
+            drop |= {n for n in names if n in _ARTIFACT_DIRS}
+        return drop
+    return ignore
 
 
 class ScipJavaUnavailable(RuntimeError):
@@ -87,7 +102,7 @@ def run_scip(root: str) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         build_dir = os.path.join(tmp, "proj")
         try:
-            shutil.copytree(root, build_dir, ignore=shutil.ignore_patterns(*_COPY_EXCLUDE), symlinks=True)
+            shutil.copytree(root, build_dir, ignore=_copy_ignore(root), symlinks=True)
         except (OSError, shutil.Error) as exc:
             raise ScipJavaUnavailable(f"could not stage a build copy of {root!r}: {exc}") from exc
         out_path = os.path.join(tmp, "index.scip")
