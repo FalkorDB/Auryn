@@ -95,6 +95,23 @@ def test_resolve_calls_selects_the_right_overload():
     assert to_id("count", ".method.size(")
 
 
+def test_constructor_new_calls_are_recorded_as_init():
+    # `new Thing(1)` is parsed under the type name `Thing`, but scip-java reports the constructor reference
+    # as `Thing#<init>().`; callable_locations must normalize it to `<init>` in the caller's called_names so
+    # the syntactic-call gate accepts the resolved constructor edge (rather than drop the fast one).
+    src = {
+        "src/main/java/com/example/model/Thing.java":
+            "package com.example.model;\npublic class Thing { public Thing(int n) {} }\n",
+        "src/main/java/com/example/app/Factory.java":
+            "package com.example.app;\nimport com.example.model.Thing;\n"
+            "public class Factory { public Thing make() { return new Thing(1); } }\n",
+    }
+    raw = [parse_source(s.encode(), p) for p, s in src.items()]
+    locs = resolution.callable_locations(raw, _PROJ)
+    make = next(loc for loc in locs if loc.name == "make")
+    assert "<init>" in make.called_names and "Thing" not in make.called_names
+
+
 def test_resolve_calls_tracks_coverage():
     locs = _fixture_locations()
     deep = resolve_calls(_SCIP.read_bytes(), locs, require_syntactic_call=True, emit_self_calls=True)
@@ -159,6 +176,7 @@ def test_deep_inline_resolves_overloads_end_to_end(graph, tmp_path):
     report = ingest.ingest_directory(GraphWriter(graph), str(proj), project_name="je", deep="inline")
 
     java = next(r for r in report.languages if r.language == "java")
+    assert java.deep_status != "error"  # an escaped deep error is a real failure, not an unavailable build
     if _depth(graph, "je") != "deep":  # scip-java present but the build couldn't run here -> skip, don't fail
         pytest.skip(f"scip-java did not produce a deep graph (deep_status={java.deep_status}); build unavailable")
 

@@ -27,29 +27,36 @@ import tempfile
 
 _SCIP_TIMEOUT_SECONDS = int(os.environ.get("AURYN_SCIP_JAVA_TIMEOUT", "1800"))  # a build can be slow
 
+# Dirs copied-but-excluded when staging a build sandbox (build output, VCS, deps) -- the build regenerates
+# what it needs, and we never want the user's build output or history in the throwaway copy.
+_COPY_EXCLUDE = ("target", "build", ".gradle", ".git", "node_modules", "out", "bin", ".idea", ".vscode")
+
 
 class ScipJavaUnavailable(RuntimeError):
-    """scip-java could not be located or failed to produce a SCIP index (missing tool, no JDK/build tool,
-    or a build failure) -- the signal for git_sync to fall back to the tree-sitter fast pass."""
+    """scip-java could not be located or failed to produce a SCIP index (not opted in, missing JDK/build
+    tool, or a build failure) -- the signal for git_sync to fall back to the tree-sitter fast pass."""
 
 
 def _tool_command() -> list[str]:
-    """Locate a usable scip-java from a TRUSTED location ONLY:
-      1. `AURYN_SCIP_JAVA` env override (an explicit, user-trusted launcher path -- a coursier bootstrap
-         or the Docker wrapper);
-      2. a `scip-java` on PATH.
-    Returned as an ABSOLUTE realpath (symlinks resolved) so the subprocess never re-resolves it against
-    its cwd and run_scip can refuse a binary inside the indexed tree. Raises ScipJavaUnavailable if no
-    trusted launcher resolves."""
-    candidate = os.environ.get("AURYN_SCIP_JAVA") or shutil.which("scip-java")
-    if candidate:
-        resolved = os.path.realpath(candidate)
+    """Locate scip-java -- ONLY via an explicit `AURYN_SCIP_JAVA` launcher path, deliberately NOT from
+    PATH. Unlike the parse-only indexers (scip-typescript, scip-go), `scip-java index` RUNS THE PROJECT'S
+    BUILD (Maven/Gradle/Bazel), executing the repository's own build scripts, plugins, and annotation
+    processors -- i.e. arbitrary code from the (possibly untrusted) indexed repo, with the ingest process's
+    filesystem access and credentials. Since deep runs automatically (async by default), auto-discovering
+    scip-java on PATH would silently execute untrusted builds; requiring the explicit env var makes running
+    the build a deliberate per-environment OPT-IN. The launcher must be an absolute realpath (never re-
+    resolved against the subprocess cwd); run_scip further refuses one inside the indexed tree."""
+    override = os.environ.get("AURYN_SCIP_JAVA")
+    if override:
+        resolved = os.path.realpath(override)
         if os.path.isfile(resolved):
             return [resolved]
     raise ScipJavaUnavailable(
-        "scip-java not found on PATH. Install it (e.g. `cs bootstrap --standalone -o scip-java "
-        "-M org.scip_code.scip_java.ScipJava org.scip-code:scip-java:latest.release`) or set "
-        "AURYN_SCIP_JAVA to its launcher path. Needs a JDK (17+) and the project's build tool."
+        "deep Java analysis is OFF: set AURYN_SCIP_JAVA to a scip-java launcher to opt in. It is not "
+        "auto-discovered on PATH because `scip-java index` runs the project's build (executing the repo's "
+        "build scripts/plugins). Install e.g. `cs bootstrap --standalone -o scip-java "
+        "-M org.scip_code.scip_java.ScipJava org.scip-code:scip-java:latest.release`; needs a JDK (17+) "
+        "and the project's build tool."
     )
 
 
@@ -63,22 +70,31 @@ def _is_inside(path: str, root: str) -> bool:
 
 def run_scip(root: str) -> bytes:
     """Run `scip-java index` over the project at `root` and return the raw `index.scip` bytes. Raises
-    ScipJavaUnavailable on any failure (tool missing, build failure, timeout, no output) so the caller can
+    ScipJavaUnavailable on any failure (not opted in, build failure, timeout, no output) so the caller can
     fall back to the fast pass. `root` must be a project directory (a pom.xml / build.gradle) on disk.
 
-    scip-java auto-detects the build tool and HARD-fails with no index when the build fails, so success is
-    gated on a non-empty index file existing (the lenient-exit-code concern of the other runners doesn't
-    apply, but we gate the same way for uniformity). `--output` is written to a tempdir, outside the
-    indexed tree. The subprocess inherits the environment (JAVA_HOME / PATH for the JDK + build tool)."""
+    The build is run in a THROWAWAY COPY of the project, never in `root` itself: `scip-java index` runs the
+    build tool (often `clean verify`), which writes -- and deletes -- build output dirs. For a git source
+    `root` is already a disposable checkout, but for a LOCAL-directory source it is the user's live tree,
+    and ADR 0001 forbids writing there; staging a copy honors that uniformly. The copy excludes build
+    output / VCS / deps (the build regenerates what it needs, and Maven/Gradle deps live in the shared
+    ~/.m2 or ~/.gradle). scip-java auto-detects the build tool and hard-fails with no index when the build
+    fails, so success is gated on a non-empty index file. The subprocess inherits the environment
+    (JAVA_HOME / PATH for the JDK + build tool)."""
     cmd = _tool_command()
     if _is_inside(cmd[0], root):  # never run a scip-java that lives inside the (untrusted) indexed tree
         raise ScipJavaUnavailable(f"refusing to run scip-java from inside the indexed tree: {cmd[0]}")
     with tempfile.TemporaryDirectory() as tmp:
+        build_dir = os.path.join(tmp, "proj")
+        try:
+            shutil.copytree(root, build_dir, ignore=shutil.ignore_patterns(*_COPY_EXCLUDE), symlinks=True)
+        except (OSError, shutil.Error) as exc:
+            raise ScipJavaUnavailable(f"could not stage a build copy of {root!r}: {exc}") from exc
         out_path = os.path.join(tmp, "index.scip")
         argv = [*cmd, "index", f"--output={out_path}"]
         try:
             proc = subprocess.run(
-                argv, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                argv, cwd=build_dir, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE, timeout=_SCIP_TIMEOUT_SECONDS, check=False,
             )
         except OSError as exc:  # FileNotFoundError, PermissionError (non-executable override), etc.
