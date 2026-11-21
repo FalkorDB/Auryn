@@ -11,13 +11,19 @@ hand rather than taking a `protobuf` dependency. Field numbers are from scip.pro
     Index.documents            = 2   (repeated Document)
     Document.relative_path     = 1   (string)
     Document.occurrences       = 2   (repeated Occurrence)
-    Occurrence.range           = 1   (repeated int32 -- [line, startCol, endCol] or
-                                       [startLine, startCol, endLine, endCol]; 0-based)
-    Occurrence.symbol          = 2   (string)
-    Occurrence.symbol_roles    = 3   (int32 bitmask; Definition = 0x1)
+    Occurrence.range             = 1   (DEPRECATED repeated int32 -- [line, startCol, endCol] or
+                                         [startLine, startCol, endLine, endCol]; 0-based)
+    Occurrence.symbol            = 2   (string)
+    Occurrence.symbol_roles      = 3   (int32 bitmask; Definition = 0x1)
+    Occurrence.single_line_range = 8   (SingleLineRange{line=1, start_character=2, end_character=3})
+    Occurrence.multi_line_range  = 9   (MultiLineRange{start_line=1, start_character=2, end_line=3, ...})
 
-Everything else in the index (symbols, relationships, diagnostics, external_symbols) is ignored -- the
-deep passes derive calls from occurrence containment, not from the symbol table (see core.scip_resolve)."""
+Newer indexers (scip-go, and the scip-code/scip schema generally) emit the TYPED `single_line_range`(8) /
+`multi_line_range`(9) instead of the deprecated packed `range`(1); rust-analyzer / scip-typescript still
+emit `range`(1). We read whichever is present (typed takes precedence, per the proto) -- only the start
+line is needed for the containment join. Everything else in the index (symbols, relationships,
+diagnostics, external_symbols) is ignored -- the deep passes derive calls from occurrence containment,
+not from the symbol table (see core.scip_resolve)."""
 
 from __future__ import annotations
 
@@ -87,22 +93,35 @@ def _packed_varints(data: bytes) -> list[int]:
     return out
 
 
+def _sub_field1_varint(data: bytes) -> int:
+    """The first varint field (field 1) of a sub-message -- the start line of a SingleLineRange (`line`)
+    or MultiLineRange (`start_line`)."""
+    for field_num, wire, value in _fields(data):
+        if field_num == 1 and wire == _WIRE_VARINT:
+            return value
+    return -1
+
+
 def _parse_occurrence(data: bytes) -> Occurrence | None:
     symbol = ""
-    start_line = -1
+    packed_line = -1  # deprecated range(1)
+    typed_line = -1   # single_line_range(8) / multi_line_range(9); takes precedence per the proto
     roles = 0
     for field_num, wire, value in _fields(data):
-        if field_num == 1:  # range
+        if field_num == 1:  # deprecated packed range: [line, startCol, endCol(, endLine, endCol)]
             if wire == _WIRE_LEN:  # packed (proto3 default)
                 ints = _packed_varints(value)
                 if ints:
-                    start_line = ints[0]
-            elif wire == _WIRE_VARINT and start_line < 0:  # non-packed: first entry is the start line
-                start_line = value
+                    packed_line = ints[0]
+            elif wire == _WIRE_VARINT and packed_line < 0:  # non-packed: first entry is the start line
+                packed_line = value
+        elif field_num in (8, 9) and wire == _WIRE_LEN:  # single_line_range / multi_line_range
+            typed_line = _sub_field1_varint(value)
         elif field_num == 2 and wire == _WIRE_LEN:  # symbol
             symbol = value.decode("utf-8", "replace")
         elif field_num == 3 and wire == _WIRE_VARINT:  # symbol_roles
             roles = value
+    start_line = typed_line if typed_line >= 0 else packed_line
     if not symbol or start_line < 0:
         return None
     return Occurrence(symbol=symbol, start_line=start_line, is_definition=bool(roles & SYMBOL_ROLE_DEFINITION))
