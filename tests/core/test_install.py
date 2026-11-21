@@ -9,7 +9,14 @@ import subprocess
 
 import pytest
 
-from auryn.core.app_config import AgentRegistration, Backend, load_config
+from auryn.core.app_config import (
+    AgentRegistration,
+    Backend,
+    Config,
+    RepoRegistration,
+    load_config,
+    save_config,
+)
 from auryn.core.install import do_install, do_uninstall
 
 
@@ -68,6 +75,112 @@ def test_uninstall_reverses_manifest_and_clears(tmp_path, monkeypatch):
     assert agent.deregistered is not None and agent.deregistered.name == "fake"
     assert [a.name for a in prior.agents] == ["fake"]  # returns what it removed
     assert load_config().agents == ()  # manifest cleared, backend kept
+
+
+def test_reinstall_and_uninstall_keep_the_rest_of_the_config(tmp_path, monkeypatch):
+    """`install` is re-runnable and a plain `uninstall` keeps the data: both rewrite the backend /
+    agents only. The repo registry, a disabled hook and the embed setting must survive -- losing
+    the registry orphans every ingested repo's graph name and hook target."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    repo = RepoRegistration(local_dir="/work/api", graph_name="shared", project_name="api", trigger="save")
+    save_config(Config(repos=(repo,), disabled_hooks=("http-endpoints",), embed_mode="inline"))
+
+    agent = _FakeAgent()
+    do_install(Backend(mode="remote", host="db", port=6400), adapters=[agent], server_command=["x"])
+    cfg = load_config()
+    assert (cfg.backend.mode, cfg.backend.host, [a.name for a in cfg.agents]) == ("remote", "db", ["fake"])
+    assert (cfg.repos, cfg.disabled_hooks, cfg.embed_mode) == ((repo,), ("http-endpoints",), "inline")
+
+    do_uninstall(adapters=[agent])
+    cfg = load_config()
+    assert (cfg.agents, cfg.backend.host) == ((), "db")
+    assert (cfg.repos, cfg.disabled_hooks, cfg.embed_mode) == ((repo,), ("http-endpoints",), "inline")
+
+
+def test_reinstall_keeps_an_agent_this_run_did_not_register(tmp_path, monkeypatch):
+    """The manifest is what `uninstall` reverses, so a re-run must not drop an agent an earlier run
+    registered just because it isn't detected now (its CLI off PATH in this shell): the entry
+    would stay in that agent's config for good. The returned Config still lists this run only."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    save_config(Config(agents=(AgentRegistration(name="cursor", config_path="/home/u/.cursor/mcp.json"),)))
+
+    for _ in range(2):  # a second re-run replaces `fake`'s entry, never duplicates it
+        cfg = do_install(Backend(mode="local"), adapters=[_FakeAgent()], server_command=["x"])
+        assert [a.name for a in cfg.agents] == ["fake"]
+        assert [a.name for a in load_config().agents] == ["cursor", "fake"]
+
+
+def test_install_stops_on_an_unreadable_config_before_touching_any_agent(tmp_path, monkeypatch):
+    """A config.toml that isn't valid TOML: `install` used to register every agent and only then
+    crash reading it -- agents wired up, no manifest to reverse them. It now stops first (the CLI
+    with one line naming the file) and leaves both the agents and the file alone."""
+    import tomllib
+
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+
+    home = tmp_path / "cg"
+    home.mkdir()
+    (home / "config.toml").write_text("[backend\n")
+    monkeypatch.setenv("AURYN_HOME", str(home))
+    agent = _FakeAgent()
+    monkeypatch.setattr("auryn.core.install.default_adapters", lambda: [agent])
+
+    with pytest.raises(tomllib.TOMLDecodeError):
+        do_install(Backend(mode="local"), adapters=[agent], server_command=["x"])
+    # not TOML; TOML, but not a section; not text -- an error whose repr holds the whole file
+    for unreadable in (b"[backend\n", b"backend = 1\n", b'[backend]\npassword = "hunter2"\n\xff'):
+        (home / "config.toml").write_bytes(unreadable)
+        result = CliRunner().invoke(cli, ["install", "-y"])
+
+        assert result.exit_code == 1 and "config.toml can't be read" in result.output
+        assert "hunter2" not in result.output
+        assert agent.registered_command is None
+        assert (home / "config.toml").read_bytes() == unreadable
+
+
+@pytest.mark.parametrize("way_out", ["`claude` is back on PATH", "--force"])
+def test_uninstall_goes_on_past_an_agent_it_cannot_deregister(tmp_path, monkeypatch, way_out):
+    """A recorded agent whose CLI is gone (`claude` off PATH, the agent removed) raises on
+    deregister. That must not stop the uninstall: the agents after it are still reversed. The
+    one that failed stays in the manifest -- and `--purge` keeps the home dir with it -- so the
+    next run has something to retry from; the CLI names only what it did deregister, and fails.
+    When the agent is gone for good no retry can ever succeed: `--force` forgets it all the same."""
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+
+    class _Gone(_FakeAgent):
+        name = "gone"
+
+        def deregister(self, reg):
+            raise FileNotFoundError("claude")
+
+    gone, agent = _Gone(), _FakeAgent()
+    monkeypatch.setattr("auryn.core.install.default_adapters", lambda: [gone, agent])
+    do_install(Backend(mode="local"), server_command=["x"])
+
+    result = CliRunner().invoke(cli, ["uninstall", "--yes", "--purge"])
+
+    assert agent.deregistered is not None
+    assert [a.name for a in load_config().agents] == ["gone"]
+    assert result.exit_code == 1 and "Deregistered from: fake\n" in result.output
+    assert "Could not deregister from: gone" in result.output and "Removed ~/.auryn" not in result.output
+    assert "--force" in result.output
+
+    if way_out == "--force":
+        result = CliRunner().invoke(cli, ["uninstall", "--yes", "--purge", "--force"])
+        assert "Forgot without deregistering: gone" in result.output and "Deregistered from" not in result.output
+    else:
+        monkeypatch.setattr(_Gone, "deregister", lambda self, reg: None)
+        result = CliRunner().invoke(cli, ["uninstall", "--yes", "--purge"])
+        assert "Deregistered from: gone\n" in result.output
+
+    assert result.exit_code == 0
+    assert not (tmp_path / "cg").exists()
 
 
 def test_uninstall_purge_removes_home(tmp_path, monkeypatch):
@@ -303,6 +416,25 @@ def test_yes_remote_honors_explicit_connection():
 
     b = _prompt_backend("remote", "db.example", 6400, "u", "p", True, assume_yes=True)
     assert (b.mode, b.host, b.port, b.username, b.password, b.ssl) == ("remote", "db.example", 6400, "u", "p", True)
+
+
+def test_yes_keeps_the_saved_trigger(tmp_path, monkeypatch):
+    """`install -y` re-run on a configured machine: a trigger that isn't passed keeps what
+    config.toml already says. It used to fall back to `commit`, which silently turned a
+    save-triggered repo's watcher off. An explicit option still wins."""
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    monkeypatch.setattr("auryn.core.install.default_adapters", lambda: [_FakeAgent()])
+    save_config(Config(resync_trigger="save"))
+
+    assert CliRunner().invoke(cli, ["install", "-y"]).exit_code == 0
+    assert load_config().resync_trigger == "save"
+
+    assert CliRunner().invoke(cli, ["install", "-y", "--trigger", "manual"]).exit_code == 0
+    assert load_config().resync_trigger == "manual"
 
 
 # ── File-config agents (Antigravity / Copilot / Cursor / Windsurf) ────────────

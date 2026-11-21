@@ -382,7 +382,8 @@ def _prompt_backend(backend, host, port, username, password, ssl, assume_yes):
 @click.option("--password", default=None, help="Remote FalkorDB password.")
 @click.option("--ssl", is_flag=True, default=False, help="Connect to the remote FalkorDB over TLS.")
 @click.option("--trigger", type=click.Choice(["manual", "commit", "save"]), default=None,
-              help="How the graph is kept fresh after an edit. Prompted for if omitted (default: commit).")
+              help="How the graph is kept fresh after an edit. Prompted for if omitted (default: the "
+                   "saved setting, else commit).")
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="Non-interactive: auto-select the backend (local unless --backend is given) and skip all prompts.")
 def install(backend, host, port, username, password, ssl, trigger, yes) -> None:
@@ -390,13 +391,24 @@ def install(backend, host, port, username, password, ssl, trigger, yes) -> None:
     with every detected agent (Claude Code, OpenAI Codex, Antigravity, GitHub Copilot, Cursor,
     Windsurf, Gemini CLI), user-scoped. Writes only to ~/.auryn and the agent's own config —
     never your repo. Re-runnable."""
-    from auryn.core.app_config import set_resync_trigger
+    from auryn.core.app_config import load_config, set_resync_trigger
+    from auryn.core.home import config_path
     from auryn.core.install import default_server_command, do_install
 
+    try:
+        # Read first: a trigger that isn't passed keeps the saved one (a re-run must not turn a
+        # `save` trigger back into `commit`), and a config.toml we can't read has to stop the
+        # install before any agent is registered against it.
+        saved = load_config()
+    except Exception as e:  # noqa: BLE001 -- invalid TOML, or a section / field of the wrong shape
+        raise click.ClickException(
+            f"{config_path()} can't be read ({type(e).__name__}: {e}). Fix or remove it, then re-run "
+            "`auryn install`.") from e  # never the repr: a decode error's holds the file, password and all
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
     if trigger is None:
-        trigger = "commit" if yes else click.prompt(
-            "Keep the graph fresh on", type=click.Choice(["commit", "save", "manual"]), default="commit")
+        trigger = saved.resync_trigger if yes else click.prompt(
+            "Keep the graph fresh on", type=click.Choice(["commit", "save", "manual"]),
+            default=saved.resync_trigger)
     config = do_install(chosen)
     set_resync_trigger(trigger)
     # Semantic embeddings are always on (built in the background, off the ingest critical path) --
@@ -423,11 +435,14 @@ def install(backend, host, port, username, password, ssl, trigger, yes) -> None:
 
 @cli.command("uninstall")
 @click.option("--purge", is_flag=True, default=False, help="Also delete ~/.auryn (config + ALL graphs).")
+@click.option("--force", is_flag=True, default=False,
+              help="Finish even when an agent can't be deregistered (its CLI is gone for good): forget it anyway.")
 @click.option("--yes", is_flag=True, default=False, help="Skip the confirmation prompt.")
-def uninstall(purge, yes) -> None:
+def uninstall(purge, force, yes) -> None:
     """Reverse `install`: stop the local server and deregister Auryn from every agent it was
     registered with. Keeps ~/.auryn (your graphs) unless --purge. Your repos are untouched."""
     from auryn.core import watcher
+    from auryn.core.app_config import load_config
     from auryn.core.install import do_uninstall
 
     if not yes:
@@ -437,9 +452,18 @@ def uninstall(purge, yes) -> None:
         if not click.confirm(msg, default=True):
             return
     watcher.stop_watcher()
-    prior = do_uninstall(purge=purge)
-    removed = ", ".join(a.name for a in prior.agents) or "(no agents were registered)"
-    click.echo(f"Deregistered from: {removed}")
+    recorded = load_config().agents
+    removed = do_uninstall(purge=purge, force=force).agents
+    failed = ", ".join(a.name for a in recorded if a not in removed)
+    if removed or not failed:
+        click.echo(f"Deregistered from: {', '.join(a.name for a in removed) or '(no agents were registered)'}")
+    if failed and not force:  # they stay on record, so the next run can retry
+        raise click.ClickException(
+            f"Could not deregister from: {failed} (see the warning above). Kept on record"
+            + (", and ~/.auryn with it" if purge else "")
+            + " -- run `auryn uninstall` again once that is fixed, or with --force to forget it anyway.")
+    if failed:
+        click.echo(f"Forgot without deregistering: {failed} -- remove Auryn from it by hand.", err=True)
     if purge:
         click.echo("Removed ~/.auryn.")
     click.echo("Remove the CLI itself with:  uv tool uninstall auryn")
