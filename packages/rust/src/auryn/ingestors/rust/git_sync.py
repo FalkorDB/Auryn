@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 from auryn.core.parallel import parse_blobs_ordered
 from auryn.core.graph_model import GraphNode
+from auryn.core.deep_sync import (DEPTH_RANK as _DEPTH_RANK, is_name_calls_edge as _is_name_calls_edge,
+                                  project_node as _project_node, should_drop_name_edge)
 from auryn.core.graph_sync import stream_apply
 from auryn.core.registry import LanguageIngestResult
 from auryn.ingestors.rust import cargo, resolution
@@ -46,18 +48,8 @@ class SyncStats:
     files_cached: int = 0
 
 
-# Two-phase depth (mirrors C#/Python): the fast tree-sitter pass stamps the Project `depth="fast"`,
-# the deep rust-analyzer pass `depth="deep"`. A re-run short-circuits only when the commit matches AND
-# the existing depth is at least the requested one -- so a fast re-run never downgrades a deep graph,
-# but the deep phase still runs right after the fast one at the same commit.
-_DEPTH_RANK = {None: 0, "": 0, "fast": 1, "deep": 2}
 
 
-def _project_node(proj_id: str, project_name: str, repo_uri: str, target_sha: str, ref: str | None, depth: str) -> GraphNode:
-    return GraphNode(
-        "Project", {"id": proj_id},
-        {"name": project_name, "repo_uri": repo_uri, "commit_sha": target_sha, "ref": ref, "depth": depth},
-    )
 
 
 def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, ref: str | None,
@@ -173,15 +165,8 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
         yield project_node
         for item in resolution.resolve(files, proj_id):
             if _is_name_calls_edge(item):
-                frm = item.from_key["id"]
-                callee = loc_by_id.get(item.to_key["id"])
-                # drop a fast name-edge where deep IDENTIFIED that call: either deep resolved it in-source
-                # (a resolved edge replaces it) or identified it as external (the fast local guess was
-                # wrong -- e.g. `std::mem::drop` guessed as a local `drop` -- so retire it). A call deep
-                # could NOT identify (ambiguous same-line def / fn-pointer) keeps its fast edge.
-                if (frm in deep.covered_ids and callee is not None
-                        and callee.name in deep.seen_by_caller.get(frm, set())):
-                    continue
+                if should_drop_name_edge(item, deep, loc_by_id):
+                    continue  # deep identified this call -> drop the fast name-edge (deep edge replaces it)
                 yield item
             elif _is_callable_node(item) and item.key["id"] in unresolved_by_id:
                 yield _set_unresolved(item, unresolved_by_id[item.key["id"]])
@@ -224,9 +209,6 @@ def _recompute_unresolved(loc, seen: set) -> int:
     return non_macro + max(0, loc.macro_calls - macro_resolved)
 
 
-def _is_name_calls_edge(item) -> bool:
-    return (type(item).__name__ == "GraphEdge" and item.rel_type == "CALLS"
-            and (item.properties or {}).get("resolution") == "name")
 
 
 def _is_callable_node(item) -> bool:
