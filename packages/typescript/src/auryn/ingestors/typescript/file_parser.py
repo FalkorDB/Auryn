@@ -312,6 +312,8 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             if n.type in ("call_expression", "new_expression"):
                 is_new = n.type == "new_expression"
                 callee = field(n, "constructor" if is_new else "function")
+                while callee is not None and callee.type == "parenthesized_expression":
+                    callee = next((c for c in callee.named_children), None)  # `(b.run)()` -> b.run
                 nm, recv = _callee(callee)
                 if nm:
                     line = _callee_line(callee)

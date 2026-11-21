@@ -125,6 +125,19 @@ def test_call_sites_keep_every_line_of_a_repeated_call():
     assert ("target", 2) in caller.called_sites and ("target", 3) in caller.called_sites
 
 
+def test_call_sites_record_a_parenthesized_callee():
+    # `(b.run)()` wraps the callee in a parenthesized_expression; unwrap it so the call site is recorded
+    # (otherwise the line-precise gate would filter SCIP's resolved `run` call).
+    src = (
+        b"function caller(b: any) {\n"   # line 1
+        b"  (b.run)();\n"                # line 2
+        b"}\n"
+    )
+    locs = resolution.callable_locations([parse_source(src, "src/a.ts")], project_id("p"))
+    caller = next(l for l in locs if l.name == "caller")
+    assert ("run", 2) in caller.called_sites
+
+
 # -- the resolver: inferred-receiver dispatch, same-name disambiguation, cross-module ------------
 
 def test_resolve_calls_resolves_what_the_name_pass_cannot():

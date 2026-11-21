@@ -134,5 +134,21 @@ def test_require_call_site_needs_every_call_site_line_recorded():
     assert _edges([dropped, target], occs, require_call_site=True) == set()
 
 
+def test_require_call_site_does_not_record_a_gated_value_reference_as_seen():
+    # `seen_by_caller` drives which fast name-edges the overlay DROPS. A value use of `run` (resolved by
+    # SCIP to an in-source method, but on a line with no `run` call site) must NOT enter seen_by_caller --
+    # otherwise the overlay would delete the caller's fast `run` edge with no deep replacement.
+    caller = _loc("caller", "caller", 1, 10, set())  # records NO call sites
+    run = _loc("run", "run", 20, 21)
+    occs = [
+        _occ(_sym("caller"), 0, is_def=True),
+        _occ(_sym("run"), 4),               # line 5 -- `const m = obj.run` value use, not a call
+        _occ(_sym("run"), 19, is_def=True),
+    ]
+    deep = resolve_calls(_index(_FILE, occs), [caller, run], require_call_site=True)
+    assert deep.edges == []
+    assert "run" not in deep.seen_by_caller.get("caller", set())
+
+
 def test_resolve_calls_is_empty_without_matching_locations():
     assert resolve_calls(_index(_FILE, [_occ(_sym("x"), 0)]), []).edges == []

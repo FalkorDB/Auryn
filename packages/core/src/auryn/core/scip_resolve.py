@@ -158,15 +158,17 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
     unlike the body-wide name gate, it drops a value reference to a callable whose name happens to match a
     call elsewhere in the body. It does NOT recognize an aliased call (SCIP's name differs from the fast
     name) -- that needs occurrence columns (#802); such a reference is simply left to the fast pass. Requires
-    each caller to populate `called_sites`; it takes precedence over `require_syntactic_call`.
+    each caller to populate `called_sites`; it takes precedence over `require_syntactic_call`. A gated-out
+    reference is a value use, so it is dropped entirely -- not counted, and NOT added to `seen_by_caller`
+    (which would otherwise make the overlay delete the caller's fast edge of that name with no replacement).
 
     `require_syntactic_call`: the coarser name-only gate (pre-`called_sites`). When True, only emit an edge
     when the callee's name is one the fast parse recorded as a CALL anywhere in that caller's body
     (`callee in caller.called_names`). A SCIP reference is NOT always a call -- `return helper` /
     `callback(helper)` / `typeof helper` reference a callable as a VALUE -- so without a gate those become
     spurious CALLS edges. Languages that rely on SCIP to surface calls the fast pass can't see at all (Rust
-    macro expansions) leave both gates False. `seen_by_caller` still records the reference whichever gate
-    applies (so the drop/unresolved logic is unaffected).
+    macro expansions) leave both gates False -- then every reference is treated as a call (nothing is gated,
+    so `seen_by_caller` records them all).
 
     `emit_self_calls`: when True, a call resolved to the ENCLOSING callable yields a self-edge (recursion).
     Languages whose fast pass emits self-CALLS (TypeScript) pass True so the overlay can replace a fast
@@ -218,6 +220,15 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
             if caller is None:
                 metrics["unattributed"] += 1
                 continue
+            # Gate value references out BEFORE any side effect. `seen_by_caller` drives which fast name-edges
+            # the overlay DROPS, so a value use (`return helper`) that reached it would delete a real fast
+            # edge -- with no deep replacement if SCIP couldn't resolve the actual call elsewhere. A filtered
+            # reference must therefore not be seen, counted, or emitted.
+            if require_call_site:
+                if (callee_name, ref_line) not in caller.called_sites:
+                    continue  # no syntactic call to this name on this line -> a value reference, not a call
+            elif require_syntactic_call and callee_name not in caller.called_names:
+                continue  # a reference, not a call (value use: `return helper` / `callback(helper)`)
             target = symbol_to_loc.get(occ.symbol)
             if target is None:
                 if occ.symbol in ambiguous_defs:
@@ -229,11 +240,6 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
             seen_by_caller[caller.id].add(callee_name)  # SCIP tied a concrete in-source callable to this call
             if target.id == caller.id and not emit_self_calls:
                 continue  # self-reference / recursion -- skipped only where the fast pass omits self-CALLS
-            if require_call_site:
-                if (callee_name, ref_line) not in caller.called_sites:
-                    continue  # no syntactic call to this name on this line -> a value reference, not a call
-            elif require_syntactic_call and callee_name not in caller.called_names:
-                continue  # a reference, not a call (value use: `return helper` / `callback(helper)`)
             key = (caller.id, target.id)
             if key not in edges:
                 edges[key] = GraphEdge(
