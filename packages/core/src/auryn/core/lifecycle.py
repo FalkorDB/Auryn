@@ -199,8 +199,15 @@ def wire_trigger(
 
     if trigger == "commit":
         if hooks.is_git_repo(local_dir):
-            hooks.install(local_dir, [sys.executable, "-m", "auryn", "sync", local_dir])
-            status["hooks_installed"] = True
+            wired = hooks.install(local_dir, [sys.executable, "-m", "auryn", "sync", local_dir])
+            status["hooks_installed"] = "post-commit" in wired  # the one an ordinary commit runs
+            if not wired and not hooks.owns_hooks_dir(local_dir):
+                status["note"] = ("the hooks directory is outside this repo's git dir (core.hooksPath, or a "
+                                  "symlinked .git/hooks: tracked or shared hooks); hook skipped -- use "
+                                  "`--trigger save` or `auryn sync`")
+            elif "post-commit" not in wired:
+                status["note"] = ("this repo's own post-commit hook isn't an enabled shell script, so it was "
+                                  "left alone; commits won't resync -- use `--trigger save` or `auryn sync`")
         else:
             status["hooks_installed"] = False
             status["note"] = "commit trigger needs a git repo; hook skipped -- use `auryn sync`"
