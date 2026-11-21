@@ -588,3 +588,15 @@ def test_stream_apply_produces_the_same_graph_as_compute_delta_plus_apply_delta(
         return nodes, edges
 
     assert dump(graph) == dump(reference_graph)
+
+
+def test_set_if_is_a_guarded_compare_and_set(graph):
+    from auryn.core.graph_client import GraphWriter
+    w = GraphWriter(graph)
+    w.query("CREATE (p:Project {id:'x', commit_sha:'A', depth:'fast'})")
+    # guard matches -> sets; returns True
+    assert w.set_if("Project", "x", "depth", "deep", "commit_sha", "A") is True
+    assert w.get_property("Project", {"id": "x"}, "depth") == "deep"
+    # guard FAILS (commit moved) -> no-op; returns False, value unchanged
+    assert w.set_if("Project", "x", "depth", "fast", "commit_sha", "B") is False
+    assert w.get_property("Project", {"id": "x"}, "depth") == "deep"
