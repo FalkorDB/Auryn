@@ -32,10 +32,11 @@ from auryn.ingestors.typescript.plugin import FILE_SUFFIXES as _FILE_SUFFIXES
 from auryn.ingestors.typescript.raw_model import RawFile
 from auryn.ingestors.typescript.schema import NODE_SCHEMAS
 
-_PARSE_CACHE_VERSION = 2
+_PARSE_CACHE_VERSION = 3
 """Bump if RawFile's shape (or what parse_source extracts) changes. Part of the cache dir
 name, so a bump starts a fresh cache rather than unpickling a stale shape. v2: callable/type
-dataclasses gained the shared `doc` property (leading comment)."""
+dataclasses gained the shared `doc` property (leading comment). v3: RawCall gained `line` (the
+callee-identifier line) for the deep pass's line-precise call-site gate."""
 
 logger = logging.getLogger(__name__)
 
@@ -193,14 +194,18 @@ def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, pro
 
     locations = resolution.callable_locations(
         (_stamped(load_fn(sha), path) for path, sha in file_refs), proj_id)
-    # require_syntactic_call: a SCIP reference to a function isn't always a call -- `return helper` /
-    # `callback(helper)` / `typeof helper` use it as a VALUE. Gating on the fast parse's recorded call
-    # names keeps deep from inventing CALLS edges for those (JS/TS lean on higher-order functions).
+    # require_call_site: a SCIP reference to a function isn't always a call -- `return helper` /
+    # `callback(helper)` / `typeof helper` use it as a VALUE. Gating on the exact line where the fast parse
+    # recorded a call of that name (not just the name, anywhere in the body) keeps deep from inventing CALLS
+    # edges for those (JS/TS lean on higher-order functions), including a value use of a name that IS called
+    # on another line. The fast parse records every syntactic call site with its callee-identifier line.
+    # (An aliased call -- `import {helper as h}; h()`, where SCIP's name `helper` differs from the fast name
+    # `h` -- needs occurrence columns to resolve; it's left to the fast pass for now. See #802.)
     # emit_self_calls: the TS fast pass emits self-CALLS, so deep must too -- it precisely replaces a fast
     # recursive edge, captures recursion even when a duplicate-named fast guess was dropped, and lets the
     # overlay drop a FALSE self-guess (e.g. `xs.map()` guessed as the enclosing `map`) that SCIP resolved
     # to an external callee.
-    deep = resolve_calls(scip_bytes, locations, require_syntactic_call=True, emit_self_calls=True)
+    deep = resolve_calls(scip_bytes, locations, require_call_site=True, emit_self_calls=True)
     if locations and not deep.covered_ids:
         # scip-typescript ran but analyzed none of our callables (no tsconfig/deps, unsupported project):
         # don't make a hollow depth="deep" claim -- fall back to the fast graph.

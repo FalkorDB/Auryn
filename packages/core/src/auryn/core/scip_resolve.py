@@ -14,8 +14,13 @@ the `CallableLocation` bridge live in each language's ingestor; everything here 
 
 The join is (file, line)-granular: SCIP occurrence columns are indexer-specific (scip-typescript emits
 UTF-16 code units, rust-analyzer UTF-8), but the first range element is a plain line number, encoding-
-independent -- so a line-based containment join needs no column handling. Column-precise per-call-site
-reconciliation (disambiguating multiple calls on one line) is a shared follow-up (scip-code.org v2)."""
+independent -- so a line-based containment join needs no column handling. A language that records each
+call site's name+line (`CallableLocation.called_sites`) additionally tells a real call from a value
+reference via `resolve_calls(require_call_site=True)` -- a reference to a callable that sits on a line with
+no syntactic call of that name (`return helper`) is a value use, not a call. What a line alone CANNOT do
+is recognize an aliased call (`import {helper as h}; h()` -- SCIP names it `helper`, the fast parse `h`)
+or disambiguate two calls to the same name on one line: both need occurrence COLUMNS to tie a SCIP
+occurrence to a specific call site (scip-code.org v2, tracked in #802)."""
 
 from __future__ import annotations
 
@@ -43,6 +48,16 @@ class CallableLocation:
     name: str
     called_names: frozenset[str]  # callee simple names the fast parse saw as CALLS in this body -- lets the
     # deep pass disambiguate same-line callers and recompute unresolved_calls from what SCIP resolved
+    called_sites: frozenset[tuple[str, int]] = frozenset()
+    """(callee name, callee-identifier line) for EVERY syntactic call the fast parse saw in this body,
+    1-based -- the line-precise upgrade of `called_names`. Lets `resolve_calls(require_call_site=True)` tell a
+    real call from a value reference by the exact (name, line): `return helper` carries no call site on its
+    line, so SCIP's reference to `helper` there is not emitted as a call. Must record every call site's line
+    (a call to the same name on two lines needs both). Empty when a language hasn't adopted call-site
+    recording -- then the coarser `require_syntactic_call` name gate applies instead. The line is the callee
+    *identifier's* line (what SCIP anchors an occurrence to), not the call expression's first line, so a
+    multi-line call matches. (Recognizing an ALIASED call, where the SCIP name differs from the fast name,
+    needs occurrence columns -- see the module docstring and #802.)"""
 
 
 @dataclass
@@ -122,7 +137,8 @@ def _span(loc: CallableLocation) -> int:
 
 
 def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
-                  *, require_syntactic_call: bool = False, emit_self_calls: bool = False) -> DeepCalls:
+                  *, require_syntactic_call: bool = False, require_call_site: bool = False,
+                  emit_self_calls: bool = False) -> DeepCalls:
     """Derive precise intra-project CALLS from a SCIP index + the fast pass's callable locations.
 
     A reference occurrence of a callable symbol is attributed to a containing callable (preferring one
@@ -135,13 +151,24 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
     touches only those; `seen_by_caller` drives both the unresolved recompute and which fast name-edges
     the overlay drops.
 
-    `require_syntactic_call`: when True, only emit an edge when the callee's name is one the fast parse
-    actually recorded as a CALL in that caller's body (`callee in caller.called_names`). A SCIP reference
-    is NOT always a call -- `return helper` / `callback(helper)` / `typeof helper` reference a callable as a
-    VALUE -- so without this gate those become spurious CALLS edges. Languages whose fast pass records every
-    syntactic call site (TypeScript) pass True; languages that rely on SCIP to surface calls the fast pass
-    can't see at all (Rust macro expansions) leave it False. `seen_by_caller` still records the reference
-    either way (so the drop/unresolved logic is unaffected).
+    `require_call_site`: the line-precise successor to `require_syntactic_call`. When True, only emit an edge
+    when the fast parse recorded a syntactic call of that exact name on the reference's line
+    (`(callee_name, ref_line) in caller.called_sites`). This filters value references precisely -- `return
+    helper` on its own line carries no call site there, so SCIP's reference to `helper` is not a call -- and,
+    unlike the body-wide name gate, it drops a value reference to a callable whose name happens to match a
+    call elsewhere in the body. It does NOT recognize an aliased call (SCIP's name differs from the fast
+    name) -- that needs occurrence columns (#802); such a reference is simply left to the fast pass. Requires
+    each caller to populate `called_sites`; it takes precedence over `require_syntactic_call`. A gated-out
+    reference is a value use, so it is dropped entirely -- not counted, and NOT added to `seen_by_caller`
+    (which would otherwise make the overlay delete the caller's fast edge of that name with no replacement).
+
+    `require_syntactic_call`: the coarser name-only gate (pre-`called_sites`). When True, only emit an edge
+    when the callee's name is one the fast parse recorded as a CALL anywhere in that caller's body
+    (`callee in caller.called_names`). A SCIP reference is NOT always a call -- `return helper` /
+    `callback(helper)` / `typeof helper` reference a callable as a VALUE -- so without a gate those become
+    spurious CALLS edges. Languages that rely on SCIP to surface calls the fast pass can't see at all (Rust
+    macro expansions) leave both gates False -- then every reference is treated as a call (nothing is gated,
+    so `seen_by_caller` records them all).
 
     `emit_self_calls`: when True, a call resolved to the ENCLOSING callable yields a self-edge (recursion).
     Languages whose fast pass emits self-CALLS (TypeScript) pass True so the overlay can replace a fast
@@ -188,10 +215,20 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
             if occ.is_definition or not _is_callable_symbol(occ.symbol):
                 continue
             callee_name = _simple_name(occ.symbol)
-            caller = attribute(locs, occ.start_line + 1, callee_name)
+            ref_line = occ.start_line + 1
+            caller = attribute(locs, ref_line, callee_name)
             if caller is None:
                 metrics["unattributed"] += 1
                 continue
+            # Gate value references out BEFORE any side effect. `seen_by_caller` drives which fast name-edges
+            # the overlay DROPS, so a value use (`return helper`) that reached it would delete a real fast
+            # edge -- with no deep replacement if SCIP couldn't resolve the actual call elsewhere. A filtered
+            # reference must therefore not be seen, counted, or emitted.
+            if require_call_site:
+                if (callee_name, ref_line) not in caller.called_sites:
+                    continue  # no syntactic call to this name on this line -> a value reference, not a call
+            elif require_syntactic_call and callee_name not in caller.called_names:
+                continue  # a reference, not a call (value use: `return helper` / `callback(helper)`)
             target = symbol_to_loc.get(occ.symbol)
             if target is None:
                 if occ.symbol in ambiguous_defs:
@@ -203,8 +240,6 @@ def resolve_calls(scip_bytes: bytes, locations: list[CallableLocation],
             seen_by_caller[caller.id].add(callee_name)  # SCIP tied a concrete in-source callable to this call
             if target.id == caller.id and not emit_self_calls:
                 continue  # self-reference / recursion -- skipped only where the fast pass omits self-CALLS
-            if require_syntactic_call and callee_name not in caller.called_names:
-                continue  # a reference, not a call (value use: `return helper` / `callback(helper)`)
             key = (caller.id, target.id)
             if key not in edges:
                 edges[key] = GraphEdge(
