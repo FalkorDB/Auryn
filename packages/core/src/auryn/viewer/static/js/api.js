@@ -7,7 +7,11 @@ async function req(url, options) {
   try { data = await res.json(); } catch { /* non-JSON body */ }
   if (!res.ok) {
     const msg = (data && data.error) || `${res.status} ${res.statusText}`;
-    throw new Error(msg);
+    const err = new Error(msg);
+    // The viewer can't sync this project at all (see _sync_blocker in viewer/app.py), as
+    // opposed to a request that failed: `error` is the reason to show.
+    err.syncUnavailable = Boolean(data && data.sync_unavailable);
+    throw err;
   }
   return data;
 }

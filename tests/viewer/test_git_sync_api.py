@@ -80,6 +80,97 @@ def test_git_projects_endpoint_lists_only_git_tracked_projects(origin_repo, grap
     assert names == ["Widgets"]
 
 
+def _seed_unsyncable_projects(origin_repo, graph, tmp_path):
+    """Two Project nodes the Sources tab lists but can't sync: one indexed from a plain folder
+    (as `auryn quickstart` does), one from a git repo but not C#."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    writer = GraphWriter(graph)
+    writer.merge_node(GraphNode("Project", {"id": "python://sample"}, {"name": "sample", "repo_uri": str(plain)}))
+    writer.merge_node(GraphNode("Project", {"id": "python://Widgets"}, {"name": "Widgets", "repo_uri": str(origin_repo[0])}))
+
+
+def test_git_projects_endpoint_says_which_projects_the_viewer_cannot_sync(origin_repo, graph, falkordb_connection, tmp_path):
+    """The Sources tab's Sync is the C# git-sync. A project indexed from a plain folder has no
+    branch or tag to move to, and another language's would be re-ingested as C#: both are listed
+    with the reason, instead of a ref picker and a Sync button that can only fail."""
+    client, graph_name, _ = _seeded_client(origin_repo, graph, falkordb_connection, tmp_path)
+    _seed_unsyncable_projects(origin_repo, graph, tmp_path)
+
+    projects = {p["id"]: p for p in client.get(f"/api/graphs/{graph_name}/git-projects").get_json()}
+
+    assert "sync_unavailable" not in projects["csharp://Widgets"]
+    assert "isn't the root of a git repository" in projects["python://sample"]["sync_unavailable"]
+    assert "C# projects only" in projects["python://Widgets"]["sync_unavailable"]
+
+
+@pytest.mark.parametrize("project_id", ["python://sample", "python://Widgets"])
+def test_git_refs_and_git_sync_refuse_a_project_the_viewer_cannot_sync(
+    origin_repo, graph, falkordb_connection, tmp_path, project_id
+):
+    """...and the endpoints behind that card refuse it with the same plain reason: a raw
+    `git clone` failure for the folder, or a C# sync run against a Python project, is neither."""
+    client, graph_name, _ = _seeded_client(origin_repo, graph, falkordb_connection, tmp_path)
+    _seed_unsyncable_projects(origin_repo, graph, tmp_path)
+    before = graph.query("MATCH (n) RETURN count(n)").result_set
+
+    listed = {p["id"]: p for p in client.get(f"/api/graphs/{graph_name}/git-projects").get_json()}
+    refs = client.get(f"/api/graphs/{graph_name}/git-refs", query_string={"project_id": project_id})
+    synced = client.post(f"/api/graphs/{graph_name}/git-sync", json={"project_id": project_id})
+
+    for resp in (refs, synced):
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == listed[project_id]["sync_unavailable"]  # one reason, everywhere
+        assert resp.get_json()["sync_unavailable"] == resp.get_json()["error"]  # a refusal, not a failed request
+    assert graph.query("MATCH (n) RETURN count(n)").result_set == before  # nothing was synced
+
+
+def test_a_refusal_does_not_need_the_csharp_plugin(origin_repo, graph, falkordb_connection, tmp_path, monkeypatch):
+    """`auryn-core` with another language's plugin serves the viewer too (`pip install
+    auryn-python`). Refusing a project that isn't C# must not start by importing the C# sync it
+    is refusing to run -- that was a 500, and the inspector's Sync button stayed enabled."""
+    import sys
+
+    client, graph_name, _ = _seeded_client(origin_repo, graph, falkordb_connection, tmp_path)
+    _seed_unsyncable_projects(origin_repo, graph, tmp_path)
+    monkeypatch.setitem(sys.modules, "auryn.ingestors.csharp.git_sync", None)  # "not installed"
+
+    refs = client.get(f"/api/graphs/{graph_name}/git-refs", query_string={"project_id": "python://Widgets"})
+    synced = client.post(f"/api/graphs/{graph_name}/git-sync", json={"project_id": "python://Widgets"})
+
+    for resp in (refs, synced):
+        assert resp.status_code == 400 and "C# projects only" in resp.get_json()["sync_unavailable"]
+
+
+@pytest.mark.parametrize("repo_uri", [
+    "https://github.com/org/Widgets.git", "git@github.com:org/Widgets.git", ".", "../Widgets",
+])
+def test_a_csharp_project_the_viewer_cannot_judge_is_not_refused(repo_uri, tmp_path, monkeypatch):
+    """Only an absolute path that exists can be called "not a git repository" from here. A remote
+    or scp-style URI is git's to open; a relative path (`auryn ingest repo .` stores it as given)
+    was relative to where the ingest ran -- judged against the viewer's own folder, a real C# git
+    project lost its Sync."""
+    from auryn.viewer.app import _sync_blocker
+
+    monkeypatch.chdir(tmp_path)  # a plain folder: `.` must not be probed here
+    assert _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": repo_uri}}) is None
+
+
+def test_sync_blocker_names_a_subfolder_of_a_repo_and_a_missing_source(origin_repo):
+    from auryn.viewer.app import _sync_blocker
+
+    subfolder = origin_repo[0] / "src"
+    subfolder.mkdir(exist_ok=True)
+    inside = _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": str(subfolder)}})
+    assert "isn't the root of a git repository" in inside
+
+    for empty in ("", None):
+        assert "No source is recorded" in _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": empty}})
+
+    gone = _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": str(origin_repo[0] / "deleted")}})
+    assert "no longer exists" in gone  # it used to offer Sync and fail on a raw `git clone` error
+
+
 def test_git_projects_endpoint_unknown_graph_returns_404(falkordb_connection):
     app = create_app(falkordb_connection)
     client = app.test_client()
@@ -130,7 +221,8 @@ def _seed_unreachable_project(graph):
         GraphNode(
             "Project",
             {"id": "csharp://Unreachable"},
-            {"name": "Unreachable", "repo_uri": "/nonexistent/path/to/a/repo"},
+            # a URI, not a bare path: a missing local FOLDER is refused up front (see _sync_blocker)
+            {"name": "Unreachable", "repo_uri": "file:///nonexistent/path/to/a/repo"},
         )
     )
 

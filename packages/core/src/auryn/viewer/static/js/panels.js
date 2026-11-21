@@ -321,9 +321,15 @@ export function buildGitCard(project, ctx) {
 
   const card = document.createElement("div");
   card.className = "git-card";
-  card.innerHTML = `
+  const head = `
     <h3>${esc(project.name)}</h3>
-    <p class="repo" title="${esc(props.repo_uri || "")}">${esc(props.repo_uri || "")}</p>
+    <p class="repo" title="${esc(props.repo_uri || "")}">${esc(props.repo_uri || "")}</p>`;
+  // Not a source the viewer can sync (a plain folder, or not a C# project -- see _sync_blocker in
+  // viewer/app.py): say why, instead of a ref picker and a Sync button that can only fail. No
+  // "at <ref>" line either: for a plain folder that value is a content hash, not a commit.
+  const unavailable = (why) => { card.innerHTML = head + `<p class="status">${esc(why)}</p>`; return card; };
+  if (project.sync_unavailable) return unavailable(project.sync_unavailable);
+  card.innerHTML = head + `
     <p class="at">at <code>${esc(current)}</code></p>
     <div class="git-row">
       <select class="ref-select" disabled><option>Loading refs…</option></select>
@@ -354,6 +360,9 @@ export function buildGitCard(project, ctx) {
     select.disabled = false;
     button.disabled = false;
   }).catch((err) => {
+    // The inspector builds this card from a raw graph node, which carries no `sync_unavailable`:
+    // there the same refusal arrives here, flagged on git-refs' error.
+    if (err.syncUnavailable) { unavailable(err.message); return; }
     select.innerHTML = `<option value="__custom__" selected>Other (commit sha)…</option>`;
     custom.style.display = "";
     select.disabled = false;

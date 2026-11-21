@@ -6,6 +6,8 @@ fetch, to list current branches/tags) but still never touches FalkorDB."""
 
 from __future__ import annotations
 
+import os
+
 import git
 from falkordb import FalkorDB
 from flask import Flask, jsonify, request
@@ -13,6 +15,35 @@ from flask import Flask, jsonify, request
 from auryn.core import graph_queries as queries
 from auryn.core.embeddings import hybrid_search
 from auryn.core.graph_client import GraphWriter
+
+
+def _sync_blocker(project: dict) -> str | None:
+    """Why the viewer can't git-sync this Project node, or None when it can. The Sources tab's
+    Sync is the C# git-sync (see graph_git_sync), so it fits a C# project tracked in a git
+    repository. Not a project indexed from a plain folder -- what `auryn quickstart` shows first:
+    there is no branch or tag to move it to -- and not another language's, which the C# sync
+    would quietly ingest a second time, as C#."""
+    uri = project["properties"].get("repo_uri") or ""
+    if not uri:
+        return "No source is recorded for this project, so there is nothing to sync from."
+    # Only an ABSOLUTE local path can be judged from here. A relative one (`auryn ingest repo .`
+    # stores it as given) was relative to where the ingest ran, not to this viewer; a remote URI
+    # is git's to open.
+    path = os.path.expanduser(uri)
+    if os.path.isabs(path):
+        try:
+            with git.Repo(path):
+                pass
+        except git.InvalidGitRepositoryError:  # a folder that exists but isn't a repository's root
+            return ("Indexed from a folder that isn't the root of a git repository: there is no "
+                    "branch or tag to sync to. Re-ingest the folder to refresh the graph.")
+        except git.NoSuchPathError:  # it was there when the graph was built
+            return "The source folder no longer exists, so there is nothing to sync from. Re-ingest it from where it is now."
+        except Exception:  # noqa: BLE001 -- unreadable, malformed: the sync itself will tell
+            pass
+    if not str(project["id"]).startswith("csharp://"):
+        return "Sync from the viewer handles C# projects only. Re-ingest this one to refresh the graph."
+    return None
 
 
 def create_app(client: FalkorDB) -> Flask:
@@ -187,7 +218,12 @@ def create_app(client: FalkorDB) -> Flask:
         if graph_name not in client.list_graphs():
             return jsonify({"error": "graph not found"}), 404
         graph = client.select_graph(graph_name)
-        return jsonify(queries.git_tracked_projects(graph))
+        projects = queries.git_tracked_projects(graph)
+        for project in projects:  # the card shows this instead of a ref picker that can only fail
+            blocker = _sync_blocker(project)
+            if blocker:
+                project["sync_unavailable"] = blocker
+        return jsonify(projects)
 
     @app.get("/api/graphs/<graph_name>/git-refs")
     def graph_git_refs(graph_name: str):
@@ -209,7 +245,9 @@ def create_app(client: FalkorDB) -> Flask:
         repo_uri = project["properties"].get("repo_uri")
         if not repo_uri:
             return jsonify({"error": "this Project node has no repo_uri -- it wasn't created by git-sync"}), 400
-
+        blocker = _sync_blocker(project)
+        if blocker:
+            return jsonify({"error": blocker, "sync_unavailable": blocker}), 400  # as in git-projects
         try:
             refs = GitRepoCache(repo_uri, repos_cache_dir()).list_refs()
         except git.GitCommandError as e:
@@ -221,8 +259,6 @@ def create_app(client: FalkorDB) -> Flask:
         # The one write-capable endpoint in this file -- see module docstring.
         # Everything it needs (repo_uri/solution_name/dto_name_suffixes) comes from
         # the Project node's own properties, not a separate config store.
-        from auryn.ingestors.csharp.git_sync import GitCSharpProjectConfig, sync
-
         body = request.get_json(silent=True) or {}
         project_id = body.get("project_id")
         if not project_id:
@@ -239,6 +275,12 @@ def create_app(client: FalkorDB) -> Flask:
         props = project["properties"]
         if not props.get("repo_uri"):
             return jsonify({"error": "this Project node has no repo_uri -- it wasn't created by git-sync"}), 400
+        blocker = _sync_blocker(project)
+        if blocker:
+            return jsonify({"error": blocker, "sync_unavailable": blocker}), 400  # as in git-projects
+        # Only now: a refusal must not depend on the C# plugin being installed (auryn-core alone,
+        # or with another language's plugin, serves the viewer too).
+        from auryn.ingestors.csharp.git_sync import GitCSharpProjectConfig, sync
 
         config = GitCSharpProjectConfig(
             repo_uri=props["repo_uri"],
