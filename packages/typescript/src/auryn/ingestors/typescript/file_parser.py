@@ -45,9 +45,15 @@ from auryn.ingestors.typescript.raw_model import (
 )
 
 # Callee wrappers that are transparent to a call's target -- unwrapped so the inner identifier is the
-# recorded call site (what SCIP anchors its occurrence to): `(f)()`, `f!()`, `(f as T)()`, `(f satisfies T)()`.
+# recorded call site (what SCIP anchors its occurrence to): `(f)()`, `f!()`, `(f as T)()`,
+# `(f satisfies T)()`, `(<T>f)()`.
 _TRANSPARENT_CALLEES = {"parenthesized_expression", "non_null_expression", "as_expression",
-                        "satisfies_expression"}
+                        "satisfies_expression", "type_assertion"}
+# The callee-bearing child inside such a wrapper -- picked regardless of position, so a wrapper that ALSO
+# holds a type argument (`f as T`, `<T>f`, where the type may come first) unwraps to the expression, not the
+# type. Unknown inner shapes just yield no call site (no regression), never the wrong node.
+_CALLEE_EXPR_NODES = {"identifier", "member_expression", "call_expression", "subscript_expression",
+                      *_TRANSPARENT_CALLEES}
 _CLASS_DECLS = {"class_declaration", "abstract_class_declaration"}
 _FUNC_VALUE_KINDS = {"arrow_function": "ARROW", "function_expression": "FUNCTION_EXPR"}
 _LEXICAL = {"lexical_declaration", "variable_declaration"}
@@ -318,9 +324,10 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                 callee = field(n, "constructor" if is_new else "function")
                 # Unwrap callee wrappers that are transparent to the call target, so the call site is
                 # recorded (and SCIP's occurrence, anchored at the inner identifier, matches): `(b.run)()`,
-                # `b.run!()` (non-null assertion), `(f as T)()` / `(f satisfies T)()`.
+                # `b.run!()`, `(f as T)()`, `(f satisfies T)()`, `(<T>f)()` (incl. nesting). Pick the
+                # expression child (not a type argument, which may come first in `as`/`<T>` forms).
                 while callee is not None and callee.type in _TRANSPARENT_CALLEES:
-                    callee = next((c for c in callee.named_children), None)
+                    callee = next((c for c in callee.named_children if c.type in _CALLEE_EXPR_NODES), None)
                 nm, recv = _callee(callee)
                 if nm:
                     line = _callee_line(callee)

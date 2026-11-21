@@ -133,12 +133,13 @@ def test_call_sites_record_transparent_callee_wrappers():
         b"function caller(b: any) {\n"   # line 1
         b"  (b.run)();\n"                # line 2 -- parenthesized
         b"  b.ping!();\n"                # line 3 -- non-null assertion
-        b"  (b.send as any)();\n"        # line 4 -- `as` cast
+        b"  (b.send as any)();\n"        # line 4 -- `as` cast (type comes 2nd)
+        b"  (<any>b.recv)();\n"          # line 5 -- angle-bracket assertion (type comes 1st)
         b"}\n"
     )
     locs = resolution.callable_locations([parse_source(src, "src/a.ts")], project_id("p"))
     caller = next(l for l in locs if l.name == "caller")
-    assert {("run", 2), ("ping", 3), ("send", 4)} <= caller.called_sites
+    assert {("run", 2), ("ping", 3), ("send", 4), ("recv", 5)} <= caller.called_sites
 
 
 # -- the resolver: inferred-receiver dispatch, same-name disambiguation, cross-module ------------
