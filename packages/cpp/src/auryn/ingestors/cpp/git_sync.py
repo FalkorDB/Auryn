@@ -141,9 +141,6 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
                    _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(files)))
 
 
-def _is_name_calls_edge(item) -> bool:
-    return (type(item).__name__ == "GraphEdge" and item.rel_type == "CALLS"
-            and (item.properties or {}).get("resolution") == "name")
 
 
 def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_name: str, repo_uri: str,
@@ -156,6 +153,7 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
     name for a constructor-construction / complex receiver (so require_syntactic_call would drop those), but
     it emits self-CALLS -- so deep does NOT gate but DOES author self-edges."""
     try:
+        from auryn.core.deep_sync import is_name_calls_edge as _is_name_calls_edge, should_drop_name_edge
         from auryn.core.scip_resolve import resolve_calls
     except ImportError:  # a plugin-only upgrade left an older auryn-core without the resolver
         logger.warning("cpp deep pass: this auryn-core lacks core.scip_resolve (upgrade auryn-core); "
@@ -201,12 +199,8 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
     def make_target():  # re-iterable: stream_apply runs it once for nodes, once for edges
         yield project_node
         for item in resolution.resolve(files, proj_id):
-            if _is_name_calls_edge(item):
-                frm = item.from_key["id"]
-                callee = loc_by_id.get(item.to_key["id"])
-                if (frm in deep.covered_ids and callee is not None
-                        and callee.name in deep.seen_by_caller.get(frm, set())):
-                    continue  # deep identified this call -> drop the fast name-edge (deep edge replaces it)
+            if _is_name_calls_edge(item) and should_drop_name_edge(item, deep, loc_by_id):
+                continue  # deep identified this call -> drop the fast name-edge (deep edge replaces it)
             yield item
         yield from deep.edges
 

@@ -142,9 +142,6 @@ def _stamped(rf: RawFile, path: str) -> RawFile:
     return rf
 
 
-def _is_name_calls_edge(item) -> bool:
-    return (type(item).__name__ == "GraphEdge" and item.rel_type == "CALLS"
-            and (item.properties or {}).get("resolution") == "name")
 
 
 def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, proj_id: str,
@@ -158,6 +155,7 @@ def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, pro
     upgrade (fast->deep at the same commit) extern:// placeholders are left alone (diff_extern_edges=False),
     so cross-repo reconciliation isn't disturbed."""
     try:
+        from auryn.core.deep_sync import is_name_calls_edge as _is_name_calls_edge, should_drop_name_edge
         from auryn.core.scip_resolve import resolve_calls
     except ImportError:  # a plugin-only upgrade left an older auryn-core without the resolver
         logger.warning("typescript deep pass: this auryn-core lacks core.scip_resolve (upgrade auryn-core); "
@@ -221,15 +219,8 @@ def _deep_sync_at(writer, source, target_sha: str, file_refs, load_fn, plan, pro
     def make_target():  # a GENERATOR -- preserves emit_streaming's bounded memory
         yield project_node
         for item in resolution.emit_streaming(plan, load_fn, proj_id):
-            if _is_name_calls_edge(item):
-                frm = item.from_key["id"]
-                callee = loc_by_id.get(item.to_key["id"])
-                # drop a fast name-edge where deep identified that intra-project call (a resolved deep edge
-                # replaces it -- including a self/recursive edge, since emit_self_calls makes deep author
-                # those). Extern/other-repo callees (callee is None -> not a local callable) are kept.
-                if (frm in deep.covered_ids and callee is not None
-                        and callee.name in deep.seen_by_caller.get(frm, set())):
-                    continue
+            if _is_name_calls_edge(item) and should_drop_name_edge(item, deep, loc_by_id):
+                continue  # deep identified this call -> drop the fast name-edge (deep edge replaces it)
             yield item
         yield from deep.edges
 

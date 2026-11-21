@@ -130,6 +130,7 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
     (feature-gated-out / unlinked) keeps its fast resolution untouched. `diff_extern_edges=False` on an
     upgrade leaves the fast pass's extern:// placeholders alone."""
     try:
+        from auryn.core.deep_sync import is_name_calls_edge as _is_name_calls_edge, should_drop_name_edge
         from auryn.core.scip_resolve import resolve_calls
     except ImportError:  # a plugin-only upgrade left an older auryn-core without the resolver
         logger.warning("rust deep pass: this auryn-core lacks core.scip_resolve (upgrade auryn-core); "
@@ -173,15 +174,8 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
         yield project_node
         for item in resolution.resolve(files, proj_id):
             if _is_name_calls_edge(item):
-                frm = item.from_key["id"]
-                callee = loc_by_id.get(item.to_key["id"])
-                # drop a fast name-edge where deep IDENTIFIED that call: either deep resolved it in-source
-                # (a resolved edge replaces it) or identified it as external (the fast local guess was
-                # wrong -- e.g. `std::mem::drop` guessed as a local `drop` -- so retire it). A call deep
-                # could NOT identify (ambiguous same-line def / fn-pointer) keeps its fast edge.
-                if (frm in deep.covered_ids and callee is not None
-                        and callee.name in deep.seen_by_caller.get(frm, set())):
-                    continue
+                if should_drop_name_edge(item, deep, loc_by_id):
+                    continue  # deep identified this call -> drop the fast name-edge (deep edge replaces it)
                 yield item
             elif _is_callable_node(item) and item.key["id"] in unresolved_by_id:
                 yield _set_unresolved(item, unresolved_by_id[item.key["id"]])
@@ -224,9 +218,6 @@ def _recompute_unresolved(loc, seen: set) -> int:
     return non_macro + max(0, loc.macro_calls - macro_resolved)
 
 
-def _is_name_calls_edge(item) -> bool:
-    return (type(item).__name__ == "GraphEdge" and item.rel_type == "CALLS"
-            and (item.properties or {}).get("resolution") == "name")
 
 
 def _is_callable_node(item) -> bool:

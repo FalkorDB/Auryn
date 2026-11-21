@@ -127,9 +127,6 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
     return _finish(writer, proj_id, source, result)
 
 
-def _is_name_calls_edge(item) -> bool:
-    return (type(item).__name__ == "GraphEdge" and item.rel_type == "CALLS"
-            and (item.properties or {}).get("resolution") == "name")
 
 
 def _deep_sync_at(writer, source, target_sha: str, files, module_map, modules, proj_id: str,
@@ -142,6 +139,7 @@ def _deep_sync_at(writer, source, target_sha: str, files, module_map, modules, p
     external callee); on an upgrade (fast->deep at the same commit) extern:// placeholders are left alone
     (diff_extern_edges=False). Go's fast pass omits self-CALLS, so deep does too (no emit_self_calls)."""
     try:
+        from auryn.core.deep_sync import is_name_calls_edge as _is_name_calls_edge, should_drop_name_edge
         from auryn.core.scip_resolve import resolve_calls
     except ImportError:  # a plugin-only upgrade left an older auryn-core without the resolver
         logger.warning("go deep pass: this auryn-core lacks core.scip_resolve (upgrade auryn-core); "
@@ -194,12 +192,8 @@ def _deep_sync_at(writer, source, target_sha: str, files, module_map, modules, p
     def make_target():  # re-iterable: stream_apply runs it once for nodes, once for edges
         yield project_node
         for item in resolution.resolve(files, proj_id, module_map):
-            if _is_name_calls_edge(item):
-                frm = item.from_key["id"]
-                callee = loc_by_id.get(item.to_key["id"])
-                if (frm in deep.covered_ids and callee is not None
-                        and callee.name in deep.seen_by_caller.get(frm, set())):
-                    continue  # deep identified this call -> drop the fast name-edge (deep edge replaces it)
+            if _is_name_calls_edge(item) and should_drop_name_edge(item, deep, loc_by_id):
+                continue  # deep identified this call -> drop the fast name-edge (deep edge replaces it)
             yield item
         yield from deep.edges
 
