@@ -404,6 +404,23 @@ def test_nested_function_carries_file_path_for_impact():
     assert tool.properties["file_path"] == "m.py"
 
 
+def test_a_dotted_import_binds_the_package_not_the_submodule():
+    # `import pkg.core` binds `pkg`: `pkg.helper()` is the package's own `helper`. It was looked up
+    # under the import's target, so it bound to `pkg.core.helper` -- and `os.getcwd()` after
+    # `import os.path` became an `os.path::getcwd` placeholder.
+    pkg = parse_module(b"def helper():\n    return 0\n", "pkg/__init__.py")
+    core = parse_module(b"def helper():\n    return 1\n\n\ndef only_here():\n    return 2\n", "pkg/core.py")
+    main = parse_module(
+        b"import os.path\nimport pkg.core\n\n\ndef t():\n    pkg.helper()\n    pkg.only_here()\n    os.getcwd()\n",
+        "main.py",
+    )
+    items = list(resolution.resolve([pkg, core, main], "python://demo"))
+    assert _calls_from(items, "python://demo/module/main.func.t()") == {
+        ("python://demo/package/pkg.func.helper()", "resolved"),
+        ("extern://python/os::getcwd", "external"),
+    }
+
+
 def test_import_bound_instantiation_resolves_to_constructor():
     svc = parse_module(b"class Service:\n    def __init__(self, x):\n        self.x = x\n", "svc.py")
     main = parse_module(b"from svc import Service\n\nService(1)\n", "main.py")
@@ -431,3 +448,70 @@ def test_nested_def_body_calls_do_not_fold_into_the_enclosing_function():
     )
     items = list(resolution.resolve([m], "python://demo"))
     assert _calls_from(items, "python://demo/module/m.func.outer()") == set()
+
+
+def test_local_names_are_the_names_a_body_binds_itself():
+    # What the jedi engine's fallback must not bind through (see resolution._resolve_call): every
+    # way a body binds a name, an `import` in it included -- but not its parameters (kept apart),
+    # a nested scope's own names, or a name it only reads.
+    m = _module(
+        "def f(param, items):\n"
+        "    a = b, (c, *d) = param\n"
+        "    for e in items:\n"
+        "        pass\n"
+        "    with open(a) as g:\n"
+        "        pass\n"
+        "    try:\n"
+        "        pass\n"
+        "    except ValueError as h:\n"
+        "        pass\n"
+        "    if (i := len(items)):\n"
+        "        pass\n"
+        "    match param:\n"
+        "        case [j, *k]:\n"
+        "            pass\n"
+        "        case {'key': 1, **l}:\n"
+        "            pass\n"
+        "    m = [n for n in items]\n"
+        "    def nested(inner_param):\n"
+        "        inner_local = 1\n"
+        "    class Local:\n"
+        "        attr = 1\n"
+        "    import json\n"
+        "    from os import path as p, sep\n"
+        "    print(unbound)\n"
+    )
+    assert set(m.functions[0].local_names) == set("abcdeghijklmnp") | {"nested", "Local", "json", "sep"}
+
+
+def test_module_local_names_are_only_what_the_top_level_code_rebinds():
+    # At module scope a def, a class and an import are the module's own names -- what a top-level
+    # call resolves to. Only a rebinding shadows one: `db = make()` after `from pkg import db`, or
+    # a second def / class / import under a name one of them already took.
+    m = _module(
+        "import json\n"
+        "import os.path\n"
+        "import os\n"  # `os` again, and the same package: not a rebinding
+        "from pkg import db\n"
+        "from lib import fetch, cached, Base\n"
+        "\n"
+        "def helper():\n"
+        "    local = 1\n"
+        "\n"
+        "class K:\n"
+        "    attr = 1\n"
+        "\n"
+        "db = make()\n"
+        "for i in range(3):\n"
+        "    helper()\n"
+        "\n"
+        "def fetch():\n"
+        "    pass\n"
+        "\n"
+        "try:\n"
+        "    from otherlib import cached\n"
+        "except ImportError:\n"
+        "    class Base:\n"
+        "        pass\n"
+    )
+    assert m.local_names == ["Base", "cached", "db", "fetch", "i"]
