@@ -168,6 +168,7 @@ def test_claudecode_deregister_carries_on_past_a_file_it_cannot_remove(tmp_path,
 
     monkeypatch.setattr(Path, denied_call, denied)
     cc.deregister(reg)  # does not raise
+    assert (tmp_path / "skills" / "auryn" / "SKILL.md").exists()  # and leaves what it couldn't check
 
 
 def test_claudecode_register_sets_always_load(tmp_path):
@@ -630,12 +631,16 @@ def test_agents_md_deregister_keeps_an_empty_file_that_predated_us(tmp_path):
 
 
 @pytest.mark.parametrize("editor_added_a_bom", [False, True])
-def test_agents_md_deregister_removes_a_file_install_created(tmp_path, editor_added_a_bom):
+def test_agents_md_deregister_removes_a_file_install_created(tmp_path, monkeypatch, editor_added_a_bom):
     # ...while a file that exists only because install wrote it is removed again -- also after a
     # re-install in between (the block is still the file's first byte), and also when an editor
-    # has since put a byte-order mark in front of it.
+    # has since put a byte-order mark in front of it. Under a locale that isn't UTF-8 (Windows'
+    # cp1252, as patched here) too: the file is read back as the UTF-8 it was written in.
+    import io
+
     from auryn.core.agents import AgentsMdAgent
 
+    monkeypatch.setattr(io, "text_encoding", lambda encoding, stacklevel=2: encoding or "cp1252")
     md = tmp_path / "AGENTS.md"
     agent = AgentsMdAgent("agents-md", md)
     agent.register(["cairn", "mcp"])
