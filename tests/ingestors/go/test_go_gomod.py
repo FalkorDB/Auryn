@@ -36,6 +36,18 @@ def test_import_path_for_dir_and_owning_module():
     assert gomod.import_path_for_dir("x", {}) == "x"  # no go.mod -> repo-relative dir
 
 
+def test_package_name_follows_go_tooling():
+    assert gomod.package_name("net/http") == "http"
+    assert gomod.package_name("github.com/go-chi/chi/v5") == "chi"        # major-version segment skipped
+    assert gomod.package_name("gopkg.in/yaml.v3") == "yaml"                # gopkg.in `.vN` suffix
+    assert gomod.package_name("github.com/nats-io/nats.go") == "nats"
+    assert gomod.package_name("github.com/segmentio/kafka-go") == "kafka"
+    assert gomod.package_name("github.com/redis/go-redis/v9") == "redis"   # `go-` prefix
+    assert gomod.package_name("github.com/mattn/go-sqlite3") == "sqlite3"
+    assert gomod.package_name("v2") == "v2"                                # no parent to skip to
+    assert gomod.package_name("") == ""
+
+
 # -- end-to-end --------------------------------------------------------------------------
 
 def _write(root, files):
@@ -143,6 +155,32 @@ def test_cross_repo_heal_with_path_name_divergence(graph, tmp_path):
 
     ingest.ingest_directory(w, str(repo_b), project_name="foo")   # B lands -> heal
     # A's run() now CALLS B's real Bar (resolved), and the placeholder is gone.
+    assert graph.query(
+        "MATCH (:Function {name:'run'})-[c:CALLS]->(b:Function {name:'Bar'}) "
+        "WHERE b.resolved IS NULL RETURN c.resolution").result_set == [["resolved"]]
+    assert graph.query(f"MATCH (p {{id:'{key}'}}) RETURN count(p)").result_set == [[0]]
+
+
+def test_cross_repo_heal_into_major_versioned_module(graph, tmp_path):
+    # No alias this time: repo A imports a v2 module and calls through the package name (`lib.Bar`,
+    # not the path's last segment `v2`); ingesting repo B (module github.com/x/lib/v2, `package lib`)
+    # must heal A's placeholder onto B's real Bar via the full import-path key.
+    repo_a = _write(tmp_path / "a", {
+        "go.mod": "module github.com/x/app\n\ngo 1.22\n",
+        "main.go": 'package main\n\nimport "github.com/x/lib/v2"\n\n'
+                   "func run() int { return lib.Bar() }\n\nfunc main() { run() }\n",
+    })
+    repo_b = _write(tmp_path / "b", {
+        "go.mod": "module github.com/x/lib/v2\n\ngo 1.22\n",
+        "lib.go": "package lib\n\nfunc Bar() int { return 7 }\n",
+    })
+
+    w = GraphWriter(graph)
+    ingest.ingest_directory(w, str(repo_a), project_name="app")
+    key = "extern://go/github.com/x/lib/v2.Bar"
+    assert graph.query(f"MATCH (p {{id:'{key}', resolved:false}}) RETURN 1").result_set == [[1]]
+
+    ingest.ingest_directory(w, str(repo_b), project_name="lib")
     assert graph.query(
         "MATCH (:Function {name:'run'})-[c:CALLS]->(b:Function {name:'Bar'}) "
         "WHERE b.resolved IS NULL RETURN c.resolution").result_set == [["resolved"]]

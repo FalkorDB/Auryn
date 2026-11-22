@@ -205,6 +205,114 @@ def test_external_method_call_via_typed_param():
     assert calls[("app.func.Use(io.Reader)", eid)] == {"resolution": "external"}
 
 
+def _call_targets(edges, caller):
+    return {t for (f, t) in _edges(edges, "CALLS") if f == caller}
+
+
+def test_non_aliased_import_binds_the_package_name():
+    # Regression: a non-aliased import was keyed only by its LAST path segment, but Go code writes the
+    # package name, so `chi.NewRouter()` under `import "github.com/go-chi/chi/v5"` (keyed `v5`) got no
+    # placeholder. Same for every major-versioned module, a gopkg.in `.vN` path, and a `nats.go` /
+    # `go-redis` style repo name. The placeholder stays keyed by the FULL import path (ADR 0004).
+    nodes, edges = _resolve({
+        "app/main.go": (
+            "package app\n"
+            "import (\n"
+            '\t"github.com/go-chi/chi/v5"\n'
+            '\t"github.com/nats-io/nats.go"\n'
+            '\t"github.com/redis/go-redis/v9"\n'
+            '\t"gopkg.in/yaml.v3"\n'
+            ")\n"
+            "func Run() {\n"
+            "\tchi.NewRouter()\n"
+            '\tnats.Connect("nats://bus:4222")\n'
+            "\tredis.NewClient(nil)\n"
+            "\tyaml.Unmarshal(nil, nil)\n"
+            "}\n"
+        ),
+    })
+    expected = {
+        "extern://go/github.com/go-chi/chi/v5.NewRouter",
+        "extern://go/github.com/nats-io/nats.go.Connect",
+        "extern://go/github.com/redis/go-redis/v9.NewClient",
+        "extern://go/gopkg.in/yaml.v3.Unmarshal",
+    }
+    assert _call_targets(edges, "app.func.Run()") == expected
+    for eid in expected:
+        ph = _node_by_id(nodes, eid)
+        assert ph.properties["origin"] == "external" and ph.properties["linkage_key"] == eid
+
+
+def test_versioned_import_types_a_method_call():
+    # The same binding names the type of a param, so a method call on it gets a Method placeholder.
+    nodes, edges = _resolve({
+        "app/db.go": (
+            "package app\n"
+            'import "github.com/jackc/pgx/v5"\n'
+            "func Ping(conn *pgx.Conn) { conn.Ping(nil) }\n"
+        ),
+    })
+    eid = "extern://go/github.com/jackc/pgx/v5.Conn.Ping"
+    assert _node_by_id(nodes, eid).label == "Method"
+    assert _call_targets(edges, "app.func.Ping(*pgx.Conn)") == {eid}
+
+
+def test_assumed_package_name_never_displaces_a_stronger_key():
+    # The assumed name is a guess (only the imported package's own clause is authoritative):
+    # `k8s.io/apimachinery/pkg/apis/meta/v1` declares `package v1`, so its last segment stays bound;
+    # the exact last segment of `.../api/meta` keeps `meta` over the `meta` guessed for `.../meta/v1`;
+    # an aliased import binds its alias only, and two imports guessing the same name bind neither.
+    _, edges = _resolve({
+        "app/main.go": (
+            "package app\n"
+            "import (\n"
+            '\t"k8s.io/apimachinery/pkg/api/meta"\n'
+            '\t"k8s.io/apimachinery/pkg/apis/meta/v1"\n'
+            '\trouter "github.com/go-chi/chi/v5"\n'
+            '\t"github.com/go-redis/redis/v8"\n'
+            '\t"github.com/redis/go-redis/v9"\n'
+            ")\n"
+            "func Run() {\n"
+            "\tv1.Now()\n"
+            "\tmeta.Accessor(nil)\n"
+            "\trouter.NewRouter()\n"
+            "\tchi.NewMux()\n"
+            "\tredis.NewClient(nil)\n"
+            "}\n"
+        ),
+    })
+    assert _call_targets(edges, "app.func.Run()") == {
+        "extern://go/k8s.io/apimachinery/pkg/apis/meta/v1.Now",
+        "extern://go/k8s.io/apimachinery/pkg/api/meta.Accessor",
+        "extern://go/github.com/go-chi/chi/v5.NewRouter",
+    }
+
+
+def test_incremental_resolution_binds_the_same_package_name():
+    # resolve_incremental re-parses only the emit file and seeds the rest from the graph, which carries
+    # no import data (read_go_index), so the binding comes from the emit file alone and must name the
+    # same placeholder the full pass does.
+    files = {
+        "model/store.go": "package model\nfunc New() int { return 0 }\n",
+        "app/main.go": (
+            "package app\n"
+            "import (\n"
+            '\t"model"\n'
+            '\t"github.com/go-chi/chi/v5"\n'
+            ")\n"
+            "func Run() { chi.NewRouter(); model.New() }\n"
+        ),
+    }
+    raws = {path: parse_source(src.encode(), path) for path, src in files.items()}
+    nodes, full = _resolve(files)
+    new_id = _by_name(nodes, "Function", "New").key["id"]
+    seed = resolution.GoGraphIndex(project_import_paths={"model"}, func_by_name={"New": [(new_id, "model")]})
+    incremental = [i for i in resolution.resolve_incremental([raws["app/main.go"]], _PROJ, seed)
+                   if type(i).__name__ == "GraphEdge"]
+    expected = {"extern://go/github.com/go-chi/chi/v5.NewRouter", "model.func.New()"}
+    assert _call_targets(incremental, "app.func.Run()") == _call_targets(full, "app.func.Run()") == expected
+
+
 def test_real_callables_carry_linkage_key():
     nodes, _ = _resolve({
         "model/store.go": (

@@ -98,6 +98,26 @@ def owning_module_dir(file_dir: str, module_dirs) -> str | None:
     return best
 
 
+_MAJOR_VERSION_RE = re.compile(r"v[0-9]+")
+_IDENTIFIER_PREFIX_RE = re.compile(r"\w*")
+
+
+def package_name(import_path: str) -> str:
+    """The package name a non-aliased import of `import_path` is assumed to bind -- Go tooling's rule
+    (goimports' ImportPathToAssumedName): the last path segment, skipping a major-version segment
+    (`github.com/go-chi/chi/v5` -> `chi`), minus a `go-` prefix, cut at the first non-identifier
+    character (`gopkg.in/yaml.v3` -> `yaml`, `github.com/nats-io/nats.go` -> `nats`,
+    `github.com/redis/go-redis/v9` -> `redis`). Only the imported package's own `package` clause is
+    authoritative (`k8s.io/api/core/v1` declares `package v1`), so this is a guess."""
+    segs = [s for s in import_path.split("/") if s]
+    if not segs:
+        return ""
+    base = segs[-1]
+    if len(segs) > 1 and _MAJOR_VERSION_RE.fullmatch(base):
+        base = segs[-2]
+    return _IDENTIFIER_PREFIX_RE.match(base.removeprefix("go-")).group()
+
+
 def import_path_for_dir(file_dir: str, module_map: dict[str, str]) -> str:
     """The canonical import path of the package in `file_dir`: the owning module's path + the dir
     relative to that module. Falls back to the repo-relative dir when no go.mod covers it (so a
