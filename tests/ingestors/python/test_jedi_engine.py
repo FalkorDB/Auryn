@@ -248,7 +248,8 @@ def test_callee_in_a_namespace_dir_binds_by_file(tmp_path):
     assert targets == {f"python://demo/module/{hooks.dotted}.func.fire()"}
 
 
-def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
+@pytest.mark.parametrize("oracle_kind", ["inline", "precomputed"])
+def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path, oracle_kind):
     """Jedi can't follow `from pkg.core import helper` out of tests/ (`src/` isn't on its path), nor
     an import of a library that isn't installed here, and answers nothing for those calls. They
     must still bind the way the fast pass binds them -- by the import -- not vanish from the graph."""
@@ -258,6 +259,7 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
         "tests/test_core.py": (
             "from notinstalled_lib import fetch\n"
             "from pkg import core\n"
+            "from pkg import core as rebound\n"
             "from pkg.core import helper\n"
             "\n"
             "\n"
@@ -287,14 +289,15 @@ def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path):
             "\n"
             "\n"
             "def test_shadowed_by_the_module():\n"
-            "    core.helper()\n"
+            "    rebound.helper()\n"
             "\n"
             "\n"
-            "core = object()\n"
-            "core.helper()\n"
+            "rebound = object()  # its own name: the function-local cases above rest on their own guards\n"
+            "rebound.helper()\n"
         ),
     })
-    items = list(resolution.resolve(modules, _PROJ, oracle=JediOracle(str(tmp_path), modules)))
+    oracle = JediOracle(str(tmp_path), modules) if oracle_kind == "inline" else build_precomputed_oracle(str(tmp_path), modules, workers=1)
+    items = list(resolution.resolve(modules, _PROJ, oracle=oracle))
 
     calls = {str(e.to_key["id"]): e.properties["resolution"] for e in _edges_of(items, "CALLS")
              if e.from_key["id"] == "python://demo/module/tests.test_core.func.test_it()"}
