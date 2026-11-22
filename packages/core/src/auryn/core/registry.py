@@ -18,6 +18,7 @@ discovery finds it automatically.
 
 from __future__ import annotations
 
+import fnmatch
 import importlib
 import pkgutil
 from collections.abc import Callable, Iterable
@@ -89,9 +90,43 @@ class GitLanguage:
     inferred types + resolved calls) -- inline or in the background. Same signature and
     return type as `sync`; because both engines emit identical node ids, the deep pass is a
     pure delta over the fast one. None for static languages that have only one pass."""
+    file_globs: tuple[str, ...] = ()
+    """GLOB patterns (fnmatch, case-sensitive) that identify this language's files, for the cases a bare
+    `endswith` suffix can't express: a prefix/infix variant (`Dockerfile.*`, `compose.*.yml`), an
+    exact-basename anchor that fires only when present (`Chart.yaml`, so Helm isn't woken by every
+    `.yaml`), or -- when the pattern contains a `/` -- a relative-PATH anchor on a directory
+    (`.github/workflows/*.yml`, so CI fires only where workflows live). See `glob_matches`. ADDITIVE to `file_suffixes` (each suffix `s` is equivalent to the
+    glob `*s`); detection and the save-watcher match on the UNION (see `match_patterns`). Overlapping
+    patterns across languages (Helm `Chart.yaml` vs k8s `*.yaml`) are NOT exclusive ownership -- each
+    producer's `sync` still content-sniffs to decide what it actually owns (ADR 0007 §7). Declared LAST
+    (after `deep_sync`) so it never shifts a positional `GitLanguage(...)` registration."""
 
     def is_two_phase(self) -> bool:
         return self.deep_sync is not None
+
+    def match_patterns(self) -> tuple[str, ...]:
+        """The basename globs that identify this language's files: each `file_suffixes` entry `s` as the
+        glob `*s` (so `.cs` -> `*.cs`, `Dockerfile` -> `*Dockerfile`, preserving the old `endswith`
+        semantics), unioned with `file_globs`, de-duplicated. The single source of truth for both
+        detection and the save-watcher."""
+        return match_patterns(self.file_suffixes, self.file_globs)
+
+
+def glob_matches(rel_path: str, patterns: tuple[str, ...]) -> bool:
+    """Does `rel_path` match any of `patterns` (fnmatch, case-sensitive)? A pattern containing a `/`
+    matches the full RELATIVE PATH -- so a directory can be anchored (`.github/workflows/*.yml`); a bare
+    pattern matches the BASENAME, the common case (`*.py`, `Dockerfile.*`, `Chart.yaml`). The single
+    matcher both `Source.list_files_glob` backends use, so detection can't drift between them."""
+    base = rel_path.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatchcase(rel_path if "/" in pat else base, pat) for pat in patterns)
+
+
+def match_patterns(file_suffixes: tuple[str, ...], file_globs: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Basename globs for a `(file_suffixes, file_globs)` pair: each suffix `s` becomes `*s` (preserving
+    the old `endswith` semantics), unioned with `file_globs`, order-preserving de-duplicated. The one
+    place the union is computed -- `GitLanguage.match_patterns` and every plugin's git_sync call it, so
+    detection and ingestion can never match different files."""
+    return tuple(dict.fromkeys((*(f"*{s}" for s in file_suffixes), *file_globs)))
 
 
 def register_git_language(language: GitLanguage) -> None:

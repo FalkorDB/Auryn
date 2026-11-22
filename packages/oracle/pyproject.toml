@@ -2,6 +2,7 @@
 name = "auryn-oracle"
 version = "0.1.0"
 description = "Oracle-stack plugins for Auryn: live-DB and file-based PL/SQL (vendored ANTLR grammar) and Redgate schema-catalog reconstruction (oraschema). (The generic relational-DB schema ingestor now lives in auryn-sql.)"
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }

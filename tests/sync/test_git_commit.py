@@ -102,3 +102,37 @@ def test_mixed_commit(repo, falkordb_connection, tmp_path):
         assert_graphs_equal(dump(f), dump(g), "mixed commit")
     finally:
         drop(g, f)
+
+
+@pytest.mark.parametrize("files, removed", [
+    (BASE, "standalone.py"),
+    ({"a.c": "int helper(int x) { return x + 1; }\n", "b.c": "int solo(void) { return 0; }\n"}, "b.c"),
+], ids=["file-scoped (python)", "authored-shared (c)"])
+def test_a_commit_sync_that_dies_mid_apply_claims_no_commit(files, removed, falkordb_connection, tmp_path, monkeypatch):
+    """Both incremental engines delete the removed files' subgraphs before they apply the delta.
+    Killed in between, the Project node must not still claim the previous commit -- a sync back to
+    it would short-circuit over the half-applied change. With the stamp cleared at the first
+    mutation, that sync recomputes and matches a full ingest of the commit."""
+    cache = tmp_path / "cache"
+    repo = GitRepo.init(tmp_path / "repo").write(files)
+    sha1 = repo.commit("v1")
+    g = fresh_graph(falkordb_connection, "commit")
+    f = fresh_graph(falkordb_connection, "commit_full")
+    try:
+        _ingest(GraphWriter(g), repo, sha1, cache)
+        repo.rm(removed)
+        sha2 = repo.commit("v2")
+
+        def killed(self, delta):
+            raise RuntimeError("killed mid-apply")
+
+        with monkeypatch.context() as m:
+            m.setattr(GraphWriter, "apply_delta", killed)
+            _ingest(GraphWriter(g), repo, sha2, cache)
+        assert g.query("MATCH (p:Project) RETURN p.commit_sha").result_set == [[None]]
+
+        _ingest(GraphWriter(g), repo, sha1, cache)  # back to v1
+        _ingest(GraphWriter(f), repo, sha1, cache)
+        assert_graphs_equal(dump(f), dump(g), "back to the previous commit")
+    finally:
+        drop(g, f)

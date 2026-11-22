@@ -1,0 +1,14 @@
+# CI closes the loop: this workflow BUILDS + PUSHES the SAME shop/api:1.0 that compose/k8s/terraform/
+# helm/kustomize RUN -- so the hub image flips resolved/internal (built in-graph), not an external pull.
+name: build-and-push
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./api
+          push: true
+          tags: shop/api:1.0
