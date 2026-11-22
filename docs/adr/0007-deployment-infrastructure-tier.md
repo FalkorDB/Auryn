@@ -21,7 +21,7 @@ Terraform aws_ecs_service / k8s Deployment / Compose service
       -[:PACKAGES]->     code Project / the File(s) it COPYs in
 ```
 
-Five ingestors (`docker`, `compose`, `k8s`, `helm`, `terraform`) plus CI pipelines will write into
+Seven ingestors (`docker`, `compose`, `k8s`, `helm`, `kustomize`, `terraform`, `ci`) write into
 this tier over time. If each invents its own labels/keys they won't compose, exactly the failure the
 language [schema contract](../graph-model.md#the-cross-ingestor-contract) was written to prevent.
 **This ADR is that contract for the deployment tier**: the shared node labels, the id/join-key
@@ -47,7 +47,7 @@ the seams join to — reused verbatim, never shadowed.
 | **`Image`** | A container image, by normalized reference. **The hub node.** | docker (build output) | compose, k8s, helm, tf, ci (run/push input) |
 | **`BuildStage`** | One `FROM … [AS name]` stage of a Dockerfile. | docker | compose `build:`, ci |
 | **`Service`** | A runnable workload (compose service, k8s Deployment/StatefulSet/DaemonSet/CronJob, ECS service). | compose, k8s | tf, helm, mesh |
-| **`Resource`** | An IaC-managed infra object that isn't itself a workload (a cloud resource, a Helm release). | terraform, helm | tf refs |
+| **`Resource`** | An IaC-managed infra object that isn't itself a workload (a cloud resource, a Helm release, a Kustomize overlay). | terraform, helm, kustomize | tf refs |
 | **`Registry`** | A container registry / repository (ECR, GHCR, Docker Hub). | tf, ci | docker, k8s |
 | `ConfigValue` / `Secret` | A named env/config entry (`Secret` = sensitive; value redacted). | all | the DB/config seam |
 | `Port` / `Volume` | *Optional, v2.* Fine-grained wiring; **v1 keeps these as edge properties** (see §6). | all | — |
@@ -65,9 +65,15 @@ different repos (and two different ingestors) must agree on without coordination
 | `BuildStage` | `docker://<project>/<dockerfile-path>#<stage-name-or-index>` | project |
 | `Service` (compose) | `compose://<project>/<file>/<service>` | project |
 | `Service` (k8s) | `k8s://<project>/<namespace>/<kind>/<name>` | project |
-| `Resource` (terraform) | `tf://<project>/<module>/<type>.<name>` | project |
-| `Resource`/`Service` (helm) | `helm://<project>/<chart>/<template>/<name>` | project |
+| `Resource` (terraform) | `terraform://<project>/<module-dir>/<address>` — `<address>` is the full Terraform address: `<type>.<name>` (resource), `data.<type>.<name>` (data source), or `module.<name>` (module); the root module omits `<module-dir>` | project |
+| `Database` (terraform) | `<resource-id>#database` — the provisioning resource's id plus a `#database` suffix (a Terraform address never contains `#`, so it can't collide with a `Resource`) | **project / producer-scoped** |
+| `Registry` (terraform) | `<resource-id>#registry` — the provisioning resource's id plus a `#registry` suffix | **project / producer-scoped** |
+| `Resource` (helm) | chart: `helm://<project>/<chart-dir>` (`_root` for the repo-root chart); external-dep placeholder: `helm://<project>/_dep/<name>` | project |
+| `Resource` (kustomize) | `kustomize://<project>/<kustomization-dir>` (`_root` for the repo-root kustomization) | project |
+| `Resource` (ci) | `ci://<project>/<workflow-path>` (the `.github/workflows/<name>.yml` path) | project |
 | `ConfigValue` / `Secret` | `<owner-id>/env/<NAME>` | owner-scoped |
+
+Unlike `Image` (the one global join key), the v1 `Database`/`Registry` nodes are **producer-scoped**: their id is derived from the provisioning Terraform resource, so a second producer (a CI pipeline, another IaC tool) referencing the *same* registry or database will NOT converge on the same node. This is deliberate for v1 — Terraform is the only `PROVISIONS` producer, and a producer-neutral key isn't even derivable from Terraform's static config (an ECR registry host embeds the AWS account id, which lives in provider config, not the resource). Cross-producer convergence is a **future** concern: it would re-key these on a normalized identity (registry host + repository; database endpoint/engine) and is tracked with the `rds`→ORM `Database` seam (`CONNECTS_TO`) in the per-source map below.
 
 **Image reference normalization (the whole contract hinges on this — every producer MUST canonicalize
 identically).** A Dockerfile `FROM python:3.12-slim`, a Compose `image: python:3.12-slim`, and a k8s
@@ -95,8 +101,8 @@ identically).** A Dockerfile `FROM python:3.12-slim`, a Compose `image: python:3
 | `BASED_ON` | `BuildStage`/`Image` → base `Image` | the `FROM` chain; carries `resolution` |
 | `COPIES_FROM` | `BuildStage` → `BuildStage` | multi-stage `COPY --from=` |
 | **`BUILDS_IMAGE`** | `BuildStage` → `Image` | the published image a build emits (written by the stitch once a tag is assigned) |
-| **`RUNS_IMAGE`** | `Service` → `Image` | the image a workload runs |
-| `DEPENDS_ON` | `Service` → `Service` | **reuse the contract edge**; compose `depends_on`, k8s/tf refs, Helm chart deps |
+| **`RUNS_IMAGE`** | `Service`/`Resource` → `Image` | the image a workload (or a Terraform resource — ECS task, Cloud Run) runs |
+| `DEPENDS_ON` | `Service`/`Resource` → `Service`/`Resource` | **reuse the contract edge**; compose `depends_on`, Terraform interpolation refs (scoped to the module dir), Helm chart deps |
 | `PROVISIONS` | `Resource` → `Service`/`Image`/`Registry`/`Database` | a Terraform resource creates a runtime thing |
 | `DEPLOYS` | `Resource`(release)/ci-job → `Service`/`Resource` | Helm release / CI deploy step |
 | `STORED_IN` | `Image` → `Registry` | where an image is pushed/pulled |
@@ -172,11 +178,15 @@ The same two-role split as `http`/`orm`, so each half stays simple and the join 
   `PACKAGES`, `SERVES`, `CONNECTS_TO`, `SHIPS`, the `resolved` flag, and image-node GC — so any ingest
   order converges and a resync self-corrects.
 
-One small, additive core change this tier needs: `GitLanguage` matches by `path.endswith(suffix)`,
-which can't express `Dockerfile` / `Dockerfile.prod` / `*.tf` / `values.yaml` basename detection.
-Add an optional `filename_matches` predicate to `GitLanguage` (and the two `Source.list_files` call
-sites); it is a no-op for the suffix-only languages and lets every IaC producer register a basename
-matcher cleanly.
+One small, additive core change this tier needs — **SHIPPED**: `GitLanguage` matched only by
+`path.endswith(suffix)`, which can't express `Dockerfile` / `Dockerfile.prod` / `values.yaml` basename
+detection. `GitLanguage.file_globs` (basename fnmatch, unioned with the suffixes via `match_patterns`)
+plus `Source.list_files_glob` now carry it: detection and the save-watcher match basenames, so docker
+catches the `Dockerfile.*`/`Containerfile` family, compose the overlay variants, terraform `*.tofu`,
+and **helm anchors on `Chart.yaml`** (fires only on real charts instead of being woken by every
+`.yaml`). A `file_globs` pattern containing a `/` matches the relative PATH, so a directory can be
+anchored — **ci anchors on `.github/workflows/*.yml`** (fires only where workflows live). It is a no-op
+for the suffix-only code languages (a suffix `s` ≡ the glob `*s`).
 
 ### 8. Provenance
 
@@ -193,9 +203,9 @@ rules as the code graph:
 
 ## Consequences
 
-- **One hub, five ingestors.** Each IaC source is an additive producer plus a per-source arm of the
-  one `deploy` stitch; the `Image` node and its reconciliation are written once. A sixth source
-  (serverless, Pulumi, SAM) is the same shape.
+- **One hub, seven ingestors.** Each IaC source is an additive producer plus a per-source arm of the
+  one `deploy` stitch; the `Image` node and its reconciliation are written once. A further source
+  (CI, serverless, Pulumi, SAM) is the same shape.
 - **Blast radius leaves the repo.** `impact_of` / `find_path` / `trace_entrypoint` traverse the new
   edges with **no MCP change** — a code change now reaches the image, service, Helm release and cloud
   resource that ship it, and (via `SERVES`/`CONNECTS_TO`) the external endpoints and databases it
@@ -218,6 +228,7 @@ rules as the code graph:
 | **docker** | `BuildStage`, placeholder `Image` (bases) | `HAS_STAGE`, `BASED_ON`, `COPIES_FROM` | `PACKAGES` (context+COPY → Project/File). *Not `BUILDS_IMAGE`*: a Dockerfile doesn't name the image it produces — the tag comes from Compose `build:`/`image:` or CI `-t`, so that edge is the Compose/CI arm's (keyed by the normalized ref, matched to the `BuildStage` by build context). |
 | **compose** | `Service`, `Image` (from `image:`) | `DEPENDS_ON`, `MOUNTS`, `RUNS_IMAGE` | resolve `build:` → the Dockerfile `BuildStage` (`BUILDS_IMAGE`); DB service → `CONNECTS_TO` |
 | **k8s** *(v1)* | `Service` (workload), `Ingress`, `Image` | `RUNS_IMAGE`, `HAS_INGRESS` | the backing **workload** `SERVES` the route-keyed `APIEndpoint` and the `Ingress` `ROUTES` to it (backend resolved via the k8s Service **selector**, name-match fallback; `host` on the edges). *Future:* `ConfigValue`/`Secret` + `MOUNTS`, connection string → `CONNECTS_TO`. |
-| **helm** | `Resource`(release), `Service`, `ConfigValue` | `DEPENDS_ON` (chart deps), `RUNS_IMAGE` (values image) | optional `helm template` → k8s arm |
-| **terraform** | `Resource`, `Registry`, `Image` | `DEPENDS_ON`/`PROVISIONS` (HCL refs) | task-def image → `BUILDS_IMAGE`; `rds` → `CONNECTS_TO`; `lambda` src → `PACKAGES`; `lb`/`api_gw` → `SERVES` |
-| **ci** (follow-up) | ci-job `Resource`, `Image`, `Registry` | build/push steps | `BUILDS_IMAGE` + `STORED_IN`; deploy step → `DEPLOYS` |
+| **helm** *(v1)* | `Resource` (chart/release), `ConfigValue`, `Image` | `HAS_FILE`, `HAS_RESOURCE`, `DEPENDS_ON` (chart deps, resolved to an in-repo chart by name else a `resolved:false` placeholder), `RUNS_IMAGE` (an image declared in `values.yaml` → the hub, from the release `Resource` per §3), `MOUNTS` (release `Resource` → a notable `ConfigValue` from `values.yaml`) | the shared `core.deploy` image lifecycle. **Static & render-free** — only the YAML-valid `Chart.yaml`/`values.yaml` are parsed. *Future:* `Service` + `DEPLOYS` — a chart's workloads live in the Go-templated `templates/*.yaml`, not resolvable statically; an opt-in `helm template` → k8s render arm produces them. |
+| **kustomize** *(v1)* | `Resource` (overlay/base), `Image` | `HAS_FILE`, `HAS_RESOURCE`, `DEPENDS_ON` (overlay → a base kustomization from `resources:`/`bases:`/`components:` that resolves to another in-repo kustomization), `RUNS_IMAGE` (a ref the `images:` transformer sets — `newName`/`newTag`/`digest` → the hub, from the overlay `Resource` per §3) | the shared `core.deploy` image lifecycle. **Static & render-free** — only the `kustomization.yaml`/`kustomization.yml`/`Kustomization` is parsed. *Future:* `ConfigValue`/`Secret` from `configMapGenerator`/`secretGenerator`; an opt-in `kustomize build` → k8s render arm for the patched workloads. |
+| **terraform** *(v1)* | `Resource` (resource/module/data, classified), `Database`, `Registry`, `Image` | `HAS_RESOURCE`, `DEPENDS_ON` (HCL interpolation refs), `RUNS_IMAGE` (a container image in a resource → the hub), `PROVISIONS` (`rds`→`Database`, `ecr`→`Registry`) | the shared `core.deploy` image lifecycle. *Future:* `rds`→ the ORM `Database` seam (`CONNECTS_TO`), `lambda` src → `PACKAGES`, `lb`/`api_gw` → `SERVES`. |
+| **ci** *(v1)* | `Resource` (workflow/pipeline), `Image` | `HAS_FILE`, `HAS_RESOURCE`, `BUILDS_IMAGE` (an image a step builds/pushes → the hub: `docker/build-push-action` tags, `docker build -t`/`docker push` in a `run:`) | the shared `core.deploy` image lifecycle — this arm's `BUILDS_IMAGE` is what flips a run-only hub image `resolved`/`internal`, closing the loop. **GitHub Actions, static** — only the `.github/workflows/*.yml` are parsed; a fully-templated tag is skipped. *Future:* GitLab CI / Jenkins dialects; `Registry` + `STORED_IN` (login/push targets); `DEPLOYS` (deploy steps). |

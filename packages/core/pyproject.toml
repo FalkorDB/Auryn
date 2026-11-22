@@ -2,6 +2,7 @@
 name = "auryn-core"
 version = "0.1.0"
 description = "Core of Auryn: registry/plugin discovery, git+local sources, the FalkorDB graph layer, the MCP server, the viewer, and the `auryn` CLI. Language support ships as separate `auryn-<lang>` plugins."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -61,6 +62,10 @@ events = ["auryn-events==0.1.0"]               # message publisher <-> subscribe
 docker = ["auryn-docker==0.1.0"]               # Dockerfiles + the `deploy` stitch (ADR 0007)
 compose = ["auryn-compose==0.1.0"]             # docker-compose files + the `deploy-compose` stitch
 k8s = ["auryn-k8s==0.1.0"]                     # Kubernetes manifests + the `deploy-k8s` stitch
+terraform = ["auryn-terraform==0.1.0"]         # Terraform/OpenTofu (HCL) + the `deploy-terraform` stitch
+helm = ["auryn-helm==0.1.0"]                   # Helm charts (render-free) + the `deploy-helm` stitch
+kustomize = ["auryn-kustomize==0.1.0"]         # Kustomize overlays (render-free) + the `deploy-kustomize` stitch
+ci = ["auryn-ci==0.1.0"]                        # GitHub Actions workflows + the `deploy-ci` BUILDS_IMAGE stitch
 # every plugin + both live-DB drivers: the same as `pip install "falkordb-auryn[all]"`
 all = [
     "auryn-python==0.1.0",
@@ -87,6 +92,10 @@ all = [
     "auryn-docker==0.1.0",
     "auryn-compose==0.1.0",
     "auryn-k8s==0.1.0",
+    "auryn-terraform==0.1.0",
+    "auryn-helm==0.1.0",
+    "auryn-kustomize==0.1.0",
+    "auryn-ci==0.1.0",
 ]
 
 [project.scripts]

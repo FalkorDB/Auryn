@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.core.http_seam import normalize_route
-from auryn.core.image_ref import image_id, parse_image_ref
+from auryn.core.image_ref import image_id, image_node
 from auryn.ingestors.k8s import ids
 from auryn.ingestors.k8s.model import ParsedManifests
 
@@ -77,7 +77,7 @@ def build_graph(files: list[tuple[str, ParsedManifests]], proj_id: str) -> Itera
             })
             yield GraphEdge("HAS_SERVICE", "File", {"id": fid}, "Service", {"id": sid})
             for ref in dict.fromkeys(w.images):
-                yield from _emit_image(ref)
+                yield image_node(ref)
                 yield GraphEdge("RUNS_IMAGE", "Service", {"id": sid}, "Image", {"id": image_id(ref)})
 
         for ing in parsed.ingresses:
@@ -96,15 +96,3 @@ def build_graph(files: list[tuple[str, ParsedManifests]], proj_id: str) -> Itera
             })
             yield GraphEdge("HAS_INGRESS", "File", {"id": fid}, "Ingress", {"id": iid})
 
-
-def _emit_image(ref: str) -> Iterator[GraphNode]:
-    r = parse_image_ref(ref)
-    yield GraphNode(
-        "Image",
-        {"id": image_id(ref)},
-        {
-            "ref": r.normalized, "registry": r.registry, "repository": r.repository,
-            "tag": r.tag, "digest": r.digest, "resolved": False, "origin": "registry",
-            **({"raw": r.raw} if r.unresolved else {}),
-        },
-    )

@@ -442,6 +442,73 @@ def test_ingest_directory_ingests_and_reports_per_language(falkordb_connection, 
     assert graph.query("MATCH (p:Procedure {name:'GO'}) RETURN p").result_set != []
 
 
+def test_index_repository_takes_its_turn_with_the_repos_syncs(falkordb_connection, graph, tmp_path, monkeypatch):
+    """An agent's `index_repository` writes the project subgraph a commit hook's `auryn sync`
+    writes too, so it ingests under the same per-repo lock (core/sync_lock.py) -- and, being an
+    explicit request, never as the redundant one that steps aside."""
+    import contextlib
+
+    from auryn.core import ingest
+    from auryn.core.project import resolve_project_root
+
+    root = tmp_path / "LocalMixed"
+    _make_mixed_dir(root)
+    events = []
+
+    @contextlib.contextmanager
+    def recorded(local_dir, *, queue_one=True):
+        events.append(("lock", local_dir, queue_one))
+        yield True
+        events.append("unlock")
+
+    real_ingest = ingest.ingest_directory
+    monkeypatch.setattr("auryn.mcp.server.sync_lock", recorded)
+    monkeypatch.setattr(ingest, "ingest_directory", lambda *a, **k: events.append("ingest") or real_ingest(*a, **k))
+
+    result = _call_tool(create_server(falkordb_connection, graph.name), "index_repository", {"path": str(root)})
+
+    assert result.is_error is False
+    assert events == [("lock", resolve_project_root(str(root)), False), "ingest", "unlock"]
+
+
+def test_index_repository_keeps_the_lock_until_a_background_deep_pass_is_done(falkordb_connection, graph, tmp_path, monkeypatch):
+    """With `deep="background"` the tool answers on the fast graph while a thread still deepens it.
+    That thread writes the same project subgraph, so the lock outlives the call: it is released
+    only once this call's deep pass is done -- not held for another repo's that is still running."""
+    import contextlib
+    import threading
+    from types import SimpleNamespace
+
+    from auryn.core import ingest
+
+    unlocked, mine_done, other_done = threading.Event(), threading.Event(), threading.Event()
+
+    @contextlib.contextmanager
+    def recorded(local_dir, *, queue_one=True):
+        yield True
+        unlocked.set()
+
+    def deep_pass(done):  # a background deep pass, tracked the way ingest._spawn_deep tracks one
+        thread = threading.Thread(target=done.wait, args=(30,), daemon=True)
+        thread.start()
+        ingest._deep_threads.append(thread)
+
+    monkeypatch.setattr(ingest, "_deep_threads", [])
+    monkeypatch.setattr("auryn.mcp.server.sync_lock", recorded)
+    monkeypatch.setattr(ingest, "ingest_directory", lambda *a, **k: deep_pass(mine_done) or SimpleNamespace(to_dict=dict))
+    deep_pass(other_done)  # another repo's, started by an earlier call
+
+    result = _call_tool(
+        create_server(falkordb_connection, graph.name), "index_repository", {"path": str(tmp_path), "deep": "background"}
+    )
+
+    assert result.is_error is False
+    assert not unlocked.is_set()  # the tool has answered; its deep pass is still running, the lock still held
+    mine_done.set()
+    assert unlocked.wait(timeout=5)  # released with its own pass, while the other repo's goes on
+    other_done.set()
+
+
 def test_index_repository_bad_path_surfaces_as_a_tool_error(falkordb_connection, graph, tmp_path):
     server = create_server(falkordb_connection, graph.name)
 
@@ -470,3 +537,23 @@ def test_mcp_ingest_wires_resync_trigger_like_the_cli(falkordb_connection, graph
     assert hooks.is_installed(local_dir)
     reg = get_repo(local_dir)
     assert reg is not None and reg.graph_name == graph.name
+
+
+def test_deepening_note_while_a_project_is_shallow(falkordb_connection, graph):
+    # With deep async-by-default, a just-indexed graph can be at depth="fast"; call-resolution tools
+    # and auryn_status must surface a `deepening` note so an agent knows precise call edges may be
+    # missing -- and it must disappear once the deep pass lands (depth="deep").
+    graph.query(
+        "CREATE (p:Project {id:'py://demo', name:'demo', depth:'fast'}), "
+        "(a:Function {id:'a', name:'caller'}), (b:Function {id:'b', name:'helper'}) "
+        "CREATE (a)-[:CALLS]->(b)"
+    )
+    server = create_server(falkordb_connection, graph.name)
+
+    wc = _call_tool(server, "who_calls", {"node_id": "b"}).structured_content
+    assert wc["deepening"]["depth"] == "fast" and "demo" in wc["deepening"]["projects"]
+    assert "deepening" in _call_tool(server, "auryn_status", {}).structured_content
+
+    graph.query("MATCH (p:Project {id:'py://demo'}) SET p.depth = 'deep'")
+    assert "deepening" not in _call_tool(server, "who_calls", {"node_id": "b"}).structured_content
+    assert "deepening" not in _call_tool(server, "auryn_status", {}).structured_content

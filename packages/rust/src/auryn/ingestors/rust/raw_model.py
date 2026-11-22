@@ -55,6 +55,11 @@ class RawFunction:
     return_type: str | None = None
     parameters: list[RawParameter] = field(default_factory=list)  # excludes the self receiver
     calls: list[RawCall] = field(default_factory=list)
+    unresolved_macro_calls: int = 0  # call-like sites inside macro invocations in the body -- the fast
+    # engine can't resolve them (a macro body is a token tree, not parsed expressions), so they produce
+    # no CALLS edge; counted so the function node can flag that its callees may be incomplete (#792)
+    type_parameters: list[str] = field(default_factory=list)  # the fn's own generics (`fn f<T>()` -> T);
+    # a method called on a `T`/`dyn`/`impl` receiver can't be statically dispatched to a concrete method
     is_associated: bool = False  # a method with no self receiver (e.g. `Store::new`)
     self_kind: str | None = None  # "value" (self) | "ref" (&self) | "mut_ref" (&mut self) | None
     has_body: bool = True  # False for a trait's required method (function_signature_item)
@@ -103,6 +108,8 @@ class RawType:
 class RawImpl:
     type_name: str  # the impl's `Self` type, bare simple name (`Store` for `impl Store`)
     trait_name: str | None = None  # implemented trait's simple name; None for an inherent impl
+    type_parameters: list[str] = field(default_factory=list)  # the impl block's own generics (`impl<T>
+    # Foo<T>` -> [T]); a method dispatching on one can't be statically resolved to a concrete method (#792)
     methods: list[RawFunction] = field(default_factory=list)
     line_start: int = 0
     line_end: int = 0

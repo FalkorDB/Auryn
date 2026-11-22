@@ -204,6 +204,19 @@ class GitRepoCache:
             if path.endswith(suffix) and not (excluded_dir_names & set(path.split("/")[:-1]))
         ]
 
+    def list_files_glob(
+        self, sha: str, patterns: tuple[str, ...], excluded_dir_names: set[str]
+    ) -> list[tuple[str, str]]:
+        """Every blob matching any of `patterns` (basename fnmatch; a pattern with a `/` matches the
+        relative path -- see registry.glob_matches), excluding `excluded_dir_names` -- the glob-aware
+        counterpart of `list_files`, over the same cached one-time tree traversal."""
+        from auryn.core.registry import glob_matches
+
+        return [
+            (path, blob_sha) for path, blob_sha in self._all_files(sha)
+            if glob_matches(path, patterns) and not (excluded_dir_names & set(path.split("/")[:-1]))
+        ]
+
     def read_blob(self, blob_sha: str) -> bytes:
         repo = git.Repo(str(self._path))
         return repo.odb.stream(bytes.fromhex(blob_sha)).read()
