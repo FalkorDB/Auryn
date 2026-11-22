@@ -165,6 +165,26 @@ def test_impact_cli_never_leaves_the_git_repo_of_its_target(tmp_path, monkeypatc
     assert (selected, analysed) == ([expected], [["m.py"]])
 
 
+def test_impact_cli_passes_over_a_folder_registered_only_for_its_hooks(tmp_path, monkeypatch):
+    """`auryn hooks enable/disable --repo` registers a folder without indexing it. The search
+    wants a folder with a graph, so such a subfolder doesn't narrow the diff: a change elsewhere
+    in the repo is still checked, not a "No changes" pass for `--fail-on`."""
+    from auryn.core.app_config import set_hook_disabled
+    from auryn.core.project import default_graph_name
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    r = _repo_with_a_change(tmp_path / "repo")
+    (r / "sub").mkdir()
+    set_hook_disabled("some-hook", True, local_dir=str((r / "sub").resolve()))
+    expected = default_graph_name(r.resolve())
+    selected, analysed = _stub_the_graph(monkeypatch, indexed=[expected])
+
+    res = CliRunner().invoke(cli, ["impact", "--json", "--path", str(r / "sub")])
+
+    assert res.exit_code == 0, res.output
+    assert (selected, analysed) == ([expected], [["m.py"]])
+
+
 def test_impact_cli_says_when_the_repo_is_not_indexed(tmp_path, monkeypatch):
     """A repo with changes but no graph: one line saying so, not the server's "empty key" error
     in a traceback."""

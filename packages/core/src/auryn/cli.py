@@ -252,6 +252,15 @@ def _render_impact(report: dict) -> None:
         click.echo("  unmapped files: " + ", ".join(report["unmapped_files"]))
 
 
+def _graph_of(folder) -> str:
+    """The graph `sync` writes for `folder`: its registered name, else the default for it."""
+    from auryn.core.app_config import get_repo
+    from auryn.core.project import default_graph_name
+
+    reg = get_repo(str(folder))
+    return reg.graph_name if reg and reg.graph_name else default_graph_name(folder)
+
+
 @cli.command("impact")
 @click.option("--base", default=None, help="Base git ref (e.g. origin/main). With --head, diffs base..head; alone, base vs the working tree.")
 @click.option("--head", default=None, help="Head git ref (use with --base).")
@@ -278,19 +287,25 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
     from pathlib import Path
 
     from auryn.core import impact as impact_mod
-    from auryn.core.app_config import get_repo, load_config
-    from auryn.core.project import default_graph_name, resolve_project_root
+    from auryn.core.app_config import load_config
+    from auryn.core.project import resolve_project_root
 
     target = resolve_project_root(path)
     try:
-        # The indexed folder the target belongs to: the nearest registered directory from the
-        # target up to the top of ITS git repository, else that top -- so a run from a subfolder
-        # still means the repo. Never above it: a plain folder registered higher up, or an outer
-        # repository around a nested one, is a different source with a different diff.
         top = Path(impact_mod.git_toplevel(str(target))).resolve()
+        if not impact_mod.parse_unified_diff(impact_mod.git_diff(str(top), base, head, staged=staged))[0]:
+            click.echo("No changes in the given range.")  # nothing to check: no graph needed
+            return
+        client = connect_client(_resolve_connection(host, port, username, password, ssl))
+        indexed = client.list_graphs()
+        # The indexed folder the target belongs to: the nearest registered directory with a graph
+        # from the target up to the top of ITS git repository, else that top -- so a run from a
+        # subfolder still means the repo. Never above it: a plain folder registered higher up, or
+        # an outer repository around a nested one, is a different source with a different diff.
+        # A registration alone is no index: `auryn hooks ... --repo` registers a folder it never indexed.
         chain = [target, *target.parents]
         registered = {r.local_dir for r in load_config().repos}
-        root = next((d for d in chain[:chain.index(top) + 1] if str(d) in registered), top)
+        root = next((d for d in chain[:chain.index(top) + 1] if str(d) in registered and _graph_of(d) in indexed), top)
         diff = impact_mod.git_diff(str(root), base, head, staged=staged, relative=True)
     except subprocess.CalledProcessError as e:
         reason = ((e.stderr or "").strip().splitlines() or [str(e)])[0]  # git's own first line
@@ -300,13 +315,10 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
         click.echo("No changes in the given range.")
         return
 
-    config = _resolve_connection(host, port, username, password, ssl)
     # The graph of the repo being diffed, resolved the way `sync` does -- not the CURRENT
     # folder's, which is a different graph (or none) whenever `--path` points elsewhere.
-    reg = get_repo(str(root))
-    graph_name = graph_name or (reg.graph_name if reg and reg.graph_name else default_graph_name(root))
-    client = connect_client(config)
-    if graph_name not in client.list_graphs():  # querying a graph that isn't there is a server error
+    graph_name = graph_name or _graph_of(root)
+    if graph_name not in indexed:  # querying a graph that isn't there is a server error
         raise click.ClickException(
             f"{root} isn't indexed (no graph {graph_name!r}). Index it first: auryn ingest dir {root}")
     graph = client.select_graph(graph_name)
