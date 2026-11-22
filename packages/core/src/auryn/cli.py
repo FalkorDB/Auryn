@@ -252,12 +252,21 @@ def _render_impact(report: dict) -> None:
         click.echo("  unmapped files: " + ", ".join(report["unmapped_files"]))
 
 
+def _graph_of(folder) -> str:
+    """The graph `sync` writes for `folder`: its registered name, else the default for it."""
+    from auryn.core.app_config import get_repo
+    from auryn.core.project import default_graph_name
+
+    reg = get_repo(str(folder))
+    return reg.graph_name if reg and reg.graph_name else default_graph_name(folder)
+
+
 @cli.command("impact")
 @click.option("--base", default=None, help="Base git ref (e.g. origin/main). With --head, diffs base..head; alone, base vs the working tree.")
 @click.option("--head", default=None, help="Head git ref (use with --base).")
 @click.option("--staged", is_flag=True, default=False, help="Use staged changes instead of all uncommitted changes.")
-@click.option("--path", default=".", help="Repository directory to diff (default: current directory).")
-@click.option("--graph-name", default=None, help="Graph to resolve against. Default: one per repo, from CLAUDE_PROJECT_DIR/cwd.")
+@click.option("--path", default=None, help="Repository directory to diff. Default: CLAUDE_PROJECT_DIR, else the current directory.")
+@click.option("--graph-name", default=None, help="Graph to resolve against. Default: the graph of that repository.")
 @click.option("--max-depth", default=4, type=int, show_default=True, help="Max reverse-dependency hops.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw JSON report (for a PR bot).")
 @click.option("--fail-on", type=click.Choice(["none", "any", "cross-service", "endpoint"]), default="none",
@@ -274,19 +283,45 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
     the reverse-dependency closure: callers, API endpoints, tests, and cross-service consumers.
     Use --fail-on to gate a PR in CI (exits non-zero). See auryn/core/impact.py."""
     import json as _json
+    import subprocess
+    from pathlib import Path
 
     from auryn.core import impact as impact_mod
-    from auryn.core.project import default_graph_name
+    from auryn.core.app_config import load_config
+    from auryn.core.project import resolve_project_root
 
-    root = Path(path).expanduser().resolve()
-    diff = impact_mod.git_diff(str(root), base, head, staged=staged)
+    target = resolve_project_root(path)
+    try:
+        top = Path(impact_mod.git_toplevel(str(target))).resolve()
+        if not impact_mod.parse_unified_diff(impact_mod.git_diff(str(top), base, head, staged=staged))[0]:
+            click.echo("No changes in the given range.")  # nothing to check: no graph needed
+            return
+        client = connect_client(_resolve_connection(host, port, username, password, ssl))
+        indexed = client.list_graphs()
+        # The indexed folder the target belongs to: the nearest registered directory with a graph
+        # from the target up to the top of ITS git repository, else that top -- so a run from a
+        # subfolder still means the repo. Never above it: a plain folder registered higher up, or
+        # an outer repository around a nested one, is a different source with a different diff.
+        # A registration alone is no index: `auryn hooks ... --repo` registers a folder it never indexed.
+        chain = [target, *target.parents]
+        registered = {r.local_dir for r in load_config().repos}
+        root = next((d for d in chain[:chain.index(top) + 1] if str(d) in registered and _graph_of(d) in indexed), top)
+        diff = impact_mod.git_diff(str(root), base, head, staged=staged, relative=True)
+    except subprocess.CalledProcessError as e:
+        reason = ((e.stderr or "").strip().splitlines() or [str(e)])[0]  # git's own first line
+        raise click.ClickException(f"couldn't compute git diff in {target}: {reason}") from e
     changed, _deleted = impact_mod.parse_unified_diff(diff)
     if not changed:
         click.echo("No changes in the given range.")
         return
 
-    config = _resolve_connection(host, port, username, password, ssl)
-    graph = connect_client(config).select_graph(graph_name or default_graph_name())
+    # The graph of the repo being diffed, resolved the way `sync` does -- not the CURRENT
+    # folder's, which is a different graph (or none) whenever `--path` points elsewhere.
+    graph_name = graph_name or _graph_of(root)
+    if graph_name not in indexed:  # querying a graph that isn't there is a server error
+        raise click.ClickException(
+            f"{root} isn't indexed (no graph {graph_name!r}). Index it first: auryn ingest dir {root}")
+    graph = client.select_graph(graph_name)
     report = impact_mod.impact_of_diff(graph, changed, max_depth=max_depth)
 
     if as_json:
