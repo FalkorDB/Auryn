@@ -93,6 +93,15 @@ auryn install
 
 This asks for a FalkorDB backend, **local** (bundled server, starts on demand) or **remote** (host, port, credentials), and how to keep the graph fresh (manual, on commit, or on save). It then registers the `auryn` MCP server and skill with every agent it detects. It writes only to `~/.auryn` and the agent's own config. Nothing is written to your repositories.
 
+On Claude Code you can install the plugin instead, with no `pip install` step. It needs [uv](https://docs.astral.sh/uv/) and uses the local backend:
+
+```text
+/plugin marketplace add FalkorDB/Auryn
+/plugin install auryn@auryn
+```
+
+See [claude-plugin/README.md](claude-plugin/README.md) for what it runs and downloads.
+
 Restart your agent and ask:
 
 > **You:** What breaks if I change the signature of `charge_card`?

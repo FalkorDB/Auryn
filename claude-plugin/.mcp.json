@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "auryn": {
+      "command": "uvx",
+      "args": ["--python", "3.12", "--from", "falkordb-auryn[embedded]==0.8.2", "auryn", "mcp"],
+      "alwaysLoad": true
+    }
+  }
+}

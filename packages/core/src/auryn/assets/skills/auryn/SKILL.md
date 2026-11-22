@@ -19,8 +19,9 @@ X", "what does this endpoint/handler do end to end", "list the public API / entr
 ## Workflow
 
 0. **Load the tools if needed.** If the `auryn_*` tools aren't in your tool list, they're
-   deferred — call the `ToolSearch` tool (query "auryn", or
-   `select:mcp__auryn__locate,mcp__auryn__who_calls,mcp__auryn__impact_of`) to load them first.
+   deferred — call the `ToolSearch` tool (query "auryn") to load them first. To load exact
+   tools, use `select:` with the names it lists: `mcp__auryn__locate` after `auryn install`,
+   `mcp__plugin_auryn_auryn__locate` with the Claude Code plugin.
 1. **`auryn_status`** — is the graph built for this repo? If it reports no data, run
    **`index_repository(path=".")`** once (a one-time cost; every query after is cheap). The
    local backend starts on demand, so this just works — no server to launch.

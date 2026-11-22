@@ -1,0 +1,13 @@
+{
+  "name": "auryn",
+  "version": "0.8.2",
+  "description": "Code graph for Claude Code. Indexes your repository into a local FalkorDB graph and answers structural questions (where is X defined, who calls it, what breaks if it changes, how an endpoint runs end to end) in one tool call instead of grep and file reads.",
+  "author": {
+    "name": "FalkorDB",
+    "url": "https://www.falkordb.com"
+  },
+  "homepage": "https://github.com/FalkorDB/Auryn",
+  "repository": "https://github.com/FalkorDB/Auryn",
+  "license": "MIT",
+  "keywords": ["code-graph", "knowledge-graph", "code-intelligence", "static-analysis", "impact-analysis", "falkordb", "mcp"]
+}

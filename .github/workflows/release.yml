@@ -10,6 +10,11 @@ name: release
 #   * Cut a GitHub Release (tag `vX.Y.Z`)  -> builds that version and publishes to PyPI.
 #   * Manually (workflow_dispatch)         -> pick TestPyPI (dry run) or PyPI, and a version.
 #
+# AFTER A PyPI RELEASE: point the Claude Code plugin at it. In claude-plugin/, set `version` in
+# .claude-plugin/plugin.json and the `falkordb-auryn[embedded]==` pin in .mcp.json to the new
+# version, in one PR (tests/test_claude_plugin.py checks they match). Users get a plugin update
+# only when `version` changes, and the pin must already exist on PyPI.
+#
 # ONE-TIME SETUP:
 #   1. On each existing PyPI project, add a GitHub trusted publisher: owner `FalkorDB`,
 #      repository `Auryn`, workflow `release.yml`, environment `pypi`.
