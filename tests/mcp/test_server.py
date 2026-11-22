@@ -537,3 +537,23 @@ def test_mcp_ingest_wires_resync_trigger_like_the_cli(falkordb_connection, graph
     assert hooks.is_installed(local_dir)
     reg = get_repo(local_dir)
     assert reg is not None and reg.graph_name == graph.name
+
+
+def test_deepening_note_while_a_project_is_shallow(falkordb_connection, graph):
+    # With deep async-by-default, a just-indexed graph can be at depth="fast"; call-resolution tools
+    # and auryn_status must surface a `deepening` note so an agent knows precise call edges may be
+    # missing -- and it must disappear once the deep pass lands (depth="deep").
+    graph.query(
+        "CREATE (p:Project {id:'py://demo', name:'demo', depth:'fast'}), "
+        "(a:Function {id:'a', name:'caller'}), (b:Function {id:'b', name:'helper'}) "
+        "CREATE (a)-[:CALLS]->(b)"
+    )
+    server = create_server(falkordb_connection, graph.name)
+
+    wc = _call_tool(server, "who_calls", {"node_id": "b"}).structured_content
+    assert wc["deepening"]["depth"] == "fast" and "demo" in wc["deepening"]["projects"]
+    assert "deepening" in _call_tool(server, "auryn_status", {}).structured_content
+
+    graph.query("MATCH (p:Project {id:'py://demo'}) SET p.depth = 'deep'")
+    assert "deepening" not in _call_tool(server, "who_calls", {"node_id": "b"}).structured_content
+    assert "deepening" not in _call_tool(server, "auryn_status", {}).structured_content

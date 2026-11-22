@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "auryn-bash",
     "auryn-c",
+    "auryn-ci",
     "auryn-compose",
     "auryn-core",
     "auryn-cpp",
@@ -25,6 +26,7 @@ members = [
     "auryn-julia",
     "auryn-k8s",
     "auryn-kotlin",
+    "auryn-kustomize",
     "auryn-oracle",
     "auryn-orm",
     "auryn-php",
@@ -129,6 +131,21 @@ requires-dist = [
 ]
 
 [[package]]
+name = "auryn-ci"
+version = "0.1.0"
+source = { editable = "packages/ci" }
+dependencies = [
+    { name = "auryn-core" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "auryn-core", editable = "packages/core" },
+    { name = "pyyaml", specifier = ">=6.0" },
+]
+
+[[package]]
 name = "auryn-compose"
 source = { editable = "packages/compose" }
 dependencies = [
@@ -158,6 +175,7 @@ dependencies = [
 all = [
     { name = "auryn-bash" },
     { name = "auryn-c" },
+    { name = "auryn-ci" },
     { name = "auryn-compose" },
     { name = "auryn-cpp" },
     { name = "auryn-csharp" },
@@ -172,6 +190,7 @@ all = [
     { name = "auryn-julia" },
     { name = "auryn-k8s" },
     { name = "auryn-kotlin" },
+    { name = "auryn-kustomize" },
     { name = "auryn-oracle", extra = ["live"] },
     { name = "auryn-orm" },
     { name = "auryn-php" },
@@ -188,6 +207,9 @@ bash = [
 ]
 c = [
     { name = "auryn-c" },
+]
+ci = [
+    { name = "auryn-ci" },
 ]
 compose = [
     { name = "auryn-compose" },
@@ -233,6 +255,9 @@ k8s = [
 ]
 kotlin = [
     { name = "auryn-kotlin" },
+]
+kustomize = [
+    { name = "auryn-kustomize" },
 ]
 llm = [
     { name = "anthropic" },
@@ -281,6 +306,8 @@ requires-dist = [
     { name = "auryn-bash", marker = "extra == 'bash'", editable = "packages/bash" },
     { name = "auryn-c", marker = "extra == 'all'", editable = "packages/c" },
     { name = "auryn-c", marker = "extra == 'c'", editable = "packages/c" },
+    { name = "auryn-ci", marker = "extra == 'all'", editable = "packages/ci" },
+    { name = "auryn-ci", marker = "extra == 'ci'", editable = "packages/ci" },
     { name = "auryn-compose", marker = "extra == 'all'", editable = "packages/compose" },
     { name = "auryn-compose", marker = "extra == 'compose'", editable = "packages/compose" },
     { name = "auryn-cpp", marker = "extra == 'all'", editable = "packages/cpp" },
@@ -309,6 +336,8 @@ requires-dist = [
     { name = "auryn-k8s", marker = "extra == 'k8s'", editable = "packages/k8s" },
     { name = "auryn-kotlin", marker = "extra == 'all'", editable = "packages/kotlin" },
     { name = "auryn-kotlin", marker = "extra == 'kotlin'", editable = "packages/kotlin" },
+    { name = "auryn-kustomize", marker = "extra == 'all'", editable = "packages/kustomize" },
+    { name = "auryn-kustomize", marker = "extra == 'kustomize'", editable = "packages/kustomize" },
     { name = "auryn-oracle", marker = "extra == 'oracle'", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'all'", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'oracle-live'", editable = "packages/oracle" },
@@ -339,7 +368,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.2,<2.1" },
     { name = "tomli-w", specifier = ">=1.0" },
 ]
-provides-extras = ["all", "bash", "c", "compose", "cpp", "csharp", "cuda", "docker", "embedded", "events", "go", "grpc", "helm", "http", "java", "julia", "k8s", "kotlin", "llm", "oracle", "oracle-live", "orm", "php", "python", "ruby", "rust", "sql", "sql-all", "swift", "terraform", "typescript"]
+provides-extras = ["all", "bash", "c", "ci", "compose", "cpp", "csharp", "cuda", "docker", "embedded", "events", "go", "grpc", "helm", "http", "java", "julia", "k8s", "kotlin", "kustomize", "llm", "oracle", "oracle-live", "orm", "php", "python", "ruby", "rust", "sql", "sql-all", "swift", "terraform", "typescript"]
 
 [[package]]
 name = "auryn-cpp"
@@ -523,6 +552,21 @@ requires-dist = [
     { name = "auryn-core", editable = "packages/core" },
     { name = "tree-sitter", specifier = ">=0.26.0" },
     { name = "tree-sitter-kotlin", specifier = ">=1.1.0" },
+]
+
+[[package]]
+name = "auryn-kustomize"
+version = "0.1.0"
+source = { editable = "packages/kustomize" }
+dependencies = [
+    { name = "auryn-core" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "auryn-core", editable = "packages/core" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]
@@ -1161,6 +1205,7 @@ source = { editable = "." }
 dependencies = [
     { name = "auryn-bash" },
     { name = "auryn-c" },
+    { name = "auryn-ci" },
     { name = "auryn-compose" },
     { name = "auryn-core" },
     { name = "auryn-cpp" },
@@ -1176,6 +1221,7 @@ dependencies = [
     { name = "auryn-julia" },
     { name = "auryn-k8s" },
     { name = "auryn-kotlin" },
+    { name = "auryn-kustomize" },
     { name = "auryn-oracle" },
     { name = "auryn-orm" },
     { name = "auryn-php" },
@@ -1207,6 +1253,7 @@ sql-all = [
 dev = [
     { name = "auryn-bash" },
     { name = "auryn-c" },
+    { name = "auryn-ci" },
     { name = "auryn-compose" },
     { name = "auryn-core" },
     { name = "auryn-cpp" },
@@ -1222,6 +1269,7 @@ dev = [
     { name = "auryn-julia" },
     { name = "auryn-k8s" },
     { name = "auryn-kotlin" },
+    { name = "auryn-kustomize" },
     { name = "auryn-oracle", extra = ["live"] },
     { name = "auryn-orm" },
     { name = "auryn-php" },
@@ -1244,6 +1292,7 @@ dev = [
 requires-dist = [
     { name = "auryn-bash", editable = "packages/bash" },
     { name = "auryn-c", editable = "packages/c" },
+    { name = "auryn-ci", editable = "packages/ci" },
     { name = "auryn-compose", editable = "packages/compose" },
     { name = "auryn-core", editable = "packages/core" },
     { name = "auryn-core", extras = ["embedded"], marker = "extra == 'embedded'", editable = "packages/core" },
@@ -1260,6 +1309,7 @@ requires-dist = [
     { name = "auryn-julia", editable = "packages/julia" },
     { name = "auryn-k8s", editable = "packages/k8s" },
     { name = "auryn-kotlin", editable = "packages/kotlin" },
+    { name = "auryn-kustomize", editable = "packages/kustomize" },
     { name = "auryn-oracle", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'all'", editable = "packages/oracle" },
     { name = "auryn-oracle", extras = ["live"], marker = "extra == 'oracle-live'", editable = "packages/oracle" },
@@ -1281,6 +1331,7 @@ provides-extras = ["all", "embedded", "oracle-live", "sql-all"]
 dev = [
     { name = "auryn-bash", editable = "packages/bash" },
     { name = "auryn-c", editable = "packages/c" },
+    { name = "auryn-ci", editable = "packages/ci" },
     { name = "auryn-compose", editable = "packages/compose" },
     { name = "auryn-core", editable = "packages/core" },
     { name = "auryn-cpp", editable = "packages/cpp" },
@@ -1296,6 +1347,7 @@ dev = [
     { name = "auryn-julia", editable = "packages/julia" },
     { name = "auryn-k8s", editable = "packages/k8s" },
     { name = "auryn-kotlin", editable = "packages/kotlin" },
+    { name = "auryn-kustomize", editable = "packages/kustomize" },
     { name = "auryn-oracle", extras = ["live"], editable = "packages/oracle" },
     { name = "auryn-orm", editable = "packages/orm" },
     { name = "auryn-php", editable = "packages/php" },

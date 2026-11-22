@@ -455,6 +455,20 @@ class GraphWriter:
         result = self._graph.query(f"MATCH (n:{label} {{id: $id}}) RETURN count(n)", {"id": node_id})
         return result.result_set[0][0] > 0
 
+    def set_if(self, label: str, node_id: str, prop: str, value, guard_prop: str, guard_value) -> bool:
+        """Atomically SET `n.<prop> = value` on the node with this id ONLY if `n.<guard_prop> ==
+        guard_value`, returning whether the guard matched. One GRAPH.QUERY is atomic (FalkorDB/redis is
+        single-threaded), so this is a compare-and-set for a single property. The two-phase deep pass
+        stamps depth="deep" through here guarded on commit_sha: a concurrent ingest that moved the commit
+        while the (background/async) deep pass ran leaves depth at "fast" instead of a stale deep claim --
+        closing the read-then-decide TOCTOU in the depth short-circuit. `prop`/`guard_prop` are
+        format-interpolated, so this is for trusted internal property names only, never user input."""
+        result = self._graph.query(
+            f"MATCH (n:{label} {{id: $id}}) WHERE n.{guard_prop} = $gv SET n.{prop} = $v RETURN count(n)",
+            {"id": node_id, "gv": guard_value, "v": value},
+        )
+        return bool(result.result_set and result.result_set[0][0])
+
     def merge_node(self, node: GraphNode) -> None:
         key_clause = ", ".join(f"{k}: ${k}" for k in node.key)
         params = dict(node.key)
