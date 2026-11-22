@@ -131,7 +131,7 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
     and short of HOOKS when an existing hook isn't a shell script, is a symlink or is disabled
     (see the module docstring)."""
     if not owns_hooks_dir(local_dir):
-        with contextlib.suppress(OSError):  # best effort: the directory may not be ours to write
+        with contextlib.suppress(OSError, ValueError):  # best effort: the directory may not be ours to write
             uninstall(local_dir)  # a block an earlier version put there
         return []
     d = hooks_dir(local_dir)
@@ -170,7 +170,8 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
 
 def uninstall(local_dir) -> None:
     """Remove our block from every hook; delete a hook file that was only ours. A hook that
-    doesn't carry our block is left byte-for-byte as it is. One we may not write doesn't end the
+    doesn't carry our block is left byte-for-byte as it is. One we may not write -- or one whose
+    begin marker lost its end marker, so the line under it may still run a sync -- doesn't end the
     sweep: the hooks after it are cleaned too, then its error is raised."""
     try:
         d = hooks_dir(local_dir)
@@ -185,7 +186,10 @@ def uninstall(local_dir) -> None:
         if text is None or _BEGIN not in text:
             continue
         stripped = _strip_block(text)
-        if stripped == text:  # a begin marker without its end: no block to take out
+        if _BEGIN in stripped:  # a begin marker without its end: the user's lines stay, and it is said
+            failed = failed or ValueError(f"{path}: an auryn begin marker without its end marker -- "
+                                          "remove it by hand")
+        if stripped == text:  # no whole block to take out
             continue
         try:
             if stripped.strip() in _BARE:

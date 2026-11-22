@@ -414,7 +414,8 @@ def install(backend, host, port, username, password, ssl, trigger, embed_opt, ye
 @click.option("--yes", is_flag=True, default=False, help="Skip the confirmation prompt.")
 def uninstall(purge, yes) -> None:
     """Reverse `install`: stop the local server and deregister Auryn from every agent it was
-    registered with. Keeps ~/.auryn (your graphs) unless --purge. Your repos are untouched."""
+    registered with. Keeps ~/.auryn (your graphs) unless --purge. In your repos, only Auryn's
+    resync block comes out of their git hooks."""
     from auryn.core import watcher
     from auryn.core.install import do_uninstall
 
@@ -574,7 +575,7 @@ def _deregister_repo(path, graph_opt, project, graph_name) -> None:
     if local_dir:
         try:
             hooks.uninstall(local_dir)
-        except OSError as e:  # a hook we may not write: say so, and keep the repo on record
+        except (OSError, ValueError) as e:  # a hook we may not write, or a stray marker: say so, keep the repo
             click.echo(f"Could not remove the resync hooks from {local_dir} ({e}); it stays registered.", err=True)
             return
         app_config.unregister_repo(local_dir)

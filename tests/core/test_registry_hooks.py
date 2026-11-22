@@ -120,25 +120,35 @@ def test_a_wait_in_the_users_hook_does_not_wait_for_the_resync(tmp_path):
     assert time.monotonic() - started < 3, "the commit waited for the resync"
 
 
-def test_a_block_without_its_end_marker_does_not_take_the_users_lines_with_it(tmp_path):
+def test_a_block_without_its_end_marker_does_not_take_the_users_lines_with_it(tmp_path, monkeypatch):
     """The end marker deleted by hand: everything after the begin marker read as our block. With
     the block ahead of the user's body that is the user's own code -- uninstall saw a bare
     `#!/bin/sh` left over and deleted the hook. A begin marker with no end bounds nothing now: the
-    hook is left as it is, and a re-install adds one whole block without dropping a line."""
+    hook is left as it is, and a re-install adds one whole block without dropping a line. The line
+    under that marker may still run a sync, so uninstall says so instead of reporting a clean sweep."""
     repo = _init_repo(tmp_path / "r")
     hook = hooks.hooks_dir(repo) / "post-commit"
     broken = "#!/bin/sh\n# >>> auryn resync >>>\n(true >/dev/null 2>&1 &)\necho user-code\n"
     hook.write_text(broken)
     hook.chmod(0o755)
 
-    hooks.uninstall(repo)
+    with pytest.raises(ValueError, match="without its end marker"):
+        hooks.uninstall(repo)
     assert hook.read_text() == broken
 
     hooks.install(repo, ["true"])
     hooks.install(repo, ["true"])
     assert hook.read_text().count("# <<< auryn resync <<<") == 1 and "echo user-code" in hook.read_text()
-    hooks.uninstall(repo)
+    with pytest.raises(ValueError, match="without its end marker"):
+        hooks.uninstall(repo)
     assert hook.read_text() == broken
+
+    from auryn.cli import _deregister_repo
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    app_config.register_repo(app_config.RepoRegistration(local_dir=str(repo)))
+    _deregister_repo(str(repo), None, None, "g")  # `auryn forget`: says so, and keeps the repo on record
+    assert app_config.get_repo(str(repo))
 
 
 def test_install_leaves_a_non_shell_hook_and_a_disabled_hook_as_they_are(tmp_path):
@@ -329,6 +339,9 @@ def test_uninstall_removes_the_hooks_of_every_registered_repo(monkeypatch, tmp_p
 
     monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
     repos = [_init_repo(tmp_path / name) for name in ("a", "b")]
+    users_hook = hooks.hooks_dir(repos[1]) / "post-commit"
+    users_hook.write_text("#!/bin/sh\necho mine\n")
+    users_hook.chmod(0o755)
     for repo in repos:
         app_config.register_repo(app_config.RepoRegistration(local_dir=str(repo)))
         hooks.install(repo, ["true"])
@@ -346,6 +359,7 @@ def test_uninstall_removes_the_hooks_of_every_registered_repo(monkeypatch, tmp_p
     do_uninstall(purge=True, adapters=[])
 
     assert not hooks.is_installed(repos[1])  # one repo failing doesn't strand the next...
+    assert users_hook.read_text() == "#!/bin/sh\necho mine\n"  # ...whose own hook body stays
     assert not (tmp_path / "home").exists()  # ...or the rest of the teardown
 
 
