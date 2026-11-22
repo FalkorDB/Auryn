@@ -102,8 +102,8 @@ edge equivalent) never uses the range index setup_schema() creates on each
 label's `id` -- it plans as "All Node Scan", full stop, regardless of the WHERE
 clause, since FalkorDB's indexes are per-label and an unlabeled match can't
 consult one. That's why _read_node_fingerprints/_read_edge_fingerprints below
-query per-label (see _prefix_range) -- confirmed via GRAPH.EXPLAIN to plan as
-"Node By Index Scan" instead. This timeout is generous headroom for a single
+query per-label (see _owned_ids) -- confirmed via GRAPH.EXPLAIN to plan as a
+"Node By Label Scan" instead. This timeout is generous headroom for a single
 large label's full, unordered read (no sort -- see _RESULTSET_SIZE) on a
 substantially larger repo than what this was profiled against."""
 
@@ -164,26 +164,43 @@ def _fulltext_tokens(query: str) -> list[str]:
     return [t for t in toks if len(t) >= 2 and t not in _FT_STOPWORDS]
 
 
-def _prefix_range(prefix: str) -> tuple[str, str]:
-    """(lo, hi) such that `lo <= s < hi` is exactly equivalent to `s STARTS WITH
-    prefix` -- the standard trick for expressing a prefix match as the inequality
-    a range index can actually use. chr(0xFFFF) is near the top of the codepoint
-    range no real id (built entirely from identifiers, ".", "/", ":", "()", ",")
-    would ever contain, so it's safe as a sentinel upper bound."""
-    return prefix, prefix + chr(0xFFFF)
+def _owned_ids(id_prefix: str) -> dict[str, str]:
+    """Query params selecting exactly the ids `id_prefix` owns: the id itself (`$own`) or one
+    that continues it at a boundary -- `/` (`$sub`: `<proj>/file/...`, `<proj>/module/...`) or `.`
+    (`$dot`: a top-level `<proj>.class.x` / `<proj>.func.f()`, every PL/SQL id). The fingerprint
+    reads use this rather than the indexed range `[prefix, prefix + chr(0xFFFF))` because whatever
+    they return and the target doesn't re-emit gets DELETED, and the range is not a project
+    boundary: it also covers a sibling project (`python://api` ... `python://api2/...`), and
+    FalkorDB 4.x -- the engine falkordblite embeds -- returns wrong rows for an indexed string
+    range when ids differ in letter case. Either way a resync of one project deleted another's
+    nodes. `STARTS WITH` is exact on every engine; it costs the index (a per-label scan + filter,
+    ~1.4x on a 500k-node label shared by 20 projects). A name that itself ends in `/` or `.` is
+    no special case: `cpp://api.` owns `cpp://api./...` and `cpp://api..class.x`, never
+    `cpp://api.2`. Both rules also match another project whose NAME continues this one's at a
+    boundary (`Acme.Core` / `Acme.Core.Tests`, `csharp://Sol` / `csharp://Sol/Core`); the reads
+    drop what that one owns -- see GraphWriter._nested_projects."""
+    return {"own": id_prefix, "sub": id_prefix + "/", "dot": id_prefix + "."}
+
+
+def _owned_by(node_id: str, project_ids: tuple[str, ...]) -> bool:
+    """Whether `node_id` is one of `project_ids` or continues it at a `/` or `.` boundary."""
+    return any(node_id == p or node_id.startswith((p + "/", p + ".")) for p in project_ids)
 
 
 def _node_fingerprint_query(label: str) -> str:
     """read_fingerprints()'s whole node read for `label`, one plain query -- pulled
     out as its own function (rather than inlined in _read_node_fingerprints) so a
     test can GRAPH.EXPLAIN this exact query shape and assert it actually plans as
-    an index scan. Fetches only `id` and the stored `_fingerprint` (see
+    a per-label scan. Fetches only `id` and the stored `_fingerprint` (see
     graph_sync.fingerprint()) rather than full properties(n) -- confirmed
     empirically ~4x faster at realistic scale (properties(n) can include a
     multi-KB `source` text field; a fingerprint is a fixed-size hash regardless).
     No ORDER BY/SKIP/LIMIT: see _RESULTSET_SIZE for why paginating this would be
     worse, not better."""
-    return f"MATCH (n:{label}) WHERE n.id >= $lo AND n.id < $hi RETURN n.id, n._fingerprint"
+    return (
+        f"MATCH (n:{label}) WHERE n.id = $own OR n.id STARTS WITH $sub OR n.id STARTS WITH $dot "
+        "RETURN n.id, n._fingerprint"
+    )
 
 
 # ── system-wide labels (never surfaced to a caller) ────────────────────────────────────
@@ -241,8 +258,8 @@ def _edge_fingerprint_query(from_label: str) -> str:
     target never emits (and drop them entirely if the hook is disabled). The call-placeholder namespaces
     (c/csharp/python/go/rust/...) are each fully re-emitted by their ingestor's resolve, so are safe to diff."""
     return (
-        f"MATCH (a:{from_label}) WHERE a.id >= $lo AND a.id < $hi "
-        "MATCH (a)-[r]->(b) WHERE b.id STARTS WITH $prefix "
+        f"MATCH (a:{from_label}) WHERE a.id = $own OR a.id STARTS WITH $sub OR a.id STARTS WITH $dot "
+        "MATCH (a)-[r]->(b) WHERE b.id = $own OR b.id STARTS WITH $sub OR b.id STARTS WITH $dot "
         "   OR (b.id STARTS WITH 'extern://' AND NOT b.id STARTS WITH 'extern://http/') "
         "   OR b.id STARTS WITH 'image://' "
         f"RETURN type(r), {semantic_label('b')}, a.id, b.id, r._fingerprint"
@@ -653,7 +670,9 @@ class GraphWriter:
 
     def read_fingerprints(self, id_prefix: str, node_labels: list[str]) -> tuple[dict[NodeKey, str], dict[EdgeKey, str]]:
         """The live graph's current (key -> fingerprint) for every node/edge (both
-        endpoints, for edges) whose id starts with `id_prefix` -- the lightweight
+        endpoints, for edges) that `id_prefix` owns -- the id itself and every id that
+        continues it at a `/` or `.` boundary, never a sibling whose name merely starts
+        with it (see _owned_ids) -- the lightweight
         current-state counterpart to a freshly computed target state, for
         graph_sync.compute_delta(). Fetches only `id` and the stored `_fingerprint`
         (see graph_sync.fingerprint()), not full properties -- a node/edge whose
@@ -664,7 +683,7 @@ class GraphWriter:
         spanning two different projects' nodes.
 
         `node_labels` (a project's own NODE_SCHEMAS labels) is required, not
-        discovered, because of how this is queried -- see _prefix_range below.
+        discovered, because of how this is queried -- see _SUBGRAPH_QUERY_TIMEOUT_MS.
 
         Issues one query per (label, node-or-edge) pair concurrently -- these
         reads are all independent and nothing writes to the graph in between, so
@@ -682,12 +701,40 @@ class GraphWriter:
                 node_fingerprints.update(future.result())
             for future in edge_futures:
                 edge_fingerprints.update(future.result())
+            theirs = self._nested_projects(id_prefix)  # after every read has its rows -- see there
+        if theirs:
+            node_fingerprints = {
+                k: fp for k, fp in node_fingerprints.items() if not _owned_by(dict(k[1])["id"], theirs)
+            }
+            edge_fingerprints = {
+                k: fp for k, fp in edge_fingerprints.items()
+                if not (_owned_by(dict(k[2])["id"], theirs) or _owned_by(dict(k[4])["id"], theirs))
+            }
         return node_fingerprints, edge_fingerprints
 
-    def _read_node_fingerprints(self, label: str, id_prefix: str) -> dict[NodeKey, str]:
-        lo, hi = _prefix_range(id_prefix)
+    def _nested_projects(self, id_prefix: str) -> tuple[str, ...]:
+        """Ids of the OTHER projects whose name continues `id_prefix` at a boundary --
+        `Acme.Core.Tests` next to `Acme.Core`, or `csharp://Sol/Core` (a project in solution `Sol`)
+        next to a project that is itself named `Sol`. Every id of such a project matches
+        _owned_ids, shaped just like this project's own `<proj>.class.x` / `<proj>/file/...`; only
+        its Project node tells the two apart. What it owns is left out of the reads (so never
+        diffed away as this project's leftovers) -- where an id could be either's, it stays.
+
+        read_fingerprints looks this up once, AFTER every read has its rows: a language ingestor's
+        sync writes its Project node before its other nodes, so a project another session creates in
+        the meantime is already visible here by the time any of its rows could have been read. The
+        compose, k8s, terraform, helm, kustomize and ci ingestors write it last, so a brand-new
+        project of theirs can still have its first batch read as leftovers."""
+        owned = _owned_ids(id_prefix)
         rows = self._graph.ro_query(
-            _node_fingerprint_query(label), {"lo": lo, "hi": hi}, timeout=_SUBGRAPH_QUERY_TIMEOUT_MS
+            "MATCH (p:Project) WHERE p.id STARTS WITH $sub OR p.id STARTS WITH $dot RETURN p.id",
+            {"sub": owned["sub"], "dot": owned["dot"]},
+        ).result_set
+        return tuple(row[0] for row in rows)
+
+    def _read_node_fingerprints(self, label: str, id_prefix: str) -> dict[NodeKey, str]:
+        rows = self._graph.ro_query(
+            _node_fingerprint_query(label), _owned_ids(id_prefix), timeout=_SUBGRAPH_QUERY_TIMEOUT_MS
         ).result_set
         return {node_key(GraphNode(label, {"id": node_id}, {})): fp for node_id, fp in rows}
 
@@ -697,10 +744,9 @@ class GraphWriter:
         project's own labels as `from_label` in read_fingerprints() above therefore
         covers every edge the project owns exactly once, since every node this
         project ever creates has exactly one of those labels."""
-        lo, hi = _prefix_range(id_prefix)
         rows = self._graph.ro_query(
             _edge_fingerprint_query(from_label),
-            {"lo": lo, "hi": hi, "prefix": id_prefix},
+            _owned_ids(id_prefix),
             timeout=_SUBGRAPH_QUERY_TIMEOUT_MS,
         ).result_set
         return {
