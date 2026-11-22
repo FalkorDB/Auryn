@@ -308,10 +308,15 @@ def _roslyn_sync_at(
     # Swap the tool's root nodes for our canonical ones (full props: repo_uri, ref,
     # dto_name_suffixes) so the Project node matches the tree-sitter engine's exactly.
     body = [item for item in items if not _is_root_item(item)]
-    target_items = _project_items(config, proj_id, target_sha, ref, "deep") + body
+    # Keep the project node at "fast" in the delta; depth is bumped to "deep" atomically AFTER the delta
+    # lands (guarded on commit_sha), so a concurrent ingest that moved the commit can't be overwritten
+    # with a stale deep claim.
+    target_items = _project_items(config, proj_id, target_sha, ref, "fast") + body
     target_items.extend(kendo.extract_ui(repo, target_sha, proj_id, target_items))
-    return _apply(writer, proj_id, target_items, target_sha, started, metrics.get("filesParsed", 0), 0,
-                  diff_extern_edges=diff_extern_edges)
+    result = _apply(writer, proj_id, target_items, target_sha, started, metrics.get("filesParsed", 0), 0,
+                    diff_extern_edges=diff_extern_edges)
+    writer.set_if("Project", proj_id, "depth", "deep", "commit_sha", target_sha)  # atomic depth bump
+    return result
 
 
 def _is_root_item(item: GraphNode | GraphEdge) -> bool:

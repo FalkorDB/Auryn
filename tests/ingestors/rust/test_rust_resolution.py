@@ -250,3 +250,81 @@ def test_ambiguous_type_resolves_deterministically_or_not_at_all():
     targets = {t for (f, t) in dep if "make" in f}
     # `Store` names two project types from unrelated modules -> a single deterministic pick, never both.
     assert targets <= {"a.struct.store", "b.struct.store"} and len(targets) <= 1
+
+
+def test_unresolved_calls_flagged_on_the_function_node():
+    # a resolvable intra-crate call -> 0; a generic-receiver method (type un-nameable) + a macro-internal
+    # call -> counted, so the node flags that its callees may be incomplete (#792)
+    nodes, _ = _resolve({
+        "lib.rs": (
+            "pub fn helper() -> u32 { 1 }\n"
+            "pub fn clean() -> u32 { helper() }\n"
+            'pub fn messy<T>(x: T) { x.mystery_method(); println!("{}", format_val()); }\n'
+        )
+    })
+    fns = _nodes(nodes, "Function")
+    assert fns["clean"].properties["unresolved_calls"] == 0
+    # x.mystery_method() (generic receiver, un-nameable) + format_val() inside println! -> >= 2
+    assert fns["messy"].properties["unresolved_calls"] >= 2
+
+
+def test_generic_qualified_path_call_counts_as_unresolved():
+    # `T::default()` is keyed by the type variable T, not a concrete impl -> incomplete (#792 finding)
+    nodes, _ = _resolve({"lib.rs": "pub fn make<T: Default>() -> T { T::default() }\n"})
+    assert _nodes(nodes, "Function")["make"].properties["unresolved_calls"] >= 1
+
+
+def test_reference_lifetime_receiver_still_flags_generic_dispatch():
+    # receiver `&'a T` must normalize to `T` (lifetime stripped) so the generic dispatch is still counted
+    nodes, _ = _resolve({"lib.rs": "pub fn f<'a, T>(x: &'a T) { x.run(); }\n"})
+    assert _nodes(nodes, "Function")["f"].properties["unresolved_calls"] >= 1
+
+
+def test_impl_block_generic_receiver_is_flagged():
+    # `T` is declared on the impl block, not the method -- dispatch on `x: T` is still unresolved (#792)
+    nodes, _ = _resolve({"lib.rs": (
+        "pub struct Holder<T> { v: T }\n"
+        "impl<T> Holder<T> { pub fn f(&self, x: T) { x.run(); } }\n"
+    )})
+    assert _nodes(nodes, "Method")["f"].properties["unresolved_calls"] >= 1
+
+
+def test_ambiguous_unknown_receiver_name_pick_counts():
+    # two project methods named `run`, receiver type unknown -> the name-based pick is a guess (#792)
+    nodes, _ = _resolve({"lib.rs": (
+        "pub struct A; pub struct B;\n"
+        "impl A { pub fn run(&self) {} }\n"
+        "impl B { pub fn run(&self) {} }\n"
+        "pub fn f() { let x = make(); x.run(); }\n"
+    )})
+    assert _nodes(nodes, "Function")["f"].properties["unresolved_calls"] >= 1
+
+
+def test_dyn_trait_dispatch_resolving_to_project_trait_counts():
+    # `&dyn Run` resolves to the project trait's `run` decl, but the concrete impl is unknown -> count it
+    nodes, _ = _resolve({"lib.rs": (
+        "pub trait Run { fn run(&self); }\n"
+        "pub fn f(x: &dyn Run) { x.run(); }\n"
+    )})
+    assert _nodes(nodes, "Function")["f"].properties["unresolved_calls"] >= 1
+
+
+def test_trait_default_method_self_dispatch_counts():
+    # in a trait DEFAULT method, `self.step()` binds to the trait decl -- the concrete impl is unknown
+    nodes, _ = _resolve({"lib.rs": "pub trait Stepper { fn run(&self) { self.step(); } fn step(&self); }\n"})
+    assert _nodes(nodes, "Method")["run"].properties["unresolved_calls"] >= 1
+
+
+def test_incremental_seed_carries_owner_generics():
+    # findings #792: an emit impl on a generic owner from the SEED must flag dynamic dispatch exactly as a
+    # full ingest would. Without type_parameters on the seeded stub, `self.v.run()` (v: T) would count 0.
+    from auryn.ingestors.rust.raw_model import RawField
+    holder_id = _ROOT_CRATE + "/type/Struct/Holder"
+    idx = resolution.RustGraphIndex()
+    idx.types.append(resolution.make_type_stub(
+        holder_id, "Struct", "Holder", [RawField(name="v", type="T")], type_parameters=["T"]))
+    emit = [parse_source(b"impl Holder { pub fn f(&self) { self.v.run(); } }", "impl.rs")]
+    items = resolution.resolve_incremental(emit, _PROJ, idx)
+    methods = {n.properties.get("name"): n for n in items
+               if type(n).__name__ == "GraphNode" and n.label == "Method"}
+    assert methods["f"].properties["unresolved_calls"] >= 1
