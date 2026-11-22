@@ -169,7 +169,7 @@ def test_uninstall_goes_on_past_an_agent_it_cannot_deregister(tmp_path, monkeypa
     assert [a.name for a in load_config().agents] == ["gone"]
     assert result.exit_code == 1 and "Deregistered from: fake\n" in result.output
     assert "Could not deregister from: gone" in result.output and "Removed ~/.auryn" not in result.output
-    assert "--force" in result.output
+    assert "run `auryn uninstall --purge` again" in result.output and "--force" in result.output  # finishes what was asked
 
     if way_out == "--force":
         result = CliRunner().invoke(cli, ["uninstall", "--yes", "--purge", "--force"])

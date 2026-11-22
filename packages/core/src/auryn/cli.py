@@ -438,7 +438,8 @@ def uninstall(purge, force, yes) -> None:
         raise click.ClickException(
             f"Could not deregister from: {failed} (see the warning above). Kept on record"
             + (", and ~/.auryn with it" if purge else "")
-            + " -- run `auryn uninstall` again once that is fixed, or with --force to forget it anyway.")
+            + f" -- run `auryn uninstall{' --purge' if purge else ''}` again once that is fixed, or with --force"
+            " to forget it anyway.")
     if failed:
         click.echo(f"Forgot without deregistering: {failed} -- remove Auryn from it by hand.", err=True)
     if purge:
