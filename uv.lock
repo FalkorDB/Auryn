@@ -132,7 +132,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-ci"
-version = "0.1.0"
 source = { editable = "packages/ci" }
 dependencies = [
     { name = "auryn-core" },
@@ -556,7 +555,6 @@ requires-dist = [
 
 [[package]]
 name = "auryn-kustomize"
-version = "0.1.0"
 source = { editable = "packages/kustomize" }
 dependencies = [
     { name = "auryn-core" },
