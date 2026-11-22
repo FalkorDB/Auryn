@@ -24,7 +24,12 @@ try:  # Path may be absent in older client versions; degrade gracefully
 except Exception:  # pragma: no cover - defensive
     Path = None
 
-from auryn.core.graph_client import SHARED_NODE_LABEL, first_semantic_label, semantic_label
+from auryn.core.graph_client import (
+    SHARED_EMBEDDING_LABEL,
+    SHARED_NODE_LABEL,
+    first_semantic_label,
+    semantic_label,
+)
 
 DEFAULT_ROOT_LIMIT = 200
 DEFAULT_SEARCH_LIMIT = 50
@@ -251,19 +256,56 @@ def root_nodes(graph: Graph, limit: int = DEFAULT_ROOT_LIMIT) -> list[dict]:
     return roots
 
 
+def node_kinds(graph: Graph) -> list[str]:
+    """Every node kind (dedicated label) the graph holds nodes of, sorted -- the system labels left
+    out. Read from the engine's own label counts (see _meta_stats), so no scan: `db.labels()` alone
+    would also list a label that only an index was ever created on."""
+    stats = _meta_stats(graph)
+    if stats is not None:
+        labels = [label for label, count in stats["label_counts"].items() if count]
+    else:
+        labels = [label for (label,) in graph.ro_query("CALL db.labels() YIELD label RETURN label").result_set]
+    return sorted(label for label in labels if label not in (SHARED_NODE_LABEL, SHARED_EMBEDDING_LABEL))
+
+
+def resolve_kind(graph: Graph, kind: str) -> str | None:
+    """The graph's own label for `kind`, matched case-insensitively ("function" -> "Function"), or
+    None when the graph has no node kind by that name. The system labels are not kinds."""
+    kinds = node_kinds(graph)
+    if kind in kinds:
+        return kind
+    return next((label for label in kinds if label.lower() == kind.strip().lower()), None)
+
+
 def search_nodes(
     graph: Graph, label: str | None, q: str | None, limit: int = DEFAULT_SEARCH_LIMIT
 ) -> list[dict]:
-    rows = graph.ro_query(
-        """
+    """Nodes whose `name` contains `q` (case-insensitive), best match first: an exact name, then a
+    name starting with `q`, then the rest. Within each, a real definition comes before a cross-repo
+    placeholder, then shorter names first, then by name and id, so `limit` never drops an exact
+    match for a longer one. `label` narrows to one node kind (see resolve_kind); a kind the graph
+    doesn't have finds nothing. With no `q`, nodes come back in storage order."""
+    if label is not None:
+        label = resolve_kind(graph, label)
+        if label is None:
+            return []
+    if q is None:
+        query = "MATCH (n) WHERE ($label IS NULL OR $label IN labels(n)) RETURN n LIMIT $limit"
+    else:
+        query = """
         MATCH (n)
         WHERE ($label IS NULL OR $label IN labels(n))
-          AND ($q IS NULL OR (n.name IS NOT NULL AND toLower(n.name) CONTAINS toLower($q)))
+          AND n.name IS NOT NULL AND toLower(n.name) CONTAINS toLower($q)
+        WITH n, toLower(n.name) AS name, toLower($q) AS q
         RETURN n
+        ORDER BY
+          CASE WHEN name = q THEN 0 WHEN name STARTS WITH q THEN 1 ELSE 2 END,
+          CASE WHEN n.resolved = false OR n.id STARTS WITH 'extern://' THEN 1 ELSE 0 END,
+          size(name), n.name, n.id
         LIMIT $limit
-        """,
-        {"label": label, "q": q, "limit": limit},
-        timeout=DEFAULT_QUERY_TIMEOUT_MS,
+        """
+    rows = graph.ro_query(
+        query, {"label": label, "q": q, "limit": limit}, timeout=DEFAULT_QUERY_TIMEOUT_MS
     ).result_set
     return [serialize_node_lean(row[0]) for row in rows]
 

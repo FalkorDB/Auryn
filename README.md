@@ -119,7 +119,7 @@ No raw Cypher, no file dumps, no guessing. One hop, id-backed. Each repo gets it
 |---|---|---|
 | `auryn_status` | read | Is there a graph yet, and what's in it? **Called first.** |
 | `index_repository` / `ingest_repository` | **write** | Build or update the graph for a local dir or git repo. |
-| `locate` | read | Find symbols by name. The entry point: other tools take the `id` it returns. |
+| `locate` | read | Find symbols by name, exact match first. The entry point: other tools take the `id` it returns. |
 | `search_code` | read | Semantic (vector) search by meaning when you don't know the name. On by default — the vector index builds automatically in the background. |
 | `get_context` | read | One node's properties, source, and 1-hop neighbours. |
 | `who_calls` / `callees` | read | Inbound callers / outbound callees within N hops. |

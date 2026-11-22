@@ -90,6 +90,18 @@ def test_locate_finds_seeded_node(falkordb_connection, graph):
     assert result.structured_content["results"][0]["name"] == "TransferEmployee"
 
 
+def test_locate_takes_kind_in_any_case_and_hints_at_an_unknown_one(falkordb_connection, graph):
+    _seed(graph)
+    server = create_server(falkordb_connection, graph.name)
+
+    found = _call_tool(server, "locate", {"name": "Transfer", "kind": "procedure"}).structured_content
+    assert [r["name"] for r in found["results"]] == ["TransferEmployee"] and "hint" not in found
+
+    unknown = _call_tool(server, "locate", {"name": "Transfer", "kind": "Entity"}).structured_content
+    assert unknown["results"] == []
+    assert unknown["hint"] == "no node kind 'Entity' in this graph -- its kinds: Procedure, Table"
+
+
 def test_auryn_status_reports_contents(falkordb_connection, graph):
     _seed(graph)
     server = create_server(falkordb_connection, graph.name)

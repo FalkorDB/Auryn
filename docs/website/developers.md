@@ -126,7 +126,7 @@ tool goes through `GRAPH.RO_QUERY`, so it's structurally incapable of mutating t
 | `auryn_status` | Is a graph built for this repo, and what's in it? |
 | `index_repository(path=".")` | **(write)** Build the graph for a local directory |
 | `ingest_repository(uri, ref)` | **(write)** Build the graph from a git URL |
-| `locate(name, kind?)` | Find a symbol by name → its id (every other tool takes the id) |
+| `locate(name, kind?)` | Find a symbol by name, exact match first → its id (every other tool takes the id) |
 | `who_calls(id, max_depth?)` | Inward call graph |
 | `callees(id, max_depth?)` | Outward call graph |
 | `find_path(from_id, to_id, edge_types?)` | Shortest path between two symbols |
