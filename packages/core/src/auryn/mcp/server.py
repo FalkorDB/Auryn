@@ -533,14 +533,19 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         dependents, `api_endpoints_reached`, `tests_covering`, `cross_service_consumers` (other
         repos co-located in this graph), and `affected` (every dependent with its node `id`, to
         pivot via who_calls/get_context). `flags` calls out cross-service breaks and missing test
-        coverage; `unmapped_files` are changed files with no graph symbols (config/docs). Use this
-        in code review before merging. `graph` picks which graph to resolve against."""
+        coverage; `unmapped_files` are changed files with no graph symbols (config/docs). Only the
+        `+`/`-` lines count, and a change inside a method maps to that method, not its class. A
+        path may carry the repo's folder in front (`payments-lib/src/x.py`, a diff taken above
+        the repo): the match is then that repo's file only. Use this in code review before
+        merging. `graph` picks which graph to resolve against."""
         from auryn.core import impact as impact_mod
 
         g, gname = _read_graph(graph)
+        repo = None
         if diff is None:
             repo = str(resolve_project_root())
             try:
+                repo = impact_mod.git_toplevel(repo)  # git_diff's paths are relative to the top
                 diff = impact_mod.git_diff(repo, base, head)
             except Exception as e:
                 return {"graph": gname, "error": f"couldn't compute git diff in {repo}: {type(e).__name__}: {e}"}
@@ -549,7 +554,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
             return {"graph": gname, "base": base, "head": head,
                     "changed_symbols": [], "impact": {"total_affected": 0},
                     "hint": "empty diff -- nothing changed in the given range."}
-        report = impact_mod.impact_of_diff(g, changed, max_depth=max_depth)
+        report = impact_mod.impact_of_diff(g, changed, max_depth=max_depth, repo=repo)
         return {"graph": gname, "base": base, "head": head, **report}
 
     @tool(read_only, "read", title="Trace an entry point end-to-end")
