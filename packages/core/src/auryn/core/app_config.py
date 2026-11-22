@@ -72,7 +72,7 @@ class Config:
     resync_trigger: str = "commit"  # install-wide default: manual | commit | save
     repos: tuple[RepoRegistration, ...] = ()
     disabled_hooks: tuple[str, ...] = ()  # post hooks turned off machine-wide (see core/registry.py)
-    auto_embed: bool = False  # build/refresh semantic embeddings after every ingest (see embeddings_enabled)
+    embed_mode: str = "background"  # inline | background | off -- how the always-on embed runs (see embedder.embed_mode)
 
 
 def _parse_backend(section: dict) -> Backend:
@@ -121,9 +121,11 @@ def load_config() -> Config:
         if r.get("local_dir")
     )
     disabled_hooks = tuple(data.get("hooks", {}).get("disabled", []))
-    auto_embed = bool(data.get("embeddings", {}).get("auto", False))
+    embed_mode = str(data.get("embeddings", {}).get("mode", "background")).strip().lower()
+    if embed_mode not in ("inline", "background", "off"):
+        embed_mode = "background"  # a stray value must never break an ingest; fall back to the default
     return Config(backend=backend, agents=agents, resync_trigger=trigger, repos=repos,
-                  disabled_hooks=disabled_hooks, auto_embed=auto_embed)
+                  disabled_hooks=disabled_hooks, embed_mode=embed_mode)
 
 
 def load_backend() -> Backend:
@@ -166,8 +168,8 @@ def save_config(config: Config) -> None:
         doc["resync"] = {"trigger": config.resync_trigger}
     if config.disabled_hooks:
         doc["hooks"] = {"disabled": list(config.disabled_hooks)}
-    if config.auto_embed:
-        doc["embeddings"] = {"auto": True}
+    if config.embed_mode and config.embed_mode != "background":
+        doc["embeddings"] = {"mode": config.embed_mode}  # only persist a non-default mode
     if config.repos:
         doc["repo"] = [
             {k: v for k, v in {
@@ -198,14 +200,15 @@ def set_resync_trigger(trigger: str) -> None:
     save_config(replace(load_config(), resync_trigger=trigger))
 
 
-def set_auto_embed(enabled: bool) -> None:
-    """Persist the install-wide auto-embed setting: when on, every ingest/resync builds and
-    refreshes the semantic vector index (see embeddings.embedder.embeddings_enabled). Durable in
-    ~/.auryn/config.toml, so it survives shells, venvs, and MCP-server restarts -- unlike the
-    AURYN_EMBED env var, which remains a per-run override."""
+def set_embed_mode(mode: str) -> None:
+    """Persist how auto-embed runs: ``inline`` (synchronous, blocks the ingest), ``background``
+    (hand to the detached embed daemon; the default), or ``off``. Durable in ~/.auryn/config.toml;
+    AURYN_EMBED_MODE is the per-run override (see embeddings.embedder.embed_mode)."""
     from dataclasses import replace
 
-    save_config(replace(load_config(), auto_embed=bool(enabled)))
+    if mode not in ("inline", "background", "off"):
+        raise ValueError(f"embed mode must be one of ('inline', 'background', 'off'), got {mode!r}")
+    save_config(replace(load_config(), embed_mode=mode))
 
 
 def register_repo(reg: RepoRegistration) -> None:

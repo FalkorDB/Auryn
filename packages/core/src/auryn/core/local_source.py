@@ -124,6 +124,27 @@ class LocalDirectorySource:
             out.append((rel, content_hash))
         return out
 
+    def list_files_glob(
+        self, sha: str, patterns: tuple[str, ...], excluded_dir_names: set[str]
+    ) -> list[tuple[str, str]]:
+        """Every file matching any of `patterns` (basename fnmatch; a pattern with a `/` matches the
+        relative path -- see registry.glob_matches), with the same dir-exclusion and user-filter rules
+        as `list_files`. The glob-aware counterpart (basename variants + directory/exact anchors a bare
+        suffix can't express) used by detection and the ingestors."""
+        from auryn.core.registry import glob_matches
+
+        self._walk()
+        out: list[tuple[str, str]] = []
+        for rel, content_hash in self._entries:
+            if not glob_matches(rel, patterns):
+                continue
+            if excluded_dir_names & set(rel.split("/")[:-1]):
+                continue
+            if not self._filter.allows(rel):
+                continue
+            out.append((rel, content_hash))
+        return out
+
     def read_blob(self, content_hash: str) -> bytes:
         """The bytes of the file with this content hash. Since the key IS the content
         hash, identical files share a key and any of them serves the same bytes."""

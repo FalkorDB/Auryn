@@ -258,8 +258,7 @@ def create_app(client: FalkorDB, host: str = "127.0.0.1") -> Flask:
         # The only endpoint besides git-sync that does real I/O beyond a Cypher
         # query: it fetches from the remote so the branch/tag list is current,
         # not whatever this cache last had. Still never writes to the graph.
-        from auryn.core.git_source import GitRepoCache
-        from auryn.ingestors.csharp.git_sync import repos_cache_dir
+        from auryn.core.git_source import GitRepoCache, repos_cache_dir
 
         project_id = request.args.get("project_id")
         if not project_id:

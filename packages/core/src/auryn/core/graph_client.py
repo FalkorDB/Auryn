@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -21,10 +22,19 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # annotations only (module has `from __future__ import annotations`) -- see connect_client
     from falkordb import FalkorDB, Graph
-from redis.exceptions import ResponseError
+from redis.exceptions import RedisError, ResponseError
 
 from auryn.core.graph_model import GraphEdge, GraphNode, NodeSchema
-from auryn.core.graph_sync import EdgeKey, GraphDelta, NodeKey, edge_key, fingerprint, node_key
+from auryn.core.graph_sync import (
+    SYNC_MARKER,
+    EdgeKey,
+    GraphDelta,
+    NodeKey,
+    edge_key,
+    fingerprint,
+    node_key,
+    unstamped,
+)
 from auryn.core.instrument import phase
 
 logger = logging.getLogger(__name__)
@@ -108,6 +118,21 @@ redis.Redis client, which pools connections and is safe for concurrent use acros
 threads (confirmed empirically). Capped rather than one-worker-per-label since
 FalkorDB is a single server process -- more threads than this stopped helping in
 testing and just adds contention."""
+
+_INDEX_BUILD_TIMEOUT_S = 300.0
+"""How long await_indexes() waits for FalkorDB to finish building an index it just created.
+The build runs in the background after CREATE INDEX returns, and a search against the index
+meanwhile returns NOTHING. That gap is why a search right after an embed pass came back empty --
+on a loaded CI runner even for three nodes. Measured with the tests' small fake vectors it builds
+about 14k nodes a second on a laptop (~6 ms for 300 nodes, ~0.4 s for 6,000); real 384- or
+768-dimension vectors build slower. Five minutes is headroom, not a guarantee: past it the pass
+reports the index as still building."""
+
+_INDEX_POLL_INTERVAL_S = 0.02
+_INDEX_POLL_MAX_INTERVAL_S = 1.0
+"""await_indexes() looks every 20 ms at first -- a small index is built within a look or two --
+and doubles the pause up to a second, so a long build costs a few hundred `db.indexes()` calls
+rather than thousands."""
 
 _WRITE_BATCH_SIZE = 2000
 """One UNWIND-based write per this many entities rather than one query per entity --
@@ -200,12 +225,14 @@ def _edge_fingerprint_query(from_label: str) -> str:
     system labels (semantic_label) so the edge fingerprint key matches the semantic to_label the
     target items carry -- otherwise every edge would look changed.
 
-    The target filter admits two id spaces: this project's own prefix (its internal edges) AND the
-    `extern://<lang>/` call placeholders (ADR 0004 -- libc/BCL/framework/cross-repo). A placeholder lives
-    OUTSIDE every project prefix, yet a `CALLS -> extern://` edge is AUTHORED by this project (its source
-    is in-prefix) and so must be diffed here -- otherwise a caller that drops an unresolved call leaves a
-    stale placeholder edge the full-recompute diff never removes (incremental != full; the authored
-    engine's read_authored_fingerprints already reads any target, so this keeps the two paths consistent).
+    The target filter admits three id spaces: this project's own prefix (its internal edges), the
+    `extern://<lang>/` call placeholders (ADR 0004 -- libc/BCL/framework/cross-repo), and the
+    `image://` deployment-tier hub (ADR 0007). A placeholder/hub node lives OUTSIDE every project
+    prefix, yet a `CALLS -> extern://` or `BASED_ON -> image://` edge is AUTHORED by this project (its
+    source is in-prefix) and fully re-emitted each recompute, so it must be diffed here -- otherwise a
+    caller that drops an unresolved call (or a Dockerfile that changes its `FROM`) leaves a stale edge
+    the full-recompute diff never removes. Both the `extern://` and `image://` target NODES are shared
+    and GC'd elsewhere (the linkage reconciler / the deploy stitch), not by this per-project diff.
 
     Two id spaces are deliberately still EXCLUDED: (1) a reconciled cross-repo edge (source here, target a
     DIFFERENT real project), owned by the linkage reconciler not this per-project diff; (2) `extern://http/`
@@ -217,6 +244,7 @@ def _edge_fingerprint_query(from_label: str) -> str:
         f"MATCH (a:{from_label}) WHERE a.id >= $lo AND a.id < $hi "
         "MATCH (a)-[r]->(b) WHERE b.id STARTS WITH $prefix "
         "   OR (b.id STARTS WITH 'extern://' AND NOT b.id STARTS WITH 'extern://http/') "
+        "   OR b.id STARTS WITH 'image://' "
         f"RETURN type(r), {semantic_label('b')}, a.id, b.id, r._fingerprint"
     )
 
@@ -355,7 +383,9 @@ class GraphWriter:
         try:
             self._graph.create_node_vector_index(label, prop, dim=dim, similarity_function=similarity)
             logger.debug("Created vector index on :%s(%s) dim=%d %s", label, prop, dim, similarity)
-        except ResponseError:
+        except ResponseError as e:
+            if "already" not in str(e).lower():  # a real failure, not the idempotent "already indexed"
+                raise  # don't swallow it -- a missing index must not be reported as ready (await_indexes)
             logger.debug("Vector index on :%s(%s) already exists", label, prop)
 
     def drop_vector_index(self, label: str, prop: str) -> None:
@@ -375,8 +405,38 @@ class GraphWriter:
         try:
             self._graph.create_node_fulltext_index(label, *props)
             logger.debug("Created full-text index on :%s(%s)", label, ", ".join(props))
-        except ResponseError:
+        except ResponseError as e:
+            if "already" not in str(e).lower():  # a real failure, not the idempotent "already indexed"
+                raise  # don't swallow it -- a missing index must not be reported as ready (await_indexes)
             logger.debug("Full-text index on :%s already exists", label)
+
+    def await_indexes(self, label: str, timeout: float = _INDEX_BUILD_TIMEOUT_S) -> bool:
+        """Block until every node index on :label is built: True once they all are, False if
+        `timeout` seconds ran out first -- or if the label has no index at all (nothing is
+        building, so nothing will become ready), or its state can't be read. FalkorDB returns
+        from CREATE INDEX at once and populates the index in the background; until `db.indexes()`
+        reports it OPERATIONAL, a vector or full-text query against it comes back EMPTY -- not
+        partial (see _INDEX_BUILD_TIMEOUT_S)."""
+        deadline = time.monotonic() + timeout
+        pause = _INDEX_POLL_INTERVAL_S
+        while True:
+            try:
+                rows = self._graph.ro_query(
+                    "CALL db.indexes() YIELD label, entitytype, status "
+                    "WHERE label = $label AND entitytype = 'NODE' RETURN status", {"label": label}
+                ).result_set
+            except RedisError as e:  # a server whose db.indexes() reports no status, a dropped connection
+                logger.warning("Can't read the state of the indexes on :%s (%s)", label, e)
+                return False
+            if not rows:
+                return False
+            if all(status == "OPERATIONAL" for (status,) in rows):
+                return True
+            if time.monotonic() >= deadline:
+                logger.warning("Indexes on :%s still building after %.0fs", label, timeout)
+                return False
+            time.sleep(max(0.0, min(pause, deadline - time.monotonic())))  # never past the deadline
+            pause = min(pause * 2, _INDEX_POLL_MAX_INTERVAL_S)
 
     def query(self, cypher: str, params: dict | None = None):
         """Escape hatch for passes that need arbitrary Cypher (reads, or targeted
@@ -394,6 +454,20 @@ class GraphWriter:
         graph already has what they need before writing dangling edges to it."""
         result = self._graph.query(f"MATCH (n:{label} {{id: $id}}) RETURN count(n)", {"id": node_id})
         return result.result_set[0][0] > 0
+
+    def set_if(self, label: str, node_id: str, prop: str, value, guard_prop: str, guard_value) -> bool:
+        """Atomically SET `n.<prop> = value` on the node with this id ONLY if `n.<guard_prop> ==
+        guard_value`, returning whether the guard matched. One GRAPH.QUERY is atomic (FalkorDB/redis is
+        single-threaded), so this is a compare-and-set for a single property. The two-phase deep pass
+        stamps depth="deep" through here guarded on commit_sha: a concurrent ingest that moved the commit
+        while the (background/async) deep pass ran leaves depth at "fast" instead of a stale deep claim --
+        closing the read-then-decide TOCTOU in the depth short-circuit. `prop`/`guard_prop` are
+        format-interpolated, so this is for trusted internal property names only, never user input."""
+        result = self._graph.query(
+            f"MATCH (n:{label} {{id: $id}}) WHERE n.{guard_prop} = $gv SET n.{prop} = $v RETURN count(n)",
+            {"id": node_id, "gv": guard_value, "v": value},
+        )
+        return bool(result.result_set and result.result_set[0][0])
 
     def merge_node(self, node: GraphNode) -> None:
         key_clause = ", ".join(f"{k}: ${k}" for k in node.key)
@@ -635,9 +709,15 @@ class GraphWriter:
         }
 
     def apply_delta(self, delta: GraphDelta) -> None:
+        # The node carrying SYNC_MARKER is what the next sync short-circuits on (see
+        # graph_sync.SYNC_MARKER): its stamp is cleared before anything else is written, and the
+        # node is merged whole -- stamp included -- only once the rest of the delta is applied.
+        markers = [n for n in delta.nodes_to_upsert if SYNC_MARKER in n.properties]
         with phase("write"):
+            if markers:
+                self.merge_nodes([unstamped(n) for n in markers])
             if delta.nodes_to_upsert:
-                self.merge_nodes(delta.nodes_to_upsert)
+                self.merge_nodes([n for n in delta.nodes_to_upsert if SYNC_MARKER not in n.properties])
                 # Content-changed nodes keep their now-stale embedding through the merge (it isn't
                 # in the ingestor's property set) -- clear it so the worker re-embeds. New nodes
                 # in this set have no embedding, so clearing them is a no-op.
@@ -648,6 +728,8 @@ class GraphWriter:
                 self.delete_edges(delta.edges_to_remove)
             if delta.nodes_to_remove:
                 self.delete_nodes(delta.nodes_to_remove)
+            if markers:
+                self.merge_nodes(markers)
 
     # -- embeddings (semantic search) -------------------------------------------------------
     #
@@ -661,19 +743,27 @@ class GraphWriter:
     EMBEDDING_PROPERTY = "embedding"
     FULLTEXT_PROPERTIES = ("name", "doc")  # fields the lexical (full-text) ranker indexes
 
-    def write_embeddings(self, items: list[tuple[str, str, list[float]]]) -> None:
-        """Attach vectors to existing nodes. `items` is (kind_label, node_id, vector) triples;
-        each node is matched by its own kind label + id (index-backed) and gains the shared marker
-        label + `embedding` property. Grouped by kind label and batched (Cypher can't parametrize
-        a label), one UNWIND write per chunk."""
-        by_label: dict[str, list[tuple[str, list[float]]]] = defaultdict(list)
-        for kind_label, node_id, vector in items:
-            by_label[kind_label].append((node_id, vector))
+    def write_embeddings(self, items: list[tuple[str, str, list[float], str | None]]) -> None:
+        """Attach vectors to existing nodes. `items` is (kind_label, node_id, vector, fingerprint)
+        tuples; each node is matched by its own kind label + id (index-backed) and gains the shared
+        marker label + `embedding` property. Grouped by kind label and batched (Cypher can't
+        parametrize a label), one UNWIND write per chunk.
+
+        The write is **guarded by the content fingerprint** observed when the document was built:
+        `coalesce(n._fingerprint,'') = row.fp`. If the node's content changed in between -- e.g. a
+        concurrent resync re-merged it (new `_fingerprint`) and cleared its embedding -- the match
+        fails and the now-stale vector is dropped rather than marking the node done, so it stays
+        pending for the next pass. (Nodes written without a fingerprint, e.g. in tests, compare
+        '' = '' and still take the vector.)"""
+        by_label: dict[str, list[tuple[str, list[float], str | None]]] = defaultdict(list)
+        for kind_label, node_id, vector, fingerprint in items:
+            by_label[kind_label].append((node_id, vector, fingerprint))
         for kind_label, group in by_label.items():
             for chunk in _chunked(group, _WRITE_BATCH_SIZE):
-                rows = [{"id": nid, "vec": list(vec)} for nid, vec in chunk]
+                rows = [{"id": nid, "vec": list(vec), "fp": fp or ""} for nid, vec, fp in chunk]
                 query = (
                     f"UNWIND $rows AS row MATCH (n:{kind_label} {{id: row.id}}) "
+                    "WHERE coalesce(n._fingerprint, '') = row.fp "
                     f"SET n:{self.SHARED_EMBEDDING_LABEL}, n.{self.EMBEDDING_PROPERTY} = vecf32(row.vec)"
                 )
                 self._graph.query(query, {"rows": rows})

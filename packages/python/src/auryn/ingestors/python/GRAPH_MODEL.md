@@ -82,12 +82,22 @@ Containment (`HAS_PACKAGE`/`HAS_SUBPACKAGE`/`HAS_MODULE`/`HAS_CLASS`/`HAS_FUNCTI
 | `CALLS` | `resolution`, `receiver_type`, `argument_types`, `type_arguments` |
 | `RETURNS` | `resolution` — only when the return type resolves to a local class |
 
-A `CALLS` edge is normally `Function`/`Method` → `Function`/`Method`. The one exception: a
-module's **top-level (module-scope) call statements** — a script's driver code, e.g. `main()`
-under `if __name__ == "__main__":` — originate a `CALLS` edge from the `Module` (or `Package`,
-for an `__init__.py`) node itself. So the `Module`/`Package` node is the only non-callable that
-can be a `CALLS` source; calls inside a `def`/`class`/`lambda` belong to their own node, never
-the module. (`argument_types`/`type_arguments` stay `[]` as for any call.)
+A `CALLS` edge normally originates at a `Function`/`Method` and targets a `Function`/`Method`.
+Refinements:
+- **Constructor targets.** `Cls()` edges to the class's `__init__` `Method` when it defines one,
+  else to the **`Class`** node itself (`resolution="constructor"`) — so a class with no local
+  `__init__` (a default or a purely inherited constructor) still records the construction. The
+  `Class` node is therefore also a valid `CALLS` target.
+- **Module-scope calls.** A module's top-level call statements — a script's driver code, e.g.
+  `main()` under `if __name__ == "__main__":` — originate a `CALLS` edge from the `Module` (or
+  `Package`, for an `__init__.py`) node itself.
+- **Lambdas & nested defs.** Calls inside a `lambda` are attributed to the **enclosing** scope (a
+  lambda is anonymous — it has no node of its own). A nested `def` *is* its own `Function` node
+  (reached via `HAS_NESTED_FUNCTION`), so its calls originate there and `who_calls` finds callers
+  inside closures / factory-registered handlers. Calls inside a nested `class`/method belong to
+  that node.
+
+(`argument_types`/`type_arguments` stay `[]` as for any call.)
 
 Endpoints of semantic edges are **always project-local nodes**; external/stdlib types live
 only in string properties (`bases`, `mro`, `return_type`).
