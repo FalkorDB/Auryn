@@ -141,10 +141,9 @@ def test_impact_cli_resolves_the_graph_of_the_repo_it_diffs(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("registered_above", ["a plain folder", "an outer repository"])
 def test_impact_cli_never_leaves_the_git_repo_of_its_target(tmp_path, monkeypatch, registered_above):
-    """The search for the indexed folder stops at the top of the target's own repository. A plain
-    folder registered above it made the command fail ("not a git repository"); an outer
-    repository around a nested one got diffed instead -- "No changes", a silent pass for
-    `--fail-on`. Either way the target's own repo is the one diffed and checked."""
+    """The search for the indexed folder stops at the top of the target's own repository: a plain
+    folder registered above it, or an outer repository around a nested one, is never the one
+    diffed and checked -- the target's own repo is."""
     from auryn.core.app_config import RepoRegistration, register_repo
     from auryn.core.project import default_graph_name
 
