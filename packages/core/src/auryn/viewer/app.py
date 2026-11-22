@@ -30,6 +30,13 @@ def _is_loopback(name: str) -> bool:
         return False
 
 
+def _host_name(host: str) -> str:
+    """The name in a Host header -- `name`, `name:port`, `[v6]` or `[v6]:port` -- without its port
+    or brackets, in lower case, and without a trailing dot (`localhost.` is `localhost`)."""
+    name = host[: host.index("]") + 1] if host.startswith("[") and "]" in host else host.rsplit(":", 1)[0]
+    return name.strip("[]").lower().removesuffix(".")
+
+
 def _binds_loopback(host: str) -> bool:
     """Whether binding to `host` can land on loopback, resolved the way the OS resolves a bind
     address -- so `127.1`, `2130706433`, `0x7f.1` or a hosts-file alias count, not only the
@@ -54,17 +61,16 @@ def create_app(client: FalkorDB, host: str = "127.0.0.1") -> Flask:
     app = Flask(__name__, static_folder="static", static_url_path="")
 
     if _binds_loopback(host):
-        bind_name = host.strip("[]").lower()
+        bind_name = host.strip("[]").lower().removesuffix(".")  # a bind address has no port
         # Bound to loopback the viewer is this machine's only -- but a web page can still point its
         # OWN name at 127.0.0.1 (DNS rebinding) and then read every graph, or POST git-sync, as
         # same-origin. Such a request carries the page's name in Host, so serve loopback names only.
         # Bound anywhere else (`--host 0.0.0.0`) it was exposed on purpose: no check.
         @app.before_request
         def _loopback_host_only():
-            name = request.host  # `name`, `name:port`, `[v6]` or `[v6]:port`
-            name = name[: name.index("]") + 1] if name.startswith("[") and "]" in name else name.rsplit(":", 1)[0]
+            name = _host_name(request.host)
             # The bound name itself is fine too (e.g. a hosts-file alias the user chose).
-            if not _is_loopback(name) and name.strip("[]").lower() != bind_name:
+            if not _is_loopback(name) and name != bind_name:
                 abort(403)
 
     @app.get("/")

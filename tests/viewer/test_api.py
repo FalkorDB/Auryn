@@ -61,7 +61,7 @@ def test_loopback_viewer_serves_loopback_host_names_only(falkordb_connection):
     name in Host. Bound to loopback (the default) it answers only to loopback names; bound
     elsewhere on purpose (`--host 0.0.0.0`) it serves whatever name it is reached under."""
     client = create_app(falkordb_connection).test_client()
-    for host in ("localhost", "LOCALHOST:8080", "127.0.0.1:8080", "127.0.0.2:8080", "[::1]:8080", "[::1]"):
+    for host in ("localhost", "LOCALHOST:8080", "localhost.:8080", "127.0.0.1:8080", "127.0.0.2:8080", "[::1]:8080", "[::1]"):
         assert client.get("/api/graphs", headers={"Host": host}).status_code == 200, host
     for host in ("evil.example", "evil.example:8080", "localhost.evil.example:8080", "10.0.0.5:8080"):
         assert client.get("/api/graphs", headers={"Host": host}).status_code == 403, host
