@@ -120,7 +120,7 @@ def view(
     from auryn.viewer.app import create_app
 
     config = _resolve_connection(falkordb_host, falkordb_port, falkordb_username, falkordb_password, falkordb_ssl)
-    app = create_app(connect_client(config))
+    app = create_app(connect_client(config), host)
     click.echo(f"Serving graph viewer on http://{host}:{port}")
     app.run(host=host, port=port)
 
@@ -1167,7 +1167,7 @@ def quickstart(path: str | None, db_path: str | None, graph_name: str, project_n
     # up (a fraction of a second later) -- a refresh covers the rare bind race.
     if not no_open:
         click.launch(url)
-    create_app(client).run(host=host, port=port)
+    create_app(client, host).run(host=host, port=port)
 
 
 @cli.command("enrich")

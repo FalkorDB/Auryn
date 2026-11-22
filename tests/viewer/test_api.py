@@ -56,6 +56,44 @@ def test_list_graphs_includes_seeded_graph(tmp_path, graph, falkordb_connection)
     assert graph_name in resp.get_json()
 
 
+def test_loopback_viewer_serves_loopback_host_names_only(falkordb_connection):
+    """DNS rebinding: a page that resolves its own name to 127.0.0.1 reaches the viewer with THAT
+    name in Host. Bound to loopback (the default) it answers only to loopback names; bound
+    elsewhere on purpose (`--host 0.0.0.0`) it serves whatever name it is reached under."""
+    client = create_app(falkordb_connection).test_client()
+    for host in ("localhost", "LOCALHOST:8080", "localhost.:8080", "127.0.0.1:8080", "127.0.0.2:8080", "[::1]:8080", "[::1]"):
+        assert client.get("/api/graphs", headers={"Host": host}).status_code == 200, host
+    for host in ("evil.example", "evil.example:8080", "localhost.evil.example:8080", "10.0.0.5:8080"):
+        assert client.get("/api/graphs", headers={"Host": host}).status_code == 403, host
+    assert b"Host not allowed" in client.get("/api/graphs", headers={"Host": "evil.example"}).data  # says why
+
+    # a loopback bind is one whatever its spelling -- the guard must not depend on the literal
+    for bind in ("localhost", "127.0.0.2", "::1", "0:0:0:0:0:0:0:1"):
+        other = create_app(falkordb_connection, bind).test_client()
+        assert other.get("/api/graphs", headers={"Host": "evil.example:8080"}).status_code == 403, bind
+        assert other.get("/api/graphs", headers={"Host": "127.0.0.1:8080"}).status_code == 200, bind
+
+    # ...including spellings only the OS resolver accepts (all bind 127.0.0.1); an unresolvable
+    # bind name fails closed
+    for bind in ("127.1", "2130706433", "0x7f.1", "no-such-host.invalid"):
+        other = create_app(falkordb_connection, bind).test_client()
+        assert other.get("/api/graphs", headers={"Host": "evil.example:8080"}).status_code == 403, bind
+        assert other.get("/api/graphs", headers={"Host": f"{bind}:8080"}).status_code == 200, bind
+
+    exposed = create_app(falkordb_connection, "0.0.0.0").test_client()
+    assert exposed.get("/api/graphs", headers={"Host": "box.lan:8080"}).status_code == 200
+
+
+def test_an_ipv4_mapped_loopback_bind_keeps_the_host_check(falkordb_connection, monkeypatch):
+    """`--host ::ffff:127.0.0.1` binds IPv4 loopback, but the `ipaddress` of older Python 3.12
+    releases calls that address not loopback (as patched here). The check reads its IPv4 form."""
+    import ipaddress
+
+    monkeypatch.setattr(ipaddress.IPv6Address, "is_loopback", property(lambda self: self._ip == 1))
+    client = create_app(falkordb_connection, "::ffff:127.0.0.1").test_client()
+    assert client.get("/api/graphs", headers={"Host": "evil.example:8080"}).status_code == 403
+
+
 def test_overview_reports_correct_counts(tmp_path, graph, falkordb_connection):
     client, graph_name = _seeded_client(tmp_path, graph, falkordb_connection)
 
