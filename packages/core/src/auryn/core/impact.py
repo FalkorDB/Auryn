@@ -7,11 +7,11 @@ Turns a git diff into a blast-radius report:
      symbols -- and enrich it with API endpoints reached, tests covering it, and cross-service
      consumers (`impact_of_diff`).
 
-Reuses the same edge set as graph_queries.impact_of and the graph's existing `line_start`/
-`line_end` + cross-repo id-prefix convention; only the diff->symbol mapping and report assembly
-are new. The symbol mapping handles the three ways ingestors attach a file to a symbol: a
-`file_path` on the symbol itself (C/C++/TS), a containing `Module`/`File` via `HAS_*` (Python,
-PL/SQL), or an incoming `DEFINED_IN` (Go/Java/Rust/PHP).
+Reuses graph_queries.impact_of's edge set (minus the async hops, see _DEPENDENCY_EDGE_TYPES) and
+the graph's existing `line_start`/`line_end` + cross-repo id-prefix convention; only the
+diff->symbol mapping and report assembly are new. The symbol mapping handles the three ways
+ingestors attach a file to a symbol: a `file_path` on the symbol itself (C/C++/TS), a containing
+`Module`/`File` via `HAS_*` (Python, PL/SQL), or an incoming `DEFINED_IN` (Go/Java/Rust/PHP).
 """
 
 from __future__ import annotations
@@ -21,12 +21,16 @@ import subprocess
 
 from auryn.core.graph_client import semantic_label
 from auryn.core.graph_client import GraphWriter
-from auryn.core.graph_queries import DEFAULT_IMPACT_EDGE_TYPES
+from auryn.core.graph_queries import ASYNC_EDGE_TYPES, DEFAULT_IMPACT_EDGE_TYPES
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _FULL_SPAN = (0, 10**9)  # a deleted file: treat every symbol it held as changed
 _DEFAULT_MAX_DEPTH = 4
 _DEFAULT_LIMIT = 500
+# The reverse-dependency walk reads every edge as "dep uses the changed symbol". An async hop
+# (NOTIFIES, publisher -> subscriber) is not one: a publisher does not depend on its subscribers, so
+# a change to a listener must not report the publisher and its callers as broken.
+_DEPENDENCY_EDGE_TYPES = tuple(t for t in DEFAULT_IMPACT_EDGE_TYPES if t not in ASYNC_EDGE_TYPES)
 
 
 # ── diff parsing ───────────────────────────────────────────────────────────────────────
@@ -164,7 +168,7 @@ def impact_of_diff(
         }
 
     base_projects = {_project_of(i) for i in changed_ids}
-    pattern = "|".join(DEFAULT_IMPACT_EDGE_TYPES)  # edge types are our own constants -> safe to interpolate
+    pattern = "|".join(_DEPENDENCY_EDGE_TYPES)  # edge types are our own constants -> safe to interpolate
 
     all_rows = graph.ro_query(
         f"MATCH (dep)-[:{pattern}*1..{max_depth}]->(c) WHERE c.id IN $ids AND NOT dep.id IN $ids "
