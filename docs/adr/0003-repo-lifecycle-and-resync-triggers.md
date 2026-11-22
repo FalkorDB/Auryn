@@ -56,13 +56,24 @@ follows; save/commit triggers are for repos actually being edited.
   - **Dedicated graph** (the repo is the only project in its graph → default case):
     `GRAPH.DELETE <graph_name>`. One call, complete.
   - **Shared graph**: project-scoped delete — for each language the repo contributed, delete
-    `id == <lang>://<name>` and `<lang>://<name>/ ≤ id < <lang>://<name>/￿`. The **trailing
-    `/` is load-bearing**: it stops `forget acme` from also deleting `acme-api` (the
-    prefix-collision hazard is data loss here). Per-label, id-indexed (verified by the ADR-0002
+    `id == <lang>://<name>` and the ids that continue it with `/` or `.`
+    (`<lang>://<name>/ ≤ id < <lang>://<name>0`, `<lang>://<name>. ≤ id < <lang>://<name>/`; a
+    PL/SQL table or a C++ top-level function is `<lang>://<name>.…`). The **trailing separator is
+    load-bearing**: it stops `forget acme` from also deleting `acme-api` (the prefix-collision
+    hazard is data loss here); another project whose id continues the name (`acme.v2`) is left
+    out explicitly. The upper bound is the separator's successor, not `…/￿`: FalkorDB's index
+    scan can stop short of a non-ASCII bound. Per-label, id-indexed (verified by the ADR-0002
     index discipline). `DETACH DELETE` removes each node *with its relationships*, so **inbound
     cross-repo edges** into the forgotten repo are cleaned up automatically.
+  - The repo also owns nodes outside those ids: `extern://` placeholders, framework routes
+    (`pyapi://`, `javaapi://`), `topic://` and `extern://http/` seams. Forget collects the ones its
+    nodes link to before the delete, removes those left with no edge after it (a seam another repo
+    still uses keeps that repo's edge and stays), then re-runs the post hooks without a repo source
+    so the derived layers (INVOKES, `resolved` flags, routes, topics) match the remaining repos.
   - Guarded by a confirmation showing what will go (graph/project, node count); `--yes` skips,
-    `--dry-run` only prints. Also deregisters the repo's trigger and drops its clone/cache.
+    `--dry-run` only prints. Also deregisters the repo's trigger and drops its clone/cache. By
+    `--graph`, the registry entry is matched on the project name the graph holds — the stored
+    `project_name`, else the folder's name (§4 stores none then).
 
 ### 4. A minimal registry (only what git/the graph can't give us)
 

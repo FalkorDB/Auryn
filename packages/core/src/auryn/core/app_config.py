@@ -235,6 +235,14 @@ def get_repo(local_dir: str) -> RepoRegistration | None:
     return next((r for r in load_config().repos if r.local_dir == local_dir), None)
 
 
+def registered_project_name(reg: RepoRegistration) -> str:
+    """The project a registered repo is ingested as: the stored `project_name`, else the folder's
+    own name -- what `ingest_directory` uses when no name was given, the case where none is stored."""
+    from pathlib import Path
+
+    return reg.project_name or Path(reg.local_dir).name or "repo"
+
+
 def effective_trigger(reg: RepoRegistration | None) -> str:
     """A repo's trigger: its per-repo override, else the install-wide default."""
     if reg is not None and reg.trigger is not None:
