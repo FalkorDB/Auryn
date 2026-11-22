@@ -192,6 +192,9 @@ connection options. Normally launched by the agent, not by hand.
 ### `view`
 Serve a web UI for browsing every graph on a FalkorDB instance. `--host/--port` (viewer bind) and
 `--falkordb-host/--falkordb-port/--falkordb-username/--falkordb-password/--falkordb-ssl`.
+Bound to loopback (the default), the viewer answers only loopback Host names (`localhost`,
+`127.0.0.1`) and the `--host` name itself — reached through an SSH alias or an `/etc/hosts`
+name it returns 403 "Host not allowed"; start it with that name as `--host`.
 
 ### `embed`
 Build vector + full-text indexes for a graph's callables/types/files — what powers the MCP

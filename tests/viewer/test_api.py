@@ -65,6 +65,7 @@ def test_loopback_viewer_serves_loopback_host_names_only(falkordb_connection):
         assert client.get("/api/graphs", headers={"Host": host}).status_code == 200, host
     for host in ("evil.example", "evil.example:8080", "localhost.evil.example:8080", "10.0.0.5:8080"):
         assert client.get("/api/graphs", headers={"Host": host}).status_code == 403, host
+    assert b"Host not allowed" in client.get("/api/graphs", headers={"Host": "evil.example"}).data  # says why
 
     # a loopback bind is one whatever its spelling -- the guard must not depend on the literal
     for bind in ("localhost", "127.0.0.2", "::1", "0:0:0:0:0:0:0:1"):

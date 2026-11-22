@@ -79,7 +79,8 @@ def create_app(client: FalkorDB, host: str = "127.0.0.1") -> Flask:
             name = _host_name(request.host)
             # The bound name itself is fine too (e.g. a hosts-file alias the user chose).
             if not _is_loopback(name) and name != bind_name:
-                abort(403)
+                abort(403, "Host not allowed: bound to loopback, the viewer answers loopback names "
+                           "(localhost, 127.0.0.1) and the name it was started with (--host).")
 
     @app.get("/")
     def index():
