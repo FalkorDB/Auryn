@@ -12,7 +12,8 @@ never by symbol -- so the golden path reads:
 i.e. a query can trace application code to the physical table/column it reads or writes -- the "project
 A (app) to project B (database)" connection. Language/driver-agnostic: it reads each class's stored
 `source` from the graph (no file I/O, no Python-ingestor change) and matches names against whatever SQL
-ingestor populated the schema.
+ingestor populated the schema. `trace_entrypoint` follows these Table edges from the models in its call
+closure and lists them as `tables_mapped` (see core/graph_queries.py).
 
 Name matching is per-schema-scope, exact-case-first then case-folded: a producer folds an unquoted name
 to its own case (Oracle UPPER, PostgreSQL lower, SQLite as-written), so within one schema a model's

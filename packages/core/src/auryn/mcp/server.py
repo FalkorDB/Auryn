@@ -558,7 +558,8 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         graph: str | None = None,
     ) -> dict[str, Any]:
         """What does this entry point actually do, end to end? Returns its full call-closure --
-        every function reachable via CALLS -- plus any tables those functions read or write. Pass
+        every function reachable via CALLS -- plus any tables those functions read or write, and
+        in `tables_mapped` the tables their ORM models map to (no read/write direction). Pass
         a function/method, a Procedure/Function, or an APIEndpoint (an endpoint resolves to its
         handler first, so "what does this route do end-to-end" works). Unbounded by default
         (completeness is the point); check `truncated`. `graph` picks which graph the id lives in
