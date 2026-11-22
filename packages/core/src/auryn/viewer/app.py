@@ -6,17 +6,81 @@ fetch, to list current branches/tags) but still never touches FalkorDB."""
 
 from __future__ import annotations
 
+import ipaddress
+import socket
+
 import git
 from falkordb import FalkorDB
-from flask import Flask, jsonify, request
+from flask import Flask, abort, jsonify, request
 
 from auryn.core import graph_queries as queries
 from auryn.core.embeddings import hybrid_search
 from auryn.core.graph_client import GraphWriter
 
 
-def create_app(client: FalkorDB) -> Flask:
+def _loopback_ip(address: str) -> bool:
+    """Whether `address` is a loopback IP. An IPv4-mapped one (`::ffff:127.0.0.1`) is judged by its
+    IPv4 form, which the `ipaddress` of older Python 3.12 releases doesn't do. Raises ValueError for a
+    name that isn't an IP."""
+    ip = ipaddress.ip_address(address)
+    return (getattr(ip, "ipv4_mapped", None) or ip).is_loopback
+
+
+def _is_loopback(name: str) -> bool:
+    """`localhost`, or a loopback address in any spelling (all of 127.0.0.0/8, `::1`,
+    `0:0:0:0:0:0:0:1`, `::ffff:127.0.0.1`) -- as a bind address or as the name in a Host header."""
+    name = name.strip("[]").lower()
+    if name == "localhost":
+        return True
+    try:
+        return _loopback_ip(name)
+    except ValueError:  # some other DNS name
+        return False
+
+
+def _host_name(host: str) -> str:
+    """The name in a Host header -- `name`, `name:port`, `[v6]` or `[v6]:port` -- without its port
+    or brackets, in lower case, and without a trailing dot (`localhost.` is `localhost`)."""
+    name = host[: host.index("]") + 1] if host.startswith("[") and "]" in host else host.rsplit(":", 1)[0]
+    return name.strip("[]").lower().removesuffix(".")
+
+
+def _binds_loopback(host: str) -> bool:
+    """Whether binding to `host` can land on loopback, resolved the way the OS resolves a bind
+    address -- so `127.1`, `2130706433`, `0x7f.1` or a hosts-file alias count, not only the
+    canonical spellings. Fails closed: a name that does not resolve keeps the Host check on."""
+    if _is_loopback(host):
+        return True
+    try:
+        infos = socket.getaddrinfo(host.strip("[]"), None, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return True
+    for *_, sockaddr in infos:
+        try:
+            if _loopback_ip(str(sockaddr[0]).split("%", 1)[0]):
+                return True
+        except ValueError:
+            return True
+    return False
+
+
+def create_app(client: FalkorDB, host: str = "127.0.0.1") -> Flask:
+    """`host` is the address the server is bound to (the `--host` of `view` / `quickstart`)."""
     app = Flask(__name__, static_folder="static", static_url_path="")
+
+    if _binds_loopback(host):
+        bind_name = host.strip("[]").lower().removesuffix(".")  # a bind address has no port
+        # Bound to loopback the viewer is this machine's only -- but a web page can still point its
+        # OWN name at 127.0.0.1 (DNS rebinding) and then read every graph, or POST git-sync, as
+        # same-origin. Such a request carries the page's name in Host, so serve loopback names only.
+        # Bound anywhere else (`--host 0.0.0.0`) it was exposed on purpose: no check.
+        @app.before_request
+        def _loopback_host_only():
+            name = _host_name(request.host)
+            # The bound name itself is fine too (e.g. a hosts-file alias the user chose).
+            if not _is_loopback(name) and name != bind_name:
+                abort(403, "Host not allowed: bound to loopback, the viewer answers loopback names "
+                           "(localhost, 127.0.0.1) and the name it was started with (--host).")
 
     @app.get("/")
     def index():
