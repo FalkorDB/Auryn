@@ -71,6 +71,6 @@ raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
 
 [tool.uv]
 cache-keys = [
-    { file = "pyproject.toml" }, { git = { commit = true, tags = true } },
+    { file = "pyproject.toml" }, { file = "hatch_build.py" }, { git = { commit = true, tags = true } },
     { file = "src/**/*.py" }, { file = "src/**/*.js" }, { file = "src/**/*.md" }, { file = "src/**/*.cs" }, { file = "src/**/*.html" }, { file = "src/**/*.css" }, { file = "src/**/*.csproj" },
 ]

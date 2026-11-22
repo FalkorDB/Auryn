@@ -117,6 +117,7 @@ def test_every_pin_is_declared_where_the_build_hook_fills_it_in():
         hooked = data["tool"]["hatch"].get("metadata", {}).get("hooks", {}).get("custom")
         if hooked:
             assert set(hooked) <= set(data["project"]["dynamic"]), f
+            assert {"file": "hatch_build.py"} in data["tool"]["uv"]["cache-keys"], f  # an edit to it rebuilds
             hooks.append((f.parent / "hatch_build.py").read_text())
     assert len(hooks) > 1 and len(set(hooks)) == 1
 
