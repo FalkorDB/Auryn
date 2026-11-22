@@ -243,9 +243,7 @@ def create_app(client: FalkorDB) -> Flask:
         if project is None or project["label"] != "Project":
             return jsonify({"error": "project not found"}), 404
         repo_uri = project["properties"].get("repo_uri")
-        if not repo_uri:
-            return jsonify({"error": "this Project node has no repo_uri -- it wasn't created by git-sync"}), 400
-        blocker = _sync_blocker(project)
+        blocker = _sync_blocker(project)  # a missing repo_uri too
         if blocker:
             return jsonify({"error": blocker, "sync_unavailable": blocker}), 400  # as in git-projects
         try:
@@ -273,9 +271,7 @@ def create_app(client: FalkorDB) -> Flask:
         if project is None or project["label"] != "Project":
             return jsonify({"error": "project not found"}), 404
         props = project["properties"]
-        if not props.get("repo_uri"):
-            return jsonify({"error": "this Project node has no repo_uri -- it wasn't created by git-sync"}), 400
-        blocker = _sync_blocker(project)
+        blocker = _sync_blocker(project)  # a missing repo_uri too
         if blocker:
             return jsonify({"error": blocker, "sync_unavailable": blocker}), 400  # as in git-projects
         # Only now: a refusal must not depend on the C# plugin being installed (auryn-core alone,

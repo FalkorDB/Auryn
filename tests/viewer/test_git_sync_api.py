@@ -214,6 +214,7 @@ def test_git_refs_endpoint_rejects_a_project_without_repo_uri(graph, falkordb_co
     resp = client.get(f"/api/graphs/{graph.name}/git-refs", query_string={"project_id": "csharp://NotGitTracked"})
 
     assert resp.status_code == 400
+    assert "No source is recorded" in resp.get_json()["sync_unavailable"]  # the refusal git-projects lists
 
 
 def _seed_unreachable_project(graph):
@@ -318,6 +319,7 @@ def test_git_sync_endpoint_rejects_a_project_without_repo_uri(graph, falkordb_co
     resp = client.post(f"/api/graphs/{graph.name}/git-sync", json={"project_id": "csharp://NotGitTracked"})
 
     assert resp.status_code == 400
+    assert "No source is recorded" in resp.get_json()["sync_unavailable"]  # the refusal git-projects lists
 
 
 def test_git_sync_endpoint_unknown_graph_returns_404(falkordb_connection):
