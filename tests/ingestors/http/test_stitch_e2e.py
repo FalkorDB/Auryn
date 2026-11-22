@@ -7,6 +7,7 @@ Tree-sitter only (deep='off'), so no .NET SDK is needed."""
 from __future__ import annotations
 
 import git
+import pytest
 
 from auryn.core import ingest
 from auryn.core.graph_client import GraphWriter
@@ -250,3 +251,85 @@ def test_invokes_edge_lets_who_calls_cross_the_seam(graph, tmp_path):
     assert graph.query(
         "MATCH (:Function {name:'load'})-[r:INVOKES]->(:Method {name:'List'}) RETURN count(r)"
     ).result_set == [[1]]
+
+
+
+_HTTP_CALLERS = {
+    # caller file, `load` with two HTTP calls, `load` with neither
+    "typescript": (
+        "api.js",
+        'export function load() { $.get("/api/widgets/5"); fetch("/api/missing"); }\n',
+        "export function load() { return 1; }\n",
+    ),
+    "csharp": (
+        "Gateway.cs",
+        "namespace Ui {\n  public class Gateway {\n    public object load() {\n"
+        '      _client.GetAsync("/api/widgets/5");\n      _client.GetAsync("/api/missing");\n'
+        "      return null;\n    }\n  }\n}\n",
+        "namespace Ui {\n  public class Gateway {\n    public object load() { return null; }\n  }\n}\n",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("caller", "git_tracked"),
+    [("typescript", False), ("typescript", True), ("csharp", False)],
+    ids=["ts-full-recompute", "ts-delta", "csharp-full-recompute"],
+)
+def test_removed_http_call_drops_its_seam(graph, tmp_path, monkeypatch, caller, git_tracked):
+    """Removing an outbound HTTP call removes its CALLS_API edge, the INVOKES edge the stitch built
+    from it, and the caller-side endpoint it leaves without a referrer -- on a full recompute (a plain
+    directory; C# always recomputes) and on a delta resync (a git working tree) alike. The declared
+    endpoint stays, since its controller still exposes it. Regression: the full-sync edge diff skipped
+    every `extern://http/` target and no delta spec owned CALLS_API, so a deleted call stayed in the
+    graph and still traced to its handler."""
+    from auryn.core import incremental_scoped
+
+    delta_runs = []
+    real_incremental_sync = incremental_scoped.incremental_sync
+
+    def spy(*args, **kwargs):
+        delta_runs.append(kwargs.get("project_name"))
+        return real_incremental_sync(*args, **kwargs)
+
+    monkeypatch.setattr(incremental_scoped, "incremental_sync", spy)
+    w = GraphWriter(graph)
+
+    be = tmp_path / "backend"
+    be.mkdir()
+    (be / "Backend.csproj").write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup>'
+                                       '<TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>\n')
+    (be / "WidgetsController.cs").write_text(
+        "using Microsoft.AspNetCore.Mvc;\n"
+        "namespace App {\n  [ApiController]\n  [Route(\"api/[controller]\")]\n"
+        "  public class WidgetsController : ControllerBase {\n"
+        "    [HttpGet(\"{id}\")] public object Get(int id) { return null; }\n  }\n}\n"
+    )
+    ingest.ingest_directory(w, str(be), deep="off", auto_install=False)
+
+    # One call the stitch resolves by route template (/api/widgets/5 ~ api/widgets/{id}), one it can't.
+    file_name, with_calls, without_calls = _HTTP_CALLERS[caller]
+    ui = tmp_path / "ui"
+    ui.mkdir()
+    (ui / file_name).write_text(with_calls)
+    if git_tracked:
+        _commit(ui, [file_name], "v1")
+    ingest.ingest_directory(w, str(ui), deep="off", auto_install=False)
+
+    assert graph.query("MATCH ({name:'load'})-[r:CALLS_API]->() RETURN count(r)").result_set == [[2]]
+    assert graph.query(
+        "MATCH ({name:'load'})-[r:INVOKES]->(:Method {name:'Get'}) RETURN count(r)"
+    ).result_set == [[1]]
+
+    (ui / file_name).write_text(without_calls)
+    if git_tracked:
+        _commit(ui, [file_name], "v2 -- calls removed")
+    ingest.ingest_directory(w, str(ui), deep="off", auto_install=False)
+
+    assert bool(delta_runs) == git_tracked  # the path under test is the one that ran
+    assert graph.query("MATCH ()-[r:CALLS_API]->() RETURN count(r)").result_set == [[0]]
+    assert graph.query("MATCH ()-[r:INVOKES]->() RETURN count(r)").result_set == [[0]]
+    assert graph.query(
+        "MATCH (e:APIEndpoint)<-[:EXPOSES_ENDPOINT]-(:Method {name:'Get'}) RETURN e.route"
+    ).result_set == [["/api/widgets/{id}"]]
+    assert graph.query("MATCH (e:APIEndpoint) RETURN count(e)").result_set == [[1]]

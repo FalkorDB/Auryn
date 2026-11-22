@@ -251,16 +251,21 @@ def _edge_fingerprint_query(from_label: str) -> str:
     the full-recompute diff never removes. Both the `extern://` and `image://` target NODES are shared
     and GC'd elsewhere (the linkage reconciler / the deploy stitch), not by this per-project diff.
 
-    Two id spaces are deliberately still EXCLUDED: (1) a reconciled cross-repo edge (source here, target a
-    DIFFERENT real project), owned by the linkage reconciler not this per-project diff; (2) `extern://http/`
-    endpoint nodes (ADR 0006), a SEAM namespace whose edges are authored by the http-endpoints HOOK (and
-    its own dedup/GC), not by any ingestor's resolve -- diffing them here would churn hook-owned edges the
-    target never emits (and drop them entirely if the hook is disabled). The call-placeholder namespaces
-    (c/csharp/python/go/rust/...) are each fully re-emitted by their ingestor's resolve, so are safe to diff."""
+    Two kinds of edge are deliberately still EXCLUDED: (1) a reconciled cross-repo edge (source here, target a
+    DIFFERENT real project), owned by the linkage reconciler not this per-project diff; (2) every edge into
+    an `extern://http/` endpoint (ADR 0006) EXCEPT `CALLS_API`. That namespace is a SEAM: a caller's
+    `CALLS_API` is authored by its ingestor's resolve like any call placeholder, so it is diffed here (a
+    deleted HTTP call drops its edge), but the other edges into it are owned elsewhere -- the
+    http-endpoints hook's EXPOSES_ENDPOINT (rebuilt by its own clear/GC), the k8s stitch's SERVES/ROUTES,
+    and a C# declared route's EXPOSES_ENDPOINT (see csharp git_sync._prune_stale_endpoint_edges). Diffing
+    the hook-owned ones here would churn edges the target never emits (and drop them entirely if the hook
+    is disabled). The call-placeholder namespaces (c/csharp/python/go/rust/...) are each fully re-emitted
+    by their ingestor's resolve, so are safe to diff."""
     return (
         f"MATCH (a:{from_label}) WHERE a.id = $own OR a.id STARTS WITH $sub OR a.id STARTS WITH $dot "
         "MATCH (a)-[r]->(b) WHERE b.id = $own OR b.id STARTS WITH $sub OR b.id STARTS WITH $dot "
         "   OR (b.id STARTS WITH 'extern://' AND NOT b.id STARTS WITH 'extern://http/') "
+        "   OR (b.id STARTS WITH 'extern://http/' AND type(r) = 'CALLS_API') "
         "   OR b.id STARTS WITH 'image://' "
         f"RETURN type(r), {semantic_label('b')}, a.id, b.id, r._fingerprint"
     )

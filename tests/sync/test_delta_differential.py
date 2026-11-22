@@ -137,7 +137,8 @@ def _build_bash(repo: GitRepo) -> list[str]:
 
 def _build_typescript(repo: GitRepo) -> list[str]:
     """7 valid commits mirroring the python corpus: cross-file import+call, call retarget, add/delete
-    file, rename file (path-keyed ids move), a class + method, and a docs-only no-op."""
+    file, rename file (path-keyed ids move), a class + method, and a docs-only no-op. c3 also adds an
+    HTTP call (CALLS_API -> a route-keyed `extern://http/` endpoint, ADR 0006) that c4 removes."""
     shas = []
 
     repo.write({
@@ -157,13 +158,13 @@ def _build_typescript(repo: GitRepo) -> list[str]:
     repo.write({
         "extra.ts": "export function extra(): number {\n  return 7;\n}\n",
         "service.ts": 'import { helper2 } from "./util";\nimport { extra } from "./extra";\n\n'
-        "export function greet(v: number): number {\n  return helper2(v) + extra();\n}\n",
+        'export function greet(v: number): number {\n  fetch("/api/extra");\n  return helper2(v) + extra();\n}\n',
     })
-    shas.append(repo.commit("c3 add extra.ts; greet also calls extra"))
+    shas.append(repo.commit("c3 add extra.ts; greet also calls extra and fetches /api/extra"))
 
     repo.rm("extra.ts")
     repo.write({"service.ts": 'import { helper2 } from "./util";\n\nexport function greet(v: number): number {\n  return helper2(v);\n}\n'})
-    shas.append(repo.commit("c4 delete extra.ts; greet stops calling extra"))
+    shas.append(repo.commit("c4 delete extra.ts; greet stops calling extra and fetching /api/extra"))
 
     repo.mv("util.ts", "core.ts")
     repo.write({"service.ts": 'import { helper2 } from "./core";\n\nexport function greet(v: number): number {\n  return helper2(v);\n}\n'})
@@ -908,3 +909,35 @@ def test_delta_languages_are_gated():
     )
     # Sanity: the known-gated set is actually present (guards a typo/regression in _CORPORA).
     assert {"python", "typescript", "bash", "c", "go"} <= gated
+
+
+def test_http_callers_own_calls_api_in_delta():
+    """A delta language whose schema declares CALLS_API (an outbound HTTP call, ADR 0006) must list it
+    among its spec's `lateral_rels`, so a file that drops a call diffs the edge away just as a full
+    recompute does (graph_client._edge_fingerprint_query). Without it a call removed in a delta resync
+    stays in the graph and keeps tracing to its handler -- a gap the corpora above only catch for the
+    languages whose corpus makes an HTTP call."""
+    import importlib
+    import importlib.util
+
+    from auryn.core.incremental_scoped import ScopedSpec
+    from auryn.core.ingest import discover_git_languages
+
+    callers = []
+    for name in discover_git_languages():
+        try:
+            has_incremental = importlib.util.find_spec(f"auryn.ingestors.{name}.incremental") is not None
+        except (ImportError, ValueError):
+            has_incremental = False
+        if not has_incremental:
+            continue
+        schema = importlib.import_module(f"auryn.ingestors.{name}.schema")
+        if not any(e.rel_type == "CALLS_API" for e in schema.EDGE_SCHEMAS):
+            continue
+        callers.append(name)
+        incremental = importlib.import_module(f"auryn.ingestors.{name}.incremental")
+        specs = [v for v in vars(incremental).values() if isinstance(v, ScopedSpec)]
+        assert specs and all("CALLS_API" in s.lateral_rels for s in specs), (
+            f"{name}: its schema declares CALLS_API but its ScopedSpec.lateral_rels doesn't list it"
+        )
+    assert "typescript" in callers  # sanity: the check ran on a known HTTP-caller language

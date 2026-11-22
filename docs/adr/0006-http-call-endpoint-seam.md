@@ -82,6 +82,10 @@ the caller-side unresolved endpoint is a placeholder `APIEndpoint`, not a bespok
 - **One node per endpoint** (no declared-vs-called duplication). `resolved` is a pure function of the
   graph — recomputed by the hook from whether *any* handler exposes the endpoint — so it's independent
   of ingest order and of which side wrote the node.
+- **Edge ownership.** A caller's `CALLS_API` edge belongs to the caller's ingestor: its resync, full or
+  delta, diffs that edge like any call, so a call removed from the code takes its edge (and the hook's
+  `INVOKES` built from it) with it. The other edges into an endpoint — `EXPOSES_ENDPOINT`, `SERVES`,
+  `ROUTES` — belong to the declaring ingestor or the hook that wrote them, never to a caller's resync.
 - **Shared-node lifecycle.** Because the endpoint id is route-keyed, it sits *outside* any single
   project's id-prefix, so a project's own resync can't reclaim it (the same property caller placeholders
   already had). The hook GCs an endpoint once it has neither a caller nor a handler — the residue of a
