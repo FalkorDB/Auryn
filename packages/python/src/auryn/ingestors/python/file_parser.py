@@ -170,7 +170,7 @@ def _imports(node: ast.Import | ast.ImportFrom, current_dotted: str, is_package:
     if isinstance(node, ast.Import):
         for alias in node.names:
             local = alias.asname or alias.name.split(".")[0]
-            out.append(RawImport(local=local, target=alias.name, is_module=True))
+            out.append(RawImport(local=local, target=alias.name, is_module=True, aliased=bool(alias.asname)))
         return out
 
     base = _resolve_from_base(node, current_dotted, is_package)
@@ -423,6 +423,8 @@ def _local_names(body: list[ast.stmt], *, module_scope: bool = False) -> list[st
 
     def visit(n: ast.AST) -> None:
         nested_scope = isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        if module_scope and isinstance(n, ast.AnnAssign) and n.value is None:
+            return  # `fetch: Callable` declares the name, it doesn't bind it (in a function it does)
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
             names.add(n.id)
         elif isinstance(n, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and n.name:
@@ -435,8 +437,10 @@ def _local_names(body: list[ast.stmt], *, module_scope: bool = False) -> list[st
         elif isinstance(n, (ast.Import, ast.ImportFrom)):
             for alias in n.names:
                 local = (alias.asname or alias.name).split(".")[0]
-                # `import a.b` and `import a.c` both bind `a`, to the same package: no rebinding
-                to = local if isinstance(n, ast.Import) and not alias.asname else (getattr(n, "module", None), getattr(n, "level", 0), alias.name)
+                # `import a.b` and `import a.c` both bind `a`, to the same package: no rebinding;
+                # nor does `import a as a`, which is `import a`
+                plain = isinstance(n, ast.Import) and alias.asname in (None, alias.name)
+                to = local if plain else (getattr(n, "module", None), getattr(n, "level", 0), alias.name)
                 if not module_scope or bound.setdefault(local, to) != to:
                     names.add(local)
         if not (nested_scope or isinstance(n, ast.Lambda)):

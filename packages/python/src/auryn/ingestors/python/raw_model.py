@@ -24,12 +24,14 @@ class RawImport:
     `from a.b import C as D`  -> local="D", target="a.b.C", is_module=False
     `import a.b as m`         -> local="m", target="a.b",   is_module=True
     `import a`                -> local="a", target="a",     is_module=True
-    Relative imports are resolved to absolute `target` at parse time when possible.
+    `aliased` is True for an `import ... as` -- `import a.b as a` binds `a.b`, a plain `import a.b`
+    binds `a`. Relative imports are resolved to absolute `target` at parse time when possible.
     """
 
     local: str
     target: str
     is_module: bool
+    aliased: bool = False
 
 
 @dataclass

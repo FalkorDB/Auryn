@@ -419,6 +419,12 @@ def test_a_dotted_import_binds_the_package_not_the_submodule():
         ("python://demo/package/pkg.func.helper()", "resolved"),
         ("extern://python/os::getcwd", "external"),
     }
+    # `import pkg.core as pkg` binds the submodule itself, under the package's name
+    aliased = parse_module(b"import pkg.core as pkg\n\n\ndef t():\n    pkg.helper()\n", "aliased.py")
+    items = list(resolution.resolve([pkg, core, aliased], "python://demo"))
+    assert _calls_from(items, "python://demo/module/aliased.func.t()") == {
+        ("python://demo/module/pkg.core.func.helper()", "resolved"),
+    }
 
 
 def test_import_bound_instantiation_resolves_to_constructor():
@@ -492,6 +498,8 @@ def test_module_local_names_are_only_what_the_top_level_code_rebinds():
         "import json\n"
         "import os.path\n"
         "import os\n"  # `os` again, and the same package: not a rebinding
+        "import yaml as yaml\n"
+        "import yaml\n"  # the same module under the same name: not a rebinding
         "from pkg import db\n"
         "from lib import fetch, cached, Base\n"
         "\n"
@@ -502,6 +510,7 @@ def test_module_local_names_are_only_what_the_top_level_code_rebinds():
         "    attr = 1\n"
         "\n"
         "db = make()\n"
+        "json: object\n"  # declares, doesn't bind: not a rebinding
         "for i in range(3):\n"
         "    helper()\n"
         "\n"

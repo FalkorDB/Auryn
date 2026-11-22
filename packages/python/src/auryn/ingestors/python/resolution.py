@@ -716,8 +716,9 @@ def _resolve_call_ast(call: RawCall, ctx: _ModCtx, scope_locals: frozenset = fro
         # submodule; submodule.fn()` idiom that otherwise goes undetected -> no cross-repo edge).
         imp = ctx.import_map[call.receiver]
         # ...except a dotted `import pkg.core`: it binds `pkg`, the package, so `pkg.helper()` is
-        # the package's own `helper`, not `pkg.core.helper`.
-        target_dotted = imp.local if imp.is_module and imp.target.startswith(f"{imp.local}.") else imp.target
+        # the package's own `helper`, not `pkg.core.helper` (`import pkg.core as pkg` does bind it).
+        unaliased_dotted = imp.is_module and not imp.aliased and imp.target.startswith(f"{imp.local}.")
+        target_dotted = imp.local if unaliased_dotted else imp.target
         full = f"{target_dotted}.{call.name}"
         hit = ctx.idx.callable_by_qname.get(full)
         if hit and hit[1] == "Function":
