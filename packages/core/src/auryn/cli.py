@@ -608,8 +608,9 @@ def forget(path, graph_opt, project, host, port, username, password, ssl, yes, d
 
 
 def _deregister_repo(path, graph_opt, project, graph_name) -> None:
-    """Remove a forgotten repo's git hooks + registry entry."""
-    from auryn.core import app_config, hooks
+    """Remove a forgotten repo's git hooks + registry entry. Hooks that another registered
+    worktree of the repo still runs stay (see lifecycle.unwire_commit_hooks)."""
+    from auryn.core import app_config, lifecycle
     from auryn.core.project import resolve_project_root
 
     if not graph_opt:
@@ -619,7 +620,7 @@ def _deregister_repo(path, graph_opt, project, graph_name) -> None:
                       if r.graph_name == graph_name and (project is None or r.project_name == project)), None)
         local_dir = match.local_dir if match else None
     if local_dir:
-        hooks.uninstall(local_dir)
+        lifecycle.unwire_commit_hooks(local_dir)
         app_config.unregister_repo(local_dir)
 
 
@@ -628,7 +629,10 @@ def _deregister_repo(path, graph_opt, project, graph_name) -> None:
 @_conn_options
 @click.option("--deep", type=click.Choice(["off", "inline", "background"]), default="off",
               help="Deep pass (default: off = fast incremental, the freshness path).")
-def sync(path, host, port, username, password, ssl, deep) -> None:
+@click.option("--if-registered", is_flag=True, default=False,
+              help="Resync only what is registered with the commit trigger at PATH or inside its "
+                   "work tree, if anything. What the git hooks run.")
+def sync(path, host, port, username, password, ssl, deep, if_registered) -> None:
     """Resync a repo's graph incrementally — the target of the commit hook / save watcher, and
     runnable by hand. Re-ingests the working directory; only the change's blast radius is touched."""
     import dataclasses
@@ -638,6 +642,12 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
     from auryn.core.project import default_graph_name, resolve_project_root
     from auryn.core.sync_lock import sync_lock
 
+    if if_registered:  # the git hooks' form, run in whichever linked worktree committed
+        from auryn.core.lifecycle import commit_resync_targets
+
+        for target in commit_resync_targets(resolve_project_root(path)):
+            sync.callback(target, host, port, username, password, ssl, deep, if_registered=False)
+        return
     root = resolve_project_root(path)
     # One sync per repo at a time: the git hooks fire a burst of these (a rebase starts one per
     # commit) and overlapping syncs of one project corrupt its subgraph. See core/sync_lock.py.
