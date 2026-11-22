@@ -1,7 +1,7 @@
 [project]
 name = "auryn-go"
 version = "0.1.0"
-description = "Go language plugin for Auryn: a fast tree-sitter-go engine extracting packages/structs/interfaces/functions/methods/fields/params/consts, Go embedding (EMBEDS), and calls. IMPLEMENTS (structural interface satisfaction) and precise cross-file type resolution are the planned deep pass (a go/types or gopls-backed engine)."
+description = "Go language plugin for Auryn: a fast tree-sitter-go engine extracting packages/structs/interfaces/functions/methods/fields/params/consts, Go embedding (EMBEDS), and calls, plus the HTTP seam: outbound net/http requests and the route enrichment (net/http, gin, echo, chi, gorilla/mux). IMPLEMENTS (structural interface satisfaction) and precise cross-file type resolution are the planned deep pass (a go/types or gopls-backed engine)."
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
@@ -15,6 +15,10 @@ dependencies = [
 # Import-light lazy GitLanguage (no tree-sitter import at discovery). See core/registry.py.
 [project.entry-points."auryn.languages"]
 go = "auryn.ingestors.go.plugin"
+
+# Post-ingestion enrichment: HTTP route endpoints (the Go analogue of pyframework / javaframework).
+[project.entry-points."auryn.enrichments"]
+goframework = "auryn.ingestors.goframework"
 
 [build-system]
 requires = ["hatchling"]

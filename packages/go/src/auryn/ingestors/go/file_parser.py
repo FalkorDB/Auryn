@@ -37,6 +37,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from auryn.core.docstrings import leading_comment
+from auryn.ingestors.go import http_idioms
 from auryn.ingestors.go.grammar import new_parser
 from auryn.ingestors.go.raw_model import (
     RawCall,
@@ -232,13 +233,18 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             is_pointer=type_node is not None and type_node.type == "pointer_type",
         )
 
+    http_ctx: list = []  # the file's HttpImports, built once on first use (Go puts imports first)
+
     def build_function(node, receiver) -> RawFunction:
         params = parameters(fieldn(node, "parameters"))
         result = fieldn(node, "result")
-        calls, construct_refs = collect_calls(fieldn(node, "body"))
+        body = fieldn(node, "body")
+        calls, construct_refs = collect_calls(body)
         ls, le = lines(node)
         refs = signature_refs(fieldn(node, "parameters"), result)
         refs.extend(construct_refs)
+        if not http_ctx:
+            http_ctx.append(http_idioms.import_context(rf.imports))
         return RawFunction(
             name=txt(fieldn(node, "name")),
             receiver=receiver,
@@ -246,6 +252,8 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             return_type=type_text(result),
             type_refs=refs,
             calls=calls,
+            http_calls=http_idioms.client_calls(body, source, http_ctx[0], params),
+            http_routes=http_idioms.routes(body, source, http_ctx[0], params, receiver),
             source=txt(node),
             doc=leading_comment(node, source),
             line_start=ls,

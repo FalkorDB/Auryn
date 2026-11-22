@@ -162,7 +162,10 @@ shape — but all use `Function`/`Method` for callables, `CALLS` with `resolutio
   which is what cross-repo linkage keys use (`extern://go/<import-path>.<Name>`), so healing matches
   the path a consumer actually imports. `Method` = func with a receiver (`HAS_METHOD`); `EMBEDS` for
   struct/interface embedding; `Module`-`[:DEPENDS_ON]`→`Module` from `require`. `IMPLEMENTS`
-  (structural) is deferred to a deep pass.
+  (structural) is deferred to a deep pass. HTTP (ADR 0006): an outbound net/http request is
+  `CALLS_API`→ the shared route-keyed `APIEndpoint`, and a `go-routes` enrichment turns route
+  registrations (net/http, gin, echo, chi, gorilla/mux; recorded in a callable's `http_routes`) into
+  `(handler)-[:EXPOSES_ENDPOINT]->(APIEndpoint)`.
 - **Rust** — Cargo-aware: a `Package` tier (one per `Cargo.toml`) over a `Crate` tier (one per
   build target — lib/bin/test/example/bench), `Project`-`[:HAS_PACKAGE]`→`Package`-`[:HAS_TARGET]`→
   `Crate`. The **crate is the scope root** (crate-derived from the file's `src/` layout), so two

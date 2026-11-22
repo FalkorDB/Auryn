@@ -28,6 +28,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+from auryn.core import http_seam
 from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.ingestors.go import gomod, ids
 from auryn.ingestors.go.raw_model import RawFile, RawFunction, RawType
@@ -480,7 +481,7 @@ def _emit_func(f: _Func, project_id: str) -> Iterator[GraphNode | GraphEdge]:
         props: dict = {
             "name": rfn.name, "kind": "FUNCTION", "is_exported": _exported(rfn.name),
             "return_type": rfn.return_type or None, "source": rfn.source, "doc": rfn.doc,
-            "line_start": rfn.line_start, "line_end": rfn.line_end,
+            "line_start": rfn.line_start, "line_end": rfn.line_end, "http_routes": _http_routes(rfn),
         }
         if _exported(rfn.name):  # cross-repo key (ADR 0004): a consumer names it `<import-path>.Func`
             props["linkage_key"] = ids.extern_function_key(f"{f.import_path}.{rfn.name}")
@@ -493,7 +494,7 @@ def _emit_func(f: _Func, project_id: str) -> Iterator[GraphNode | GraphEdge]:
             "receiver": recv.name or None, "receiver_type": recv.type_name,
             "is_pointer_receiver": recv.is_pointer, "return_type": rfn.return_type or None,
             "source": rfn.source, "doc": rfn.doc,
-            "line_start": rfn.line_start, "line_end": rfn.line_end,
+            "line_start": rfn.line_start, "line_end": rfn.line_end, "http_routes": _http_routes(rfn),
         }
         if _exported(rfn.name):  # cross-repo key (ADR 0004): `<import-path>.Type.Method`
             props["linkage_key"] = ids.extern_function_key(f"{f.owner.import_path}.{f.owner.name}.{rfn.name}")
@@ -502,6 +503,13 @@ def _emit_func(f: _Func, project_id: str) -> Iterator[GraphNode | GraphEdge]:
     yield GraphEdge("DEFINES", "File", {"id": f.file_id}, f.label, {"id": f.func_id})  # provenance (ADR 0005)
     for i, p in enumerate(rfn.parameters):
         yield from _emit_parameter(f.func_id, p, i)
+
+
+def _http_routes(rfn: RawFunction) -> list[str] | None:
+    """The routes a callable registers, as the `http_routes` property the go-routes enrichment reads
+    (RawRoute.encode). None when it registers none, so a route removed from the code also clears the
+    property on the next sync."""
+    return [r.encode() for r in rfn.http_routes] or None
 
 
 def _emit_parameter(owner_id: str, param, position: int) -> Iterator[GraphNode | GraphEdge]:
@@ -562,6 +570,7 @@ def _depends(from_label, from_id, refs, from_import_path, import_paths, skip_typ
 def _emit_calls(f: _Func, r: _Resolver) -> Iterator[GraphNode | GraphEdge]:
     member_types = _member_types(f)
     emitted: set[str] = set()
+    yield from _emit_http_calls(f, r, emitted)
     for call in f.raw.calls:
         hit = _resolve_call(call, f, member_types, r)
         if hit is not None:
@@ -589,6 +598,30 @@ def _emit_calls(f: _Func, r: _Resolver) -> Iterator[GraphNode | GraphEdge]:
             yield GraphNode(label, {"id": eid}, props)
         yield GraphEdge("CALLS", f.label, {"id": f.func_id}, label, {"id": eid},
                         {"resolution": "external"})
+
+
+def _emit_http_calls(f: _Func, r: _Resolver, emitted: set) -> Iterator[GraphNode | GraphEdge]:
+    """ADR 0006: each request the callable sends becomes `caller -CALLS_API-> APIEndpoint{resolved:false}`,
+    the route-keyed placeholder every caller of that route+verb (in any language) converges on; the
+    http-endpoints stitch later resolves it to the handler across repos. Same node props as the TS and
+    C# callers. The URL is keyed by its path (http_seam.strip_origin): a Go service names its peer by a
+    deployment host (`http://catalog:8080`), which no handler declares."""
+    for call in f.raw.http_calls:
+        route = http_seam.normalize_route(http_seam.strip_origin(call.url))
+        if not route:
+            continue
+        method = (call.method or "ANY").upper()
+        endpoint_id = http_seam.endpoint_placeholder_key(method, route)
+        if endpoint_id in emitted:
+            continue
+        emitted.add(endpoint_id)
+        if endpoint_id not in r.emitted_externs:
+            r.emitted_externs.add(endpoint_id)
+            yield GraphNode("APIEndpoint", {"id": endpoint_id},
+                            {"name": f"{method} {route}", "route": route, "http_method": method,
+                             "resolved": False, "provenance": "http-derived"})
+        yield GraphEdge("CALLS_API", f.label, {"id": f.func_id}, "APIEndpoint", {"id": endpoint_id},
+                        {"resolution": "name", "provenance": "http-derived"})
 
 
 def _member_types(f: _Func) -> dict:
