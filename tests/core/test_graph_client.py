@@ -177,18 +177,19 @@ def test_read_fingerprints_never_reads_a_project_whose_name_continues_at_a_dot(g
 
 def test_read_fingerprints_leaves_out_a_nested_project_created_while_it_reads(graph, monkeypatch):
     """Another session ingests `Acme.Core.Tests` for the first time while `Acme.Core` resyncs. The
-    nested Project ids are looked up AFTER each read's rows, so a project whose nodes a read
-    returned is already known to be someone else's -- looked up before the reads, its nodes came
-    back as `Acme.Core`'s leftovers, to be deleted."""
+    nested Project ids are looked up once, after every read has its rows, so a project whose nodes
+    a read returned is already known to be someone else's -- not `Acme.Core`'s leftovers."""
     writer, other = GraphWriter(graph), GraphWriter(graph)
     core, tests = "csharp://Sol/Acme.Core", "csharp://Sol/Acme.Core.Tests"
     writer.merge_node(GraphNode("Project", {"id": core}, {"name": "Acme.Core"}))
     writer.merge_node(GraphNode("Class", {"id": f"{core}/ns/A"}, {"name": "A"}))
-    ro_query = graph.ro_query
+    ro_query, lookups = graph.ro_query, []
 
     def a_sibling_appears_before_the_first_read(query, *args, **kwargs):
+        if query.startswith("MATCH (p:Project)"):
+            lookups.append(query)
         if "_fingerprint" in query and not other.node_exists("Project", tests):
-            # its Project node first, as every sync writes it
+            # its Project node first, as a language ingestor's sync writes it
             other.merge_node(GraphNode("Project", {"id": tests}, {"name": "Acme.Core.Tests"}))
             other.merge_node(GraphNode("Class", {"id": f"{tests}/ns/A"}, {"name": "A"}))
         return ro_query(query, *args, **kwargs)
@@ -201,6 +202,7 @@ def test_read_fingerprints_leaves_out_a_nested_project_created_while_it_reads(gr
         node_key(GraphNode("Project", {"id": core}, {})),
         node_key(GraphNode("Class", {"id": f"{core}/ns/A"}, {})),
     }
+    assert len(lookups) == 1  # once per resync, not once per label read
 
 
 def test_subgraph_fingerprint_queries_plan_as_a_label_scan_not_a_full_scan(graph):

@@ -701,6 +701,15 @@ class GraphWriter:
                 node_fingerprints.update(future.result())
             for future in edge_futures:
                 edge_fingerprints.update(future.result())
+            theirs = self._nested_projects(id_prefix)  # after every read has its rows -- see there
+        if theirs:
+            node_fingerprints = {
+                k: fp for k, fp in node_fingerprints.items() if not _owned_by(dict(k[1])["id"], theirs)
+            }
+            edge_fingerprints = {
+                k: fp for k, fp in edge_fingerprints.items()
+                if not (_owned_by(dict(k[2])["id"], theirs) or _owned_by(dict(k[4])["id"], theirs))
+            }
         return node_fingerprints, edge_fingerprints
 
     def _nested_projects(self, id_prefix: str) -> tuple[str, ...]:
@@ -711,9 +720,11 @@ class GraphWriter:
         its Project node tells the two apart. What it owns is left out of the reads (so never
         diffed away as this project's leftovers) -- where an id could be either's, it stays.
 
-        Each read looks this up AFTER it has its rows: a sync writes its Project node before its
-        other nodes, so a project another session creates in the meantime is already visible here
-        by the time any of its rows could have been read."""
+        read_fingerprints looks this up once, AFTER every read has its rows: a language ingestor's
+        sync writes its Project node before its other nodes, so a project another session creates in
+        the meantime is already visible here by the time any of its rows could have been read. The
+        compose, k8s, terraform, helm, kustomize and ci ingestors write it last, so a brand-new
+        project of theirs can still have its first batch read as leftovers."""
         owned = _owned_ids(id_prefix)
         rows = self._graph.ro_query(
             "MATCH (p:Project) WHERE p.id STARTS WITH $sub OR p.id STARTS WITH $dot RETURN p.id",
@@ -725,11 +736,7 @@ class GraphWriter:
         rows = self._graph.ro_query(
             _node_fingerprint_query(label), _owned_ids(id_prefix), timeout=_SUBGRAPH_QUERY_TIMEOUT_MS
         ).result_set
-        theirs = self._nested_projects(id_prefix)  # after the rows -- see _nested_projects
-        return {
-            node_key(GraphNode(label, {"id": node_id}, {})): fp
-            for node_id, fp in rows if not _owned_by(node_id, theirs)
-        }
+        return {node_key(GraphNode(label, {"id": node_id}, {})): fp for node_id, fp in rows}
 
     def _read_edge_fingerprints(self, from_label: str, id_prefix: str) -> dict[EdgeKey, str]:
         """Every outgoing edge's key -> fingerprint from a node labeled `from_label`
@@ -742,11 +749,9 @@ class GraphWriter:
             _owned_ids(id_prefix),
             timeout=_SUBGRAPH_QUERY_TIMEOUT_MS,
         ).result_set
-        theirs = self._nested_projects(id_prefix)  # after the rows -- see _nested_projects
         return {
             edge_key(GraphEdge(rel_type, from_label, {"id": from_id}, to_label, {"id": to_id}, {})): fp
             for rel_type, to_label, from_id, to_id, fp in rows
-            if not (_owned_by(from_id, theirs) or _owned_by(to_id, theirs))
         }
 
     def apply_delta(self, delta: GraphDelta) -> None:
