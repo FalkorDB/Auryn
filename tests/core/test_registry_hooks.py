@@ -394,8 +394,10 @@ def test_a_hook_we_may_not_write_does_not_end_the_uninstall_sweep(monkeypatch, t
 
     _deregister_repo(str(repo), None, None, "g")  # `auryn forget`
     assert app_config.get_repo(str(repo))
+    app_config.set_resync_trigger("save")
     do_uninstall(adapters=[])
     assert app_config.get_repo(str(repo))
+    assert app_config.load_config().resync_trigger == "save"  # the rest of config.toml stays as it was
 
 
 def test_hook_fires_on_commit(tmp_path):

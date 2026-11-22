@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import shutil
 import sys
+from dataclasses import replace
 
 from auryn.core.agents import default_adapters
 from auryn.core.app_config import Backend, Config, load_config, save_config
@@ -78,5 +79,5 @@ def do_uninstall(*, purge: bool = False, adapters=None) -> Config:
     if purge:
         shutil.rmtree(home_dir(), ignore_errors=True)
     else:
-        save_config(Config(backend=prior.backend, agents=(), repos=tuple(stranded)))
+        save_config(replace(load_config(), agents=(), repos=tuple(stranded)))  # the rest stays as it is
     return prior
