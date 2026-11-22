@@ -1,18 +1,17 @@
 """Import-light Go language registration -- the `auryn.languages` entry-point target.
 
 Importing this module registers the Go GitLanguage without importing tree-sitter: the
-GitLanguage's `sync` is a lazy thunk that imports auryn.ingestors.go.git_sync only when a
-source actually contains `.go` files. Single-phase today (fast tree-sitter-go).
+GitLanguage's `sync`/`deep_sync` are lazy thunks that import auryn.ingestors.go.git_sync only when
+a source actually contains `.go` files. Two-phase (like Python/C#/Rust/TS): the fast `sync` is
+tree-sitter-go (CALLS by name); the deep `deep_sync` resolves CALLS precisely via scip-go's SCIP
+index (go/types-backed: interface/receiver-typed dispatch, cross-package callees that collide with a
+same-named local), degrading to the fast pass when scip-go or a loadable module is absent.
 
-A deep pass -- a `go/types` or gopls-backed engine -- would slot in here as `deep_sync`
-(making Go two-phase like Python). It is where **IMPLEMENTS** belongs: Go interface satisfaction
-is *structural/implicit* (a type implements an interface iff it has the required method set),
-which the fast tree-sitter pass cannot decide without real type information -- so the fast pass
-deliberately emits no IMPLEMENTS edge rather than guess (exactly as Java defers its Eclipse
-JDT/javac pass). The deep pass would also resolve cross-file/interface-dispatch calls and
-inferred local-variable types.
-
-Suffix/exclude constants live here (single source of truth); git_sync imports them back."""
+Structural **IMPLEMENTS** (Go interface satisfaction is implicit -- a type implements an interface
+iff it has the required method set, undecidable by the fast tree-sitter pass) is a further deep
+enrichment scip-go also computes; v1 overlays CALLS only, so the fast pass still emits no IMPLEMENTS
+rather than guess. Suffix/exclude constants live here (single source of truth); git_sync imports
+them back."""
 
 from __future__ import annotations
 
@@ -28,10 +27,17 @@ EXCLUDED_DIR_NAMES = frozenset(
 
 
 def _sync(*args, **kwargs):
-    """Deferred until a source has Go files -- imports the tree-sitter-go engine."""
-    from auryn.ingestors.go.git_sync import _git_language_sync
+    """Fast phase, deferred until a source has Go files -- imports the tree-sitter-go engine."""
+    from auryn.ingestors.go.git_sync import treesitter_language_sync
 
-    return _git_language_sync(*args, **kwargs)
+    return treesitter_language_sync(*args, **kwargs)
+
+
+def _deep_sync(*args, **kwargs):
+    """Deep phase (scip-go / SCIP), deferred likewise -- degrades to the fast pass if unavailable."""
+    from auryn.ingestors.go.git_sync import scip_go_language_sync
+
+    return scip_go_language_sync(*args, **kwargs)
 
 
 register_git_language(
@@ -40,5 +46,6 @@ register_git_language(
         file_suffixes=FILE_SUFFIXES,
         excluded_dir_names=EXCLUDED_DIR_NAMES,
         sync=_sync,
+        deep_sync=_deep_sync,
     )
 )

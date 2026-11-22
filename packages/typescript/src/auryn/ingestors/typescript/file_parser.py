@@ -44,6 +44,16 @@ from auryn.ingestors.typescript.raw_model import (
     RawTypeAlias,
 )
 
+# Callee wrappers that are transparent to a call's target -- unwrapped so the inner identifier is the
+# recorded call site (what SCIP anchors its occurrence to): `(f)()`, `f!()`, `(f as T)()`,
+# `(f satisfies T)()`, `(<T>f)()`.
+_TRANSPARENT_CALLEES = {"parenthesized_expression", "non_null_expression", "as_expression",
+                        "satisfies_expression", "type_assertion"}
+# The callee-bearing child inside such a wrapper -- picked regardless of position, so a wrapper that ALSO
+# holds a type argument (`f as T`, `<T>f`, where the type may come first) unwraps to the expression, not the
+# type. Unknown inner shapes just yield no call site (no regression), never the wrong node.
+_CALLEE_EXPR_NODES = {"identifier", "member_expression", "call_expression", "subscript_expression",
+                      *_TRANSPARENT_CALLEES}
 _CLASS_DECLS = {"class_declaration", "abstract_class_declaration"}
 _FUNC_VALUE_KINDS = {"arrow_function": "ARROW", "function_expression": "FUNCTION_EXPR"}
 _LEXICAL = {"lexical_declaration", "variable_declaration"}
@@ -224,6 +234,18 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             return (txt(prop) if prop is not None else None), recv
         return None, None
 
+    def _callee_line(fn) -> int:
+        """1-based line of the callee *identifier* -- what SCIP anchors a call occurrence to. For
+        `obj.method()` that's the `method` property's line (which can differ from the call expression's
+        first line in a multi-line `obj\n  .method()`), so the deep pass's line-precise gate matches."""
+        if fn is not None and fn.type == "member_expression":
+            prop = field(fn, "property")
+            if prop is not None:
+                return prop.start_point[0] + 1
+        if fn is not None:
+            return fn.start_point[0] + 1
+        return 0
+
     def _route_text(node) -> str:
         """URL text of a string / template-string arg, with `${...}` interpolations rendered as
         `{param}` so a templated URL matches an endpoint route template (`api/x/${id}` -> api/x/{param})."""
@@ -299,16 +321,27 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             n = stack.pop()
             if n.type in ("call_expression", "new_expression"):
                 is_new = n.type == "new_expression"
-                nm, recv = _callee(field(n, "constructor" if is_new else "function"))
+                callee = field(n, "constructor" if is_new else "function")
+                # Unwrap callee wrappers that are transparent to the call target, so the call site is
+                # recorded (and SCIP's occurrence, anchored at the inner identifier, matches): `(b.run)()`,
+                # `b.run!()`, `(f as T)()`, `(f satisfies T)()`, `(<T>f)()` (incl. nesting). Pick the
+                # expression child (not a type argument, which may come first in `as`/`<T>` forms).
+                while callee is not None and callee.type in _TRANSPARENT_CALLEES:
+                    callee = next((c for c in callee.named_children if c.type in _CALLEE_EXPR_NODES), None)
+                nm, recv = _callee(callee)
                 if nm:
-                    key = (nm, recv, is_new)
+                    line = _callee_line(callee)
+                    # Dedup by line too: the deep pass's line-precise gate needs EVERY call site's line, so
+                    # `x.run()` on two lines must keep both (a name-only key would drop the second). Same
+                    # (name, receiver, kind) on the SAME line is still one call.
+                    key = (nm, recv, is_new, line)
                     if key not in seen:
                         seen.add(key)
                         http_url = http_method = None
                         if not is_new and _is_http_idiom(nm, recv, http_client_vars):  # gate the arg walk (perf)
                             http_url, http_method = _http_request(n, nm)
-                        out.append(RawCall(name=nm, receiver=recv, is_new=is_new,
-                                           http_url=http_url, http_method=http_method))
+                        out.append(RawCall(name=nm, receiver=recv, is_new=is_new, http_url=http_url,
+                                           http_method=http_method, line=line))
             stack.extend(n.children)
         return out
 

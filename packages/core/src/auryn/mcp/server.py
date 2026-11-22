@@ -51,7 +51,12 @@ of pulling whole files into context.
 Typical workflow:
   1. `auryn_status` -- is there a graph for this repo yet, and what's in it?
   2. If empty, `index_repository(path=".")` to build it (local dir; `ingest_repository`
-     for a git URL). Indexing is a one-time cost; queries afterward are cheap.
+     for a git URL). Indexing is a one-time cost; queries afterward are cheap. Deep analysis
+     (precise call resolution -- trait/generic dispatch, cross-module/crate, untyped receivers)
+     runs ASYNC by default: the graph is queryable immediately but keeps DEEPENING in the
+     background. While it does, `auryn_status` and the call/impact tools (who_calls, callees,
+     impact_of, find_path, trace_entrypoint) carry a `deepening` note -- so if precise call edges
+     matter, re-query or poll `auryn_status` until its `depth` is "deep".
   3. Find your starting symbol, then pivot on the `id` it returns (every other tool takes
      the internal `id`, never a display name):
        - `locate(name=...)` when you know the name (case-insensitive substring).
@@ -149,6 +154,43 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
             state["embedder"] = get_embedder()
         return state["embedder"]
 
+    def _deepening(g) -> dict | None:
+        """A note when any Project is still at depth="fast": call resolution is name-based, so deep-only
+        edges (trait/generic dispatch, untyped-receiver and cross-module/crate calls) may be missing.
+        With deep analysis async by default a fast project usually has a deep pass (jedi / Roslyn /
+        rust-analyzer) still landing -- but "fast" is ALSO the final depth when deep is disabled or its
+        tool is unavailable, so the note names the state and lets the agent poll rather than promising a
+        pass is inbound. Returns None once every two-phase project is "deep" (single-phase projects set no
+        depth, so they never trip this). This is what tells an agent a who_calls/impact result might be
+        incomplete."""
+        try:
+            rows = g.ro_query("MATCH (p:Project) WHERE p.depth = 'fast' RETURN DISTINCT p.name").result_set
+        except Exception:
+            return None  # a malformed/empty graph must never break a read
+        pending = sorted({str(r[0]) for r in rows if r and r[0] is not None})
+        if not pending:
+            return None
+        return {"depth": "fast", "projects": pending,
+                "note": "these projects are at 'fast' depth: call resolution is name-based, so deep-only "
+                        "edges (trait/generic dispatch, untyped-receiver and cross-module/crate calls) may "
+                        "be missing. With deep analysis async by default this usually means a deep pass is "
+                        "still landing -- poll auryn_status until depth is 'deep'. If deep is disabled or "
+                        "unavailable here, 'fast' is the final depth."}
+
+    def _attach_deepening(g, out: dict, note_before: dict | None) -> dict:
+        """Attach the deepening note to a call-resolution-dependent result, closing the TOCTOU in BOTH
+        directions around the traversal. `note_before` is _deepening(g) snapshotted BEFORE the traversal:
+        it catches a project that was shallow when the traversal read it even if a deep pass has since
+        landed (a conservative, still-correct note). If that was clean -- every project looked deep -- we
+        re-check AFTER the traversal too, because a concurrent resync could have downgraded a project to
+        "fast" between the snapshot and the traversal, and we'd otherwise hand back a shallow result with
+        no warning. The re-check costs one extra (cheap, Project-only) read, and only in the steady
+        all-deep state; while anything is still deepening, note_before already carries the note."""
+        note = note_before if note_before is not None else _deepening(g)
+        if note is not None:
+            out["deepening"] = note
+        return out
+
     def tool(annotations: ToolAnnotations, op: str, **tool_kwargs):
         """Register a tool AND record each call as a usage event (core/usage.py) -- so every graph
         access is counted by operation type. `tool_kwargs` (e.g. `title=`) pass through to the MCP
@@ -190,11 +232,12 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         the repo (or switch to a graph that has data). `graph` picks which graph to report on
         (default: the session default); `list_graphs` shows every graph on the instance."""
         g, gname = _read_graph(graph)
+        deepening = _deepening(g)  # snapshot before the read, so a deep pass landing mid-call keeps the note
         status = gq.graph_status(g)
         out = {"graph": gname, **status}
         if not status.get("has_data"):
             out["hint"] = _EMPTY_HINT
-        return out
+        return _attach_deepening(g, out, deepening)  # surface whether a background deep pass is still landing
 
     @tool(read_only, "read")
     def list_graphs() -> dict[str, Any]:
@@ -224,7 +267,7 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
 
     @tool(writes, "write")
     def index_repository(
-        path: str = ".", project_name: str | None = None, deep: str = "inline", graph: str | None = None
+        path: str = ".", project_name: str | None = None, deep: str = "async", graph: str | None = None
     ) -> dict[str, Any]:
         """Build (or update) the code graph for a LOCAL repository directory -- no git
         required. Auto-detects every installed language plugin (currently C, C++, C#, Python,
@@ -241,13 +284,16 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         graph without launching a separate server. Call `list_graphs` first to see what exists.
 
         `deep` controls the second, deeper pass for the languages that have one (Python via
-        Jedi, C# via Roslyn) -- a fast structural pass first, then inferred types + resolved calls:
-          - "inline" (default): return only when the graph is fully deep. Simplest; use it
-            unless you want to start querying sooner.
-          - "background": return as soon as the fast graph is ready and deepen it in the
-            background -- you can query immediately (types/call edges land shortly after).
-            The graph reports its state per project as `depth` = "fast" then "deep".
+        Jedi, C# via Roslyn, Rust via rust-analyzer) -- a fast structural pass first, then inferred
+        types + resolved calls:
+          - "async" (default): return as soon as the fast graph is ready and deepen it in a detached
+            daemon -- you can query immediately; types/call edges land shortly after. The graph
+            reports its state per project as `depth` = "fast" then "deep", so check it before relying
+            on deep-only results (precise call resolution).
+          - "inline": return only when the graph is fully deep. Use it when you must not query until
+            resolution is complete.
           - "off": fast graph only (shallow types).
+        (An ad-hoc/embedded connection a detached daemon can't reach falls back to inline.)
 
         Same effect as the CLI `ingest`: after building the graph this registers the repo and
         sets up whatever resync trigger you chose at install time (`commit` -> git hooks, `save`
@@ -259,10 +305,13 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         with contextlib.ExitStack() as turn:
             turn.enter_context(sync_lock(resolve_project_root(path), queue_one=False))
             others = ingest.deep_threads()  # other repos' background deep passes, still running
+            # An ad-hoc (`--host`) server connection is one a detached daemon may not match (embed is
+            # forced inline for the same reason) -> deepen inline rather than queue a job it can't reach.
+            _deep = "inline" if deep == "async" and embed == "inline" else deep
             try:
-                report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=deep, embed=embed)
+                report = ingest.ingest_directory(GraphWriter(g), path, project_name=project_name, deep=_deep, embed=embed)
             finally:
-                if deep == "background":
+                if _deep == "background":
                     # That pass still writes the subgraph after this call has answered: a thread
                     # takes the lock over, waits for this call's pass (not the others') and only
                     # then releases it.
@@ -278,12 +327,12 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
     @tool(writes, "write")
     def ingest_repository(
         repo_uri: str, ref: str | None = None, project_name: str | None = None,
-        deep: str = "inline", graph: str | None = None
+        deep: str = "async", graph: str | None = None
     ) -> dict[str, Any]:
         """Like `index_repository`, but clones a GIT repository first (`repo_uri` is a path or
         any URI git understands; `ref` picks a branch/tag/commit). Use this for a remote repo;
         use `index_repository` for the working directory you're already in. `deep`
-        ("inline"|"background"|"off") works exactly as in `index_repository`.
+        ("async" default | "inline" | "off") works exactly as in `index_repository`.
 
         The same graph selection applies: `graph` targets an existing graph to EXTEND (co-locate a
         related repo so cross-repo references resolve) or a NEW name to ISOLATE (created on write).
@@ -293,8 +342,9 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         under `resync` -- but only a LOCAL path has a working tree to attach to; a remote clone
         has none, so `resync` will note that (clone locally to get commit/save resync)."""
         g, gname = _write_graph(graph)
+        _deep = "inline" if deep == "async" and embed == "inline" else deep  # ad-hoc -> daemon can't reach
         try:
-            report = ingest.ingest_repository(GraphWriter(g), repo_uri, ref=ref, project_name=project_name, deep=deep, embed=embed)
+            report = ingest.ingest_repository(GraphWriter(g), repo_uri, ref=ref, project_name=project_name, deep=_deep, embed=embed)
         except git.GitCommandError as e:
             raise ValueError(f"couldn't access git repository {repo_uri!r}: {e}") from e
         # Parity with the CLI: wire the resync trigger onto a local checkout when the URI is one;
@@ -404,10 +454,11 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         callers). The answer to "what uses X / who depends on X's behavior". `graph` picks which
         graph the id lives in (default: the session default)."""
         g, gname = _read_graph(graph)
+        deepening = _deepening(g)  # snapshot before the traversal (see _attach_deepening)
         result = gq.callers(g, node_id, max_depth)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
-        return {"graph": gname, **result}
+        return _attach_deepening(g, {"graph": gname, **result}, deepening)
 
     @tool(read_only, "read")
     def callees(node_id: str, max_depth: int = gq.DEFAULT_CALL_DEPTH, graph: str | None = None) -> dict[str, Any]:
@@ -415,10 +466,11 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         callees). The answer to "what does X do / what does X depend on". `graph` picks which
         graph the id lives in (default: the session default)."""
         g, gname = _read_graph(graph)
+        deepening = _deepening(g)  # snapshot before the traversal (see _attach_deepening)
         result = gq.callees(g, node_id, max_depth)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
-        return {"graph": gname, **result}
+        return _attach_deepening(g, {"graph": gname, **result}, deepening)
 
     @tool(read_only, "read")
     def find_path(
@@ -438,10 +490,11 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         `edges` (each with its real direction and type); `found` is false if no path exists
         within the bound. `graph` picks which graph the ids live in (default: the session default)."""
         g, gname = _read_graph(graph)
+        deepening = _deepening(g)  # snapshot before the traversal (see _attach_deepening)
         result = gq.shortest_path(g, from_id, to_id, max_depth, directed, edge_types)
         if result is None:
             raise ValueError("one of the endpoint ids doesn't exist -- call locate() first")
-        return {"graph": gname, **result}
+        return _attach_deepening(g, {"graph": gname, **result}, deepening)
 
     @tool(read_only, "read")
     def impact_of(
@@ -458,10 +511,11 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         Broader than who_calls/callees (multiple edge types); use it for "blast radius".
         `graph` picks which graph the id lives in (default: the session default)."""
         g, gname = _read_graph(graph)
+        deepening = _deepening(g)  # snapshot before the traversal (see _attach_deepening)
         result = gq.impact_of(g, node_id, direction, max_depth, edge_types, limit)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
-        return {"graph": gname, **result}
+        return _attach_deepening(g, {"graph": gname, **result}, deepening)
 
     @tool(read_only, "read", title="What will this change break?")
     def impact_of_diff(
@@ -510,10 +564,11 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         (completeness is the point); check `truncated`. `graph` picks which graph the id lives in
         (default: the session default)."""
         g, gname = _read_graph(graph)
+        deepening = _deepening(g)  # snapshot before the traversal (see _attach_deepening)
         result = gq.trace_entrypoint(g, entry_id, max_depth, limit)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=entry_id, graph_name=gname))
-        return {"graph": gname, **result}
+        return _attach_deepening(g, {"graph": gname, **result}, deepening)
 
     # -- escape hatch --------------------------------------------------------------
 
