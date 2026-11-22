@@ -4,12 +4,13 @@ two-service graph, plus a real git round-trip. Embedded-FalkorDB tests skip with
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from auryn.cli import cli
-from auryn.core.impact import git_diff, impact_of_diff, parse_unified_diff, symbols_in_ranges
+from auryn.core.impact import git_diff, git_toplevel, impact_of_diff, parse_unified_diff, symbols_in_ranges
 
 
 # -- parse_unified_diff (pure) ---------------------------------------------------------------
@@ -191,6 +192,11 @@ def test_impact_cli_git_errors_are_one_clean_line(tmp_path, monkeypatch):
         message = res.output.strip()
         assert message.startswith("Error: couldn't compute git diff") and said in message
         assert len(message.splitlines()) == 1 and "Traceback" not in message
+
+
+def test_git_toplevel_keeps_a_folder_name_that_ends_in_a_space(tmp_path):
+    r = _repo_with_a_change(tmp_path / "repo ")
+    assert Path(git_toplevel(str(r))) == r.resolve()
 
 
 def test_impact_speaks_the_paths_of_a_graph_indexed_from_a_subfolder(tmp_path, monkeypatch):

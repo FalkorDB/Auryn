@@ -70,7 +70,7 @@ def git_toplevel(path: str) -> str:
     """The top folder of the git work tree `path` is in. Raises CalledProcessError outside one."""
     return subprocess.run(
         ["git", "-C", path, "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
-    ).stdout.strip()
+    ).stdout.rstrip("\n")  # only git's newline: a folder name may end in a space
 
 
 def git_diff(repo_dir: str, base: str | None = None, head: str | None = None, *, staged: bool = False,
