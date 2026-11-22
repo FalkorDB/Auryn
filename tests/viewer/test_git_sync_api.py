@@ -96,10 +96,12 @@ def test_git_projects_endpoint_says_which_projects_the_viewer_cannot_sync(origin
     with the reason, instead of a ref picker and a Sync button that can only fail."""
     client, graph_name, _ = _seeded_client(origin_repo, graph, falkordb_connection, tmp_path)
     _seed_unsyncable_projects(origin_repo, graph, tmp_path)
+    GraphWriter(graph).merge_node(GraphNode("Project", {"id": "csharp://Numbered"}, {"name": "Numbered", "repo_uri": 123}))
 
     projects = {p["id"]: p for p in client.get(f"/api/graphs/{graph_name}/git-projects").get_json()}
 
     assert "sync_unavailable" not in projects["csharp://Widgets"]
+    assert "sync_unavailable" not in projects["csharp://Numbered"]  # not a path to judge: listed, as on main
     assert "isn't the root of a git repository" in projects["python://sample"]["sync_unavailable"]
     assert "C# projects only" in projects["python://Widgets"]["sync_unavailable"]
 
@@ -162,7 +164,7 @@ def test_sync_blocker_names_a_subfolder_of_a_repo_and_a_missing_source(origin_re
     subfolder = origin_repo[0] / "src"
     subfolder.mkdir(exist_ok=True)
     inside = _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": str(subfolder)}})
-    assert "isn't the root of a git repository" in inside
+    assert "a subfolder of the git repository" in inside and f"Re-ingest from {origin_repo[0]}" in inside
 
     for empty in ("", None):
         assert "No source is recorded" in _sync_blocker({"id": "csharp://Widgets", "properties": {"repo_uri": empty}})

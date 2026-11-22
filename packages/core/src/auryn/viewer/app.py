@@ -76,15 +76,21 @@ def _sync_blocker(project: dict) -> str | None:
         return "No source is recorded for this project, so there is nothing to sync from."
     # Only an ABSOLUTE local path can be judged from here. A relative one (`auryn ingest repo .`
     # stores it as given) was relative to where the ingest ran, not to this viewer; a remote URI
-    # is git's to open.
-    path = os.path.expanduser(uri)
+    # is git's to open, and so is a value that isn't text at all.
+    path = os.path.expanduser(uri) if isinstance(uri, str) else ""
     if os.path.isabs(path):
         try:
             with git.Repo(path):
                 pass
         except git.InvalidGitRepositoryError:  # a folder that exists but isn't a repository's root
-            return ("Indexed from a folder that isn't the root of a git repository: there is no "
-                    "branch or tag to sync to. Re-ingest the folder to refresh the graph.")
+            try:  # inside one, the branches are the repository's: only its root can be synced
+                with git.Repo(path, search_parent_directories=True) as repo:
+                    root = repo.working_tree_dir
+            except git.InvalidGitRepositoryError:
+                return ("Indexed from a folder that isn't the root of a git repository: there is no "
+                        "branch or tag to sync to. Re-ingest the folder to refresh the graph.")
+            return (f"Indexed from a subfolder of the git repository at {root}: only a whole repository "
+                    f"syncs. Re-ingest from {root} to sync it, or re-ingest the folder to refresh the graph.")
         except git.NoSuchPathError:  # it was there when the graph was built
             return "The source folder no longer exists, so there is nothing to sync from. Re-ingest it from where it is now."
         except Exception:  # noqa: BLE001 -- unreadable, malformed: the sync itself will tell

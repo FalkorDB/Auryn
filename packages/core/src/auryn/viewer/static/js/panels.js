@@ -385,6 +385,7 @@ export function buildGitCard(project, ctx) {
       setStatus(`Synced to ${data.commit_sha.slice(0, 8)} · nodes +${data.nodes_added}/−${data.nodes_removed}/~${data.nodes_updated}`, "ok");
       onSynced();
     } catch (err) {
+      if (err.syncUnavailable) { unavailable(err.message); return; }  // e.g. its folder was deleted since
       setStatus(`Error: ${err.message}`, "err");
       toast(err.message, true);
     } finally {
