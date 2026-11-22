@@ -415,9 +415,11 @@ def _local_names(body: list[ast.stmt], *, module_scope: bool = False) -> list[st
     resolve to -- so only a name the top-level code rebinds counts: `db = make()` after
     `from pkg import db`, or a second def / class / import of a name one of them already bound
     (`def helper` then `from lib import helper`; `from pkg import db` and, under an `if` or a
-    `try`, `from otherlib import db`) -- the rules don't know which of the two is live. Nested
-    def/class/lambda bodies are their own scopes, as in _calls_in_body; a comprehension's targets
-    are counted although they end with it -- a call through one, inside it, is just as dynamic."""
+    `try`, `from otherlib import db`) -- the rules don't know which of the two is live. A nested
+    def or class body is its own scope, as in _calls_in_body, but its decorators and defaults run
+    here, and so does a lambda's body, whose calls _calls_in_body counts as this scope's. A
+    comprehension's targets are counted although they end with it -- a call through one, inside
+    it, is just as dynamic."""
     names: set[str] = set()
     bound: dict[str, object] = {}  # module scope: what a def / class / import first bound a name to
 
@@ -443,7 +445,13 @@ def _local_names(body: list[ast.stmt], *, module_scope: bool = False) -> list[st
                 to = local if plain else (getattr(n, "module", None), getattr(n, "level", 0), alias.name)
                 if not module_scope or bound.setdefault(local, to) != to:
                     names.add(local)
-        if not (nested_scope or isinstance(n, ast.Lambda)):
+        if nested_scope or isinstance(n, ast.Lambda):  # what its definition evaluates, here
+            args = getattr(n, "args", None)
+            here = [*getattr(n, "decorator_list", []), *(args.defaults + args.kw_defaults if args else [])]
+            for child in here + ([n.body] if isinstance(n, ast.Lambda) else []):
+                if child is not None:  # a keyword-only parameter without a default
+                    visit(child)
+        else:
             for child in ast.iter_child_nodes(n):
                 visit(child)
 

@@ -459,7 +459,8 @@ def test_nested_def_body_calls_do_not_fold_into_the_enclosing_function():
 def test_local_names_are_the_names_a_body_binds_itself():
     # What the jedi engine's fallback must not bind through (see resolution._resolve_call): every
     # way a body binds a name, an `import` in it included -- but not its parameters (kept apart),
-    # a nested scope's own names, or a name it only reads.
+    # a nested scope's own names, or a name it only reads. A nested def's defaults and decorators
+    # run in this body, and so does a lambda's (its calls count as this body's).
     m = _module(
         "def f(param, items):\n"
         "    a = b, (c, *d) = param\n"
@@ -486,8 +487,16 @@ def test_local_names_are_the_names_a_body_binds_itself():
         "    import json\n"
         "    from os import path as p, sep\n"
         "    print(unbound)\n"
+        "    def with_default(x=(q := make())):\n"
+        "        pass\n"
+        "    @(r := deco)\n"
+        "    def decorated():\n"
+        "        pass\n"
+        "    run(lambda: (s := make()))\n"
     )
-    assert set(m.functions[0].local_names) == set("abcdeghijklmnp") | {"nested", "Local", "json", "sep"}
+    assert set(m.functions[0].local_names) == (
+        set("abcdeghijklmnpqrs") | {"nested", "Local", "json", "sep", "with_default", "decorated"}
+    )
 
 
 def test_module_local_names_are_only_what_the_top_level_code_rebinds():
