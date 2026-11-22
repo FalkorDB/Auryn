@@ -1,8 +1,9 @@
 """Unit tests for the project-wide Go resolution pass (no FalkorDB): RawFile list -> graph
 nodes/edges. Exercises the FLAT package tier (no HAS_SUBPACKAGE), method attachment to the
 receiver type, EMBEDS (struct + interface embedding), DEPENDS_ON (param/return, field, cross-
-package qualified, construction), CALLS resolution (bare same-package func, receiver/param-typed
-method, package-qualified cross-package func), and the deliberate absence of IMPLEMENTS."""
+package qualified, construction), CALLS resolution (bare same-package func, receiver/param/
+package-var-typed method, package-qualified cross-package func), and the deliberate absence of
+IMPLEMENTS."""
 
 from __future__ import annotations
 
@@ -134,6 +135,47 @@ def test_call_on_param_typed_interface():
     })
     calls = _edges(edges, "CALLS")
     assert ("model.func.Use(Repository)", "model.interface.Repository.method.Size()") in calls
+
+
+def test_call_on_package_var_typed_receiver():
+    nodes, edges = _resolve({
+        "bus/bus.go": (
+            "package bus\n"
+            'import (\n"net/http"\nnats "github.com/nats-io/nats.go"\n)\n'
+            "type Cache interface { Put(k string) }\n"
+            "var nc *nats.Conn\n"
+            "var (\nclient *http.Client\ncache Cache\n)\n"
+            'func Send() { nc.Publish("orders", nil); client.Do(nil); cache.Put("k") }\n'
+        ),
+    })
+    calls = _edges(edges, "CALLS")
+    nats_publish = "extern://go/github.com/nats-io/nats.go.Conn.Publish"
+    assert calls[("bus.func.Send()", nats_publish)] == {"resolution": "external"}
+    assert _node_by_id(nodes, nats_publish).properties["origin"] == "external"
+    assert _node_by_id(nodes, "extern://go/net/http.Client.Do").properties["origin"] == "stdlib"
+    assert calls[("bus.func.Send()", "bus.interface.Cache.method.Put(string)")] == {"resolution": "name"}
+
+
+def test_param_shadows_a_package_var():
+    _, edges = _resolve({
+        "bus/bus.go": (
+            "package bus\n"
+            'import (\n"net/http"\n"sync"\n)\n'
+            "var c *http.Client\n"
+            "func Send(c *sync.Mutex) { c.Lock() }\n"
+        ),
+    })
+    assert {t for (_f, t) in _edges(edges, "CALLS")} == {"extern://go/sync.Mutex.Lock"}
+
+
+def test_package_var_of_a_sibling_file_is_not_used():
+    # Only the func's own file types its package vars: an incremental resync re-parses just the
+    # files it re-emits, so a var from an untouched sibling file would resolve differently there.
+    _, edges = _resolve({
+        "bus/lock.go": 'package bus\nimport "sync"\nvar mu *sync.Mutex\n',
+        "bus/send.go": 'package bus\nimport "sync"\nfunc Send(wg *sync.WaitGroup) { mu.Lock(); wg.Done() }\n',
+    })
+    assert {t for (_f, t) in _edges(edges, "CALLS")} == {"extern://go/sync.WaitGroup.Done"}
 
 
 def test_no_implements_edge_emitted():

@@ -19,8 +19,8 @@ Go resolution specifics:
   cross-package guess). Cross-package references are always qualified (`model.Store`,
   `model.New()`) and resolved via the file's import set -> the target project package.
 - **Methods attach to their receiver type** (HAS_METHOD): `func (s *Store) Put()` -> Method
-  "Put" on Struct "Store". The receiver variable (`s`) types like Java's `this`; param and
-  receiver-struct-field names type the same way for call resolution."""
+  "Put" on Struct "Store". The receiver variable (`s`) types like Java's `this`; param,
+  receiver-struct-field and same-file package-var names type the same way for call resolution."""
 
 from __future__ import annotations
 
@@ -76,6 +76,7 @@ class _Func:
     label: str = "Function"  # "Function" | "Method"
     param_types: list = field(default_factory=list)
     file_id: str = ""  # the File that DEFINES this func/method (per-file provenance for delta-sync)
+    file_vars: dict = field(default_factory=dict)  # name -> type of the defining file's typed package-level vars
 
 
 @dataclass
@@ -277,19 +278,22 @@ def _resolve(raw_files: list[RawFile], project_id: str, seed: "GoGraphIndex | No
         pid = ids.package_id(project_id, pkey)
         imports = _import_map(rf)
         import_paths = _import_paths(rf)
+        file_vars = {v.name: v.type for v in rf.vars}
         for rfn in rf.functions:
             ptypes = [p.type for p in rfn.parameters]
             if rfn.receiver is None:
                 fid = ids.function_id(pid, rfn.name, ptypes)
                 funcs.append(_Func(fid, rfn.name, pkey, rf.package, ip, rfn, imports, import_paths,
-                                   label="Function", param_types=ptypes, file_id=file_ids[rf.path]))
+                                   label="Function", param_types=ptypes, file_id=file_ids[rf.path],
+                                   file_vars=file_vars))
             else:
                 owner = type_by_import_path.get((ip, rfn.receiver.type_name))
                 if owner is None:  # receiver type not a project type (shouldn't happen in valid Go)
                     continue
                 mid = ids.method_id(owner.type_id, rfn.name, ptypes)
                 funcs.append(_Func(mid, rfn.name, pkey, rf.package, ip, rfn, imports, import_paths,
-                                   owner=owner, label="Method", param_types=ptypes, file_id=file_ids[rf.path]))
+                                   owner=owner, label="Method", param_types=ptypes, file_id=file_ids[rf.path],
+                                   file_vars=file_vars))
 
     func_by_name: dict[str, list[tuple[str, str]]] = defaultdict(list)  # name -> [(func_id, import_path)]
     method_by_name: dict[str, list[tuple[str, str]]] = defaultdict(list)  # name -> [(owner_id, method_id)]
@@ -593,7 +597,10 @@ def _emit_calls(f: _Func, r: _Resolver) -> Iterator[GraphNode | GraphEdge]:
 
 def _member_types(f: _Func) -> dict:
     """identifier -> type-ref string, for names whose static type this file knows: the receiver
-    (its owner type), the parameters, and (for a method) the receiver struct's fields."""
+    (its owner type), the parameters, (for a method) the receiver struct's fields, and last the
+    typed package-level vars of the func's own file. A var declared in a sibling file of the
+    package is not used: an incremental resync re-parses only the files it re-emits, so a var
+    from an untouched sibling would resolve a call differently there than in a full ingest."""
     out: dict = {}
     rfn = f.raw
     if rfn.receiver is not None and rfn.receiver.name:
@@ -604,6 +611,8 @@ def _member_types(f: _Func) -> dict:
     if f.owner is not None:
         for fld in f.owner.raw.fields:
             out.setdefault(fld.name, fld.type)
+    for name, type_ in f.file_vars.items():
+        out.setdefault(name, type_)
     return out
 
 

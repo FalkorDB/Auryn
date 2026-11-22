@@ -2,8 +2,8 @@
 grammar handling: package clause, imports (incl. aliased), struct fields + embedding (anonymous
 fields, incl. `*T`), interface method specs + embedded interfaces, functions (return types,
 params, multi-name params, variadic), methods with pointer/value receivers, type aliases and
-named types, consts (single + block), and call/construction extraction (bare, selector with
-receiver, `new(T)`, composite literals)."""
+named types, consts (single + block), typed package-level vars, and call/construction extraction
+(bare, selector with receiver, `new(T)`, composite literals)."""
 
 from __future__ import annotations
 
@@ -155,6 +155,27 @@ def test_consts_single_and_block():
     consts = {c.name: c.value for c in rf.consts}
     assert set(consts) == {"MaxItems", "A", "B"}
     assert consts["MaxItems"] == "100"
+
+
+def test_typed_package_vars_single_and_block():
+    rf = _parse(
+        """
+        package p
+        var client *http.Client
+        var a, b Store = Store{}, Store{}
+        var (
+            nc *nats.Conn
+            count = 3
+        )
+        var w = kafka.NewWriter()
+        var _ io.Reader = (*Store)(nil)
+        func f() { var local *http.Client; _ = local }
+        """
+    )
+    # Only names with a WRITTEN type: `count`/`w` have none, `_` is blank, `local` is not package-level.
+    assert {v.name: v.type for v in rf.vars} == {
+        "client": "*http.Client", "a": "Store", "b": "Store", "nc": "*nats.Conn",
+    }
 
 
 def test_call_and_construction_extraction():

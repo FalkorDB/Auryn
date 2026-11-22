@@ -8,8 +8,9 @@ Every node type / field name below was confirmed empirically against tree-sitter
 
 - top level (`source_file` children): `package_clause` (child `package_identifier`),
   `import_declaration` (-> `import_spec_list` -> `import_spec`, or a single `import_spec`),
-  `const_declaration` (-> `const_spec`), `var_declaration` (ignored), `type_declaration`, and
-  `function_declaration` / `method_declaration`.
+  `const_declaration` (-> `const_spec`), `var_declaration` (-> `var_spec`, or `var_spec_list` ->
+  `var_spec`: one or more `name` identifiers, optional field `type`, optional field `value`),
+  `type_declaration`, and `function_declaration` / `method_declaration`.
 - `import_spec`: field `path` (interpreted_string_literal, quotes stripped) + optional field
   `name` (package_identifier alias).
 - `type_declaration` children: `type_spec` (field `name` type_identifier, optional field
@@ -49,6 +50,7 @@ from auryn.ingestors.go.raw_model import (
     RawReceiver,
     RawType,
     RawTypeMethod,
+    RawVar,
 )
 
 # Go predeclared type names / literals that never name a project type (dropped from type_refs).
@@ -378,6 +380,22 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                 out.append(RawConst(name=txt(nm), value=value_text, line_start=ls, line_end=le))
         return out
 
+    def build_vars(node) -> list[RawVar]:
+        """The explicitly typed names of a `var` declaration (`var c *http.Client`, `var a, b T`).
+        A `var x = expr` has no written type and is skipped, as is the blank `_`."""
+        specs = [c for c in node.children if c.type == "var_spec"]
+        for lst in (c for c in node.children if c.type == "var_spec_list"):
+            specs.extend(c for c in lst.children if c.type == "var_spec")
+        out: list[RawVar] = []
+        for spec in specs:
+            type_node = fieldn(spec, "type")
+            if type_node is None:
+                continue
+            t = type_text(type_node)
+            out.extend(RawVar(name=txt(nm), type=t) for nm in spec.children_by_field_name("name")
+                       if txt(nm) != "_")
+        return out
+
     # -- top level --------------------------------------------------------------------------
 
     for child in tree.root_node.children:
@@ -395,6 +413,8 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                             rf.imports.append(build_import(spec))
         elif t == "const_declaration":
             rf.consts.extend(build_consts(child))
+        elif t == "var_declaration":
+            rf.vars.extend(build_vars(child))
         elif t == "type_declaration":
             for c in child.children:
                 if c.type == "type_spec":
