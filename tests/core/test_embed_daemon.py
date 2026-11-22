@@ -209,6 +209,85 @@ def test_run_embed_daemon_is_single_flight():
         held.close()
 
 
+def test_holds_lock_file_until_it_is_removed_or_replaced():
+    embed_lock_path().parent.mkdir(parents=True, exist_ok=True)
+    with open(embed_lock_path(), "w") as held:
+        assert daemon._holds_lock_file(held)
+        embed_lock_path().unlink()
+        assert not daemon._holds_lock_file(held)
+        embed_lock_path().write_text("")  # a new file at the same path: another daemon's lock
+        assert not daemon._holds_lock_file(held)
+
+
+@pytest.mark.skipif(fcntl is None, reason="POSIX fcntl required for the run-lock")
+def test_run_embed_daemon_exits_when_a_second_daemon_takes_its_lock_path(monkeypatch, tmp_path):
+    """Regression: wiping AURYN_HOME under a live daemon deleted its lock file, so the next ingest
+    started a second daemon while the first kept draining the same queue. The first now exits at
+    its next poll and leaves the pidfile the second one wrote."""
+    monkeypatch.setattr(daemon, "_IDLE_GRACE_SECONDS", 999.0)  # would never idle-exit
+    monkeypatch.setattr(daemon, "_POLL_SECONDS", 0.01)
+    done = threading.Event()
+    threading.Thread(target=lambda: (daemon.run_embed_daemon(), done.set()), daemon=True).start()
+    deadline = time.monotonic() + 3.0
+    while not embed_pid_path().exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert embed_pid_path().exists(), "daemon did not start"
+
+    # The second daemon's pidfile and lock file, each moved in whole (pidfile first, as the second
+    # daemon writes it before this one can notice the new lock).
+    (tmp_path / "second.pid").write_text("4242")
+    (tmp_path / "second.lock").write_text("")
+    (tmp_path / "second.pid").replace(embed_pid_path())
+    (tmp_path / "second.lock").replace(embed_lock_path())
+    assert done.wait(timeout=3.0), "daemon kept running after its lock file was replaced"
+    assert embed_pid_path().read_text() == "4242"
+
+
+# ── auryn stop ────────────────────────────────────────────────────────────────────────────────
+def _fake_stops(monkeypatch, running: bool) -> list[str]:
+    """Record the order `auryn stop` stops things in; each reports `running`."""
+    import auryn.core.deepen.daemon as deepen_daemon
+    import auryn.core.server_manager as server_manager
+
+    calls: list[str] = []
+    for module, name, label in (
+        (deepen_daemon, "stop_deepen_daemon", "deepen"),
+        (daemon, "stop_embed_daemon", "embed"),
+        (server_manager, "stop_server", "server"),
+    ):
+        monkeypatch.setattr(module, name, lambda label=label: calls.append(label) or running)
+    return calls
+
+
+def test_stop_stops_the_background_daemons_before_the_server(monkeypatch):
+    """Regression: `auryn stop` stopped only the local FalkorDB; the embed daemon kept running and
+    its `_connect()` started the server again for the next queued request."""
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+
+    calls = _fake_stops(monkeypatch, running=True)
+    res = CliRunner().invoke(cli, ["stop"])
+    assert res.exit_code == 0, res.output
+    assert calls == ["deepen", "embed", "server"]
+    assert res.output.splitlines() == [
+        "Stopped the background deepen daemon.",
+        "Stopped the background embed daemon.",
+        "Stopped the local FalkorDB.",
+    ]
+
+
+def test_stop_with_nothing_running_prints_only_the_server_line(monkeypatch):
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+
+    _fake_stops(monkeypatch, running=False)
+    res = CliRunner().invoke(cli, ["stop"])
+    assert res.exit_code == 0, res.output
+    assert res.output == "No local FalkorDB running.\n"
+
+
 # ── end-to-end: real drain -> real embed_graph -> real FalkorDB vector index ───────────────────
 class _FakeEmbedder:
     """Deterministic 3-dim space (no model download); shares test_embed_worker's scheme."""
