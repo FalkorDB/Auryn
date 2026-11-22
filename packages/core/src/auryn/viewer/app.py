@@ -18,14 +18,22 @@ from auryn.core.embeddings import hybrid_search
 from auryn.core.graph_client import GraphWriter
 
 
+def _loopback_ip(address: str) -> bool:
+    """Whether `address` is a loopback IP. An IPv4-mapped one (`::ffff:127.0.0.1`) is judged by its
+    IPv4 form, which the `ipaddress` of older Python 3.12 releases doesn't do. Raises ValueError for a
+    name that isn't an IP."""
+    ip = ipaddress.ip_address(address)
+    return (getattr(ip, "ipv4_mapped", None) or ip).is_loopback
+
+
 def _is_loopback(name: str) -> bool:
     """`localhost`, or a loopback address in any spelling (all of 127.0.0.0/8, `::1`,
-    `0:0:0:0:0:0:0:1`) -- as a bind address or as the name in a Host header."""
+    `0:0:0:0:0:0:0:1`, `::ffff:127.0.0.1`) -- as a bind address or as the name in a Host header."""
     name = name.strip("[]").lower()
     if name == "localhost":
         return True
     try:
-        return ipaddress.ip_address(name).is_loopback
+        return _loopback_ip(name)
     except ValueError:  # some other DNS name
         return False
 
@@ -49,7 +57,7 @@ def _binds_loopback(host: str) -> bool:
         return True
     for *_, sockaddr in infos:
         try:
-            if ipaddress.ip_address(str(sockaddr[0]).split("%", 1)[0]).is_loopback:
+            if _loopback_ip(str(sockaddr[0]).split("%", 1)[0]):
                 return True
         except ValueError:
             return True

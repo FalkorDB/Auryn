@@ -83,6 +83,16 @@ def test_loopback_viewer_serves_loopback_host_names_only(falkordb_connection):
     assert exposed.get("/api/graphs", headers={"Host": "box.lan:8080"}).status_code == 200
 
 
+def test_an_ipv4_mapped_loopback_bind_keeps_the_host_check(falkordb_connection, monkeypatch):
+    """`--host ::ffff:127.0.0.1` binds IPv4 loopback, but the `ipaddress` of older Python 3.12
+    releases calls that address not loopback (as patched here). The check reads its IPv4 form."""
+    import ipaddress
+
+    monkeypatch.setattr(ipaddress.IPv6Address, "is_loopback", property(lambda self: self._ip == 1))
+    client = create_app(falkordb_connection, "::ffff:127.0.0.1").test_client()
+    assert client.get("/api/graphs", headers={"Host": "evil.example:8080"}).status_code == 403
+
+
 def test_overview_reports_correct_counts(tmp_path, graph, falkordb_connection):
     client, graph_name = _seeded_client(tmp_path, graph, falkordb_connection)
 
