@@ -353,7 +353,7 @@ def _result_columns(result) -> list[str]:
     return columns
 
 
-def run_read_query(graph: Graph, cypher: str, limit: int = DEFAULT_ALL_LIMIT) -> dict:
+def run_read_query(graph: Graph, cypher: str, limit: int = DEFAULT_ALL_LIMIT, *, lean: bool = False) -> dict:
     """Run an arbitrary user-supplied Cypher query **read-only** (GRAPH.RO_QUERY,
     so any write clause is rejected by FalkorDB itself, not by us) and reshape the
     result two ways: the {nodes, edges} the viewer's canvas speaks, AND `columns`/`rows`
@@ -392,7 +392,10 @@ def run_read_query(graph: Graph, cypher: str, limit: int = DEFAULT_ALL_LIMIT) ->
         for (node,) in rows:
             nodes_by_internal[node.id] = node
 
-    serialized = [serialize_node(n) for n in nodes_by_internal.values()]
+    # lean (MCP run_cypher) drops bulky props so e.g. `MATCH (c:GitCommit) RETURN c` can't flood the
+    # agent's context with commit messages / changed_files blobs; the viewer (default) keeps full nodes.
+    node_ser = serialize_node_lean if lean else serialize_node
+    serialized = [node_ser(n) for n in nodes_by_internal.values()]
     # a node the viewer can render must have an "id" property to key on
     renderable = [n for n in serialized if n["id"] is not None]
     id_by_internal = {
@@ -490,7 +493,8 @@ def repositories(graph: Graph) -> list[dict]:
     return [{"name": r[0], "repo_uri": r[1], "depth": r[2], "base_commit": r[3]} for r in rows]
 
 
-def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT) -> dict | None:
+def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT, *,
+              lean: bool = False, per_type_cap: int | None = None) -> dict | None:
     """One node plus its immediate (1-hop) neighbors, each direction bounded
     independently at `limit`. Unbounded until now -- a node with a huge fan-out
     (e.g. a Project with thousands of HAS_FILE edges into a large ingested
@@ -503,9 +507,40 @@ def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT) -> di
     if center is None:
         return None
 
+    # The viewer (default) wants full nodes capped per direction. The MCP get_context opts into
+    # `lean` (drop bulky props -- commit messages, PR/issue bodies, changed_files) and `per_type_cap`
+    # (bound EACH edge type so a hot node's thousands of CHANGED/HAS_COMMIT edges from the new
+    # provenance layer can't crowd out its structural neighbors), with the true fan-out in `edge_counts`.
+    ser = serialize_node_lean if lean else serialize_node
     nodes_by_id: dict[str, dict] = {}
     edges: list[dict] = []
     truncated = False
+
+    if per_type_cap is not None:
+        edge_counts: dict[str, dict[str, int]] = {"out": {}, "in": {}}
+        for direction in ("out", "in"):
+            count_q = ("MATCH (n:Entity {id: $id})-[r]->(m) RETURN type(r), count(*)" if direction == "out"
+                       else "MATCH (n:Entity {id: $id})<-[r]-(m) RETURN type(r), count(*)")
+            for rel_type, cnt in graph.ro_query(count_q, {"id": node_id},
+                                                timeout=DEFAULT_QUERY_TIMEOUT_MS).result_set:
+                edge_counts[direction][rel_type] = int(cnt)
+            for rel_type, total in edge_counts[direction].items():
+                if not _SAFE_REL_TYPE.match(rel_type):  # rel_type comes from the DB; validate before interpolating
+                    continue
+                fetch_q = (f"MATCH (n:Entity {{id: $id}})-[r:{rel_type}]->(m) RETURN properties(r), m LIMIT $lim"
+                           if direction == "out"
+                           else f"MATCH (n:Entity {{id: $id}})<-[r:{rel_type}]-(m) RETURN properties(r), m LIMIT $lim")
+                rows = graph.ro_query(fetch_q, {"id": node_id, "lim": per_type_cap},
+                                      timeout=DEFAULT_QUERY_TIMEOUT_MS).result_set
+                if total > len(rows):
+                    truncated = True
+                for rel_props, neighbor in rows:
+                    serialized = ser(neighbor)
+                    nodes_by_id[serialized["id"]] = serialized
+                    edges.append(serialize_edge(node_id, serialized["id"], rel_type, rel_props) if direction == "out"
+                                 else serialize_edge(serialized["id"], node_id, rel_type, rel_props))
+        return {"center": center, "nodes": list(nodes_by_id.values()), "edges": edges,
+                "edge_counts": edge_counts, "truncated": truncated}
 
     outgoing = graph.ro_query(
         "MATCH (n:Entity {id: $id})-[r]->(m) RETURN type(r), properties(r), m LIMIT $limit",
@@ -516,7 +551,7 @@ def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT) -> di
         truncated = True
         outgoing = outgoing[:limit]
     for rel_type, rel_props, neighbor in outgoing:
-        serialized = serialize_node(neighbor)
+        serialized = ser(neighbor)
         nodes_by_id[serialized["id"]] = serialized
         edges.append(serialize_edge(node_id, serialized["id"], rel_type, rel_props))
 
@@ -529,7 +564,7 @@ def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT) -> di
         truncated = True
         incoming = incoming[:limit]
     for rel_type, rel_props, neighbor in incoming:
-        serialized = serialize_node(neighbor)
+        serialized = ser(neighbor)
         nodes_by_id[serialized["id"]] = serialized
         edges.append(serialize_edge(serialized["id"], node_id, rel_type, rel_props))
 

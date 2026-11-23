@@ -226,6 +226,28 @@ class TestNeighbors:
         assert len(result["nodes"]) == 3
         assert result["truncated"] is True
 
+    def test_lean_per_type_cap_bounds_each_type_and_reports_counts(self, graph):
+        # A hot File: many CHANGED commits (the new provenance layer) + a few structural DEFINES.
+        # get_context's lean + per_type_cap must bound EACH type so the commit flood can't crowd out
+        # the structural neighbours, and must report the true fan-out + drop bulky props.
+        graph.query("CREATE (f:File {id: 'f', name: 'f'})")
+        graph.query("UNWIND range(1, 3) AS j MATCH (f:File {id: 'f'}) "
+                    "CREATE (f)-[:DEFINES]->(:Function {id: 'fn' + toString(j), name: 'fn' + toString(j)})")
+        graph.query("UNWIND range(1, 30) AS i MATCH (f:File {id: 'f'}) "
+                    "CREATE (:GitCommit {id: 'c' + toString(i), sha: toString(i), message: $m})-[:CHANGED]->(f)",
+                    {"m": "m" * 300})
+
+        result = gq.neighbors(graph, "f", lean=True, per_type_cap=5)
+
+        changed = [e for e in result["edges"] if e["type"] == "CHANGED"]
+        assert len(changed) == 5                                   # the 30 CHANGED are capped at 5
+        assert result["edge_counts"]["in"]["CHANGED"] == 30        # true fan-out still reported
+        assert result["edge_counts"]["out"]["DEFINES"] == 3
+        assert result["truncated"] is True
+        assert any(e["type"] == "DEFINES" for e in result["edges"])  # structural neighbours survive the flood
+        commits = [n for n in result["nodes"] if n["label"] == "GitCommit"]
+        assert commits and all("message" not in n["properties"] for n in commits)  # lean dropped the >200-char message
+
 
 class TestShortestPath:
     """The single path primitive behind the viewer's Path finder and the MCP
