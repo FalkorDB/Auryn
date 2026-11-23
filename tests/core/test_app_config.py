@@ -97,6 +97,19 @@ def test_embed_mode_roundtrip_and_setter(tmp_path, monkeypatch):
     assert load_config().embed_mode == "background"    # back to default -> section omitted again
 
 
+def test_git_info_toggle_roundtrips_and_defaults_off(tmp_path, monkeypatch):
+    from auryn.core.app_config import load_config, set_git_info_enabled
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    assert load_config().git_info_enabled is False
+    set_git_info_enabled(True)
+    assert load_config().git_info_enabled is True
+    assert '[git_info]' in (tmp_path / "cg" / "config.toml").read_text()
+    set_git_info_enabled(False)
+    assert load_config().git_info_enabled is False
+    assert "git_info" not in (tmp_path / "cg" / "config.toml").read_text()
+
+
 def test_reinstall_preserves_embed_mode(tmp_path, monkeypatch):
     """Re-running install only updates backend + agents; a persisted embed mode (and the other
     settings) must survive, not silently reset to the default."""

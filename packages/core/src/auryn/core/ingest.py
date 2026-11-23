@@ -69,6 +69,7 @@ DEEP_MODES = ("inline", "background", "off")
 # Background deep passes started by this process (daemon threads). join_deep_phase() awaits
 # them -- optional for a server, used by tests and any caller that must not exit early.
 _deep_threads: list[threading.Thread] = []
+_git_info_threads: list[threading.Thread] = []
 
 
 def _build_filter(include_dirs, exclude_dirs, include_suffixes, exclude_suffixes):
@@ -512,6 +513,29 @@ def _ingest_from_source(
         skip=enrichment_skip,
     )
 
+    # Provenance is opt-in and kept in its own labels/IDs so the code delta engine never
+    # owns or removes it. Run the potentially large history/API pass off the ingest path, just
+    # like deep analysis: callers can query the code graph immediately while provenance fills in.
+    from auryn.core.app_config import load_config
+    if load_config().git_info_enabled:
+        if isinstance(source, GitRepoCache):
+            git_repo_path = source._path
+        elif isinstance(source, WorkingTreeSource):
+            git_repo_path = source._root
+        else:
+            git_repo_path = None
+        _spawn_git_info(writer.sibling(), git_repo_path, source_uri)
+    else:
+        # The setting describes graph contents as well as future collection. This also
+        # reconciles a direct config.toml edit on the next ingest.
+        try:
+            from auryn.core.git_info import purge_git_info
+            removed = purge_git_info(writer)
+            if removed:
+                logger.info("Git information disabled; removed %d provenance nodes", removed)
+        except Exception:
+            logger.exception("Git information cleanup failed; code ingestion succeeded")
+
     # Opt-in semantic layer: once every language's graph is settled, build/refresh embeddings so
     # the MCP `search_code` tool works. Off by default; enable with AURYN_EMBED=1 (see
     # embeddings.embedder.embeddings_enabled). By default the heavy compute is handed to the
@@ -713,6 +737,35 @@ def _spawn_deep(writer, source, target_sha, lang, *ctx) -> None:
     thread = threading.Thread(target=_target, name=f"deep-{lang.language}", daemon=True)
     thread.start()
     _deep_threads.append(thread)
+
+
+def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
+                    *, force_remote: bool = False) -> None:
+    """Collect repository provenance away from the code-ingest critical path."""
+    def _target() -> None:
+        try:
+            if repo_path is None:
+                from auryn.core.git_info import remove_git_info_for_source
+                remove_git_info_for_source(writer, source_uri)
+                logger.info("Git information skipped: source is not a Git repository")
+                return
+            from auryn.core.git_info import sync_git_info
+            summary = sync_git_info(writer, repo_path, source_uri=source_uri,
+                                    force_remote=force_remote)
+            logger.info("Git information synced: %s", summary)
+        except Exception:
+            logger.exception("Git information sync failed; code ingestion succeeded")
+
+    thread = threading.Thread(target=_target, name="git-info", daemon=True)
+    thread.start()
+    _git_info_threads.append(thread)
+
+
+def join_git_info(timeout: float | None = None) -> None:
+    """Wait for Git information workers started by this process (primarily for tests)."""
+    for thread in list(_git_info_threads):
+        thread.join(timeout)
+    _git_info_threads[:] = [thread for thread in _git_info_threads if thread.is_alive()]
 
 
 def join_deep_phase(timeout: float | None = None) -> None:

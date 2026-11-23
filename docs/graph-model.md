@@ -64,6 +64,35 @@ without re-reading the file.
 | `READS` / `WRITES` | code → `Table` | Data access (`WRITES` carries an `operation`: `INSERT`/`UPDATE`/`DELETE`). |
 | `REFERENCES` | column → column | Foreign keys. |
 
+### Git provenance labels (opt-in)
+
+When `[git_info].enabled = true`, verified public GitHub repositories add a repo-scoped provenance
+subgraph. IDs start with `github://<owner>/<repo>` and do not depend on the checked-out branch.
+The current collector writes `GitCheckout` (a local source mapping), `GitRepository`, `GitCommit`,
+`GitUser`, `GitBranch`, `GitTag`, `GitIssue`, `GitPullRequest`, `GitRelease`, `GitCheckSuite`,
+`GitCheckRun`, and `GitHubApp` nodes. A commit links directly to matching code `File` nodes through
+`CHANGED`; paths without a code `File` do not get a synthetic node, while the commit's `changed_files`
+JSON property preserves their paths and change types (`A`, `M`, or `D`). Renames appear as a deletion
+at the old path and an addition at the new path. Diffs compare against the first parent (root
+commits compare against an empty tree). Check suites and runs come from GitHub's provider-neutral
+Checks API, so results published by GitHub Actions and other GitHub Apps use the same model. The
+collector fetches checks for current local branch tips and PR head commits, rather than walking the
+entire history for CI results. Edges include `HAS_COMMIT`, `AUTHORED`, `COMMITTED`, `PARENT_COMMIT`,
+`HAS_BRANCH`, `POINTS_TO_COMMIT`, `HAS_TAG`, `TAGS_COMMIT`, `USES_REPOSITORY`, `HAS_ISSUE`,
+`HAS_PULL_REQUEST`, `HAS_RELEASE`, `OPENED_BY`, `CREATED_BY`, `REFERENCES_ISSUE`, `CLOSES_ISSUE`,
+`MERGED_AS`, `CHANGED`, `HAS_CHECK_SUITE`, `HAS_CHECK_RUN`, and `PROVIDED_BY`.
+
+Issue and pull-request authors link through `OPENED_BY`; release authors use `CREATED_BY`. A PR links
+to same-repository issues mentioned in its title or body through `REFERENCES_ISSUE`. `CLOSES_ISSUE`
+is emitted only when the PR is merged into the repository's verified default branch and its
+description uses GitHub closing syntax (`close`, `fix`, or `resolve`). Cross-repository issue
+references are currently ignored.
+
+The collector retains public contributor names, commit messages, and issue/PR/release text. It
+checks repository visibility anonymously before reading local history or GitHub contents. Public
+Checks API reads are also anonymous. A remote refresh runs at most daily during ordinary ingestion;
+`auryn git-info sync` forces one.
+
 > **Golden rule for a new ingestor: emit no edge rather than a wrong one.** The fast
 > tree-sitter pass is name-based; when a reference is ambiguous or unresolvable, it drops the
 > edge instead of guessing. Every present edge is therefore trustworthy. Relationships that

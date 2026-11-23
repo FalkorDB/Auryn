@@ -99,6 +99,14 @@ def _resolve_connection(
     return ensure_server(load_backend())
 
 
+def _purge_git_info_backend() -> int:
+    """Remove Git-information nodes from every graph on the configured backend."""
+    from auryn.core.git_info import purge_git_info
+
+    client = connect_client(_resolve_connection(None, None, None, None, False))
+    return sum(purge_git_info(GraphWriter(client.select_graph(name))) for name in client.list_graphs())
+
+
 @cli.command("view")
 @click.option("--host", default="127.0.0.1", show_default=True, help="Host the viewer's web server binds to.")
 @click.option("--port", default=8080, show_default=True, type=int, help="Port the viewer's web server binds to.")
@@ -372,22 +380,32 @@ def _prompt_backend(backend, host, port, username, password, ssl, assume_yes):
 @click.option("--ssl", is_flag=True, default=False, help="Connect to the remote FalkorDB over TLS.")
 @click.option("--trigger", type=click.Choice(["manual", "commit", "save"]), default=None,
               help="How the graph is kept fresh after an edit. Prompted for if omitted (default: commit).")
+@click.option("--git-info", "git_info", type=click.Choice(["on", "off"]), default=None,
+              help="Collect full local Git history and public GitHub metadata whenever a repo is ingested.")
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="Non-interactive: auto-select the backend (local unless --backend is given) and skip all prompts.")
-def install(backend, host, port, username, password, ssl, trigger, yes) -> None:
+def install(backend, host, port, username, password, ssl, trigger, git_info, yes) -> None:
     """Set up Auryn on this machine: choose a FalkorDB backend and register the MCP server
     with every detected agent (Claude Code, OpenAI Codex, Antigravity, GitHub Copilot, Cursor,
     Windsurf, Gemini CLI), user-scoped. Writes only to ~/.auryn and the agent's own config —
     never your repo. Re-runnable."""
-    from auryn.core.app_config import set_resync_trigger
+    from auryn.core.app_config import load_config, set_git_info_enabled, set_resync_trigger
     from auryn.core.install import default_server_command, do_install
 
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
     if trigger is None:
         trigger = "commit" if yes else click.prompt(
             "Keep the graph fresh on", type=click.Choice(["commit", "save", "manual"]), default="commit")
+    if git_info is None:
+        git_info = "off" if yes else ("on" if click.confirm(
+            "Collect full Git history and public GitHub issues, pull requests, releases, and tags?", default=False
+        ) else "off")
+    was_git_info_enabled = load_config().git_info_enabled
     config = do_install(chosen)
     set_resync_trigger(trigger)
+    set_git_info_enabled(git_info == "on")
+    if was_git_info_enabled and git_info == "off":
+        _purge_git_info_backend()
     # Semantic embeddings are always on (built in the background, off the ingest critical path) --
     # no install choice for it.
     click.echo("Semantic embeddings: on (built in the background on every ingest)")
@@ -395,6 +413,8 @@ def install(backend, host, port, username, password, ssl, trigger, yes) -> None:
                + {"commit": " (a git hook resyncs on each commit)",
                   "save": " (a watcher resyncs on save)",
                   "manual": " (resync on demand: `auryn sync`)"}[trigger])
+    click.echo(f"Git information: {'on' if git_info == 'on' else 'off'}"
+               + (" (local history plus public GitHub metadata on ingest)" if git_info == "on" else ""))
 
     if chosen.mode == "remote":
         click.echo(f"Backend: remote FalkorDB at {chosen.host}:{chosen.port}")
@@ -432,6 +452,59 @@ def uninstall(purge, yes) -> None:
     if purge:
         click.echo("Removed ~/.auryn.")
     click.echo("Remove the CLI itself with:  uv tool uninstall auryn")
+
+
+@cli.group("git-info")
+def git_info_group() -> None:
+    """Manage collection of local Git history and public GitHub metadata."""
+
+
+@git_info_group.command("sync")
+@click.argument("path", required=False, default=".")
+@click.option("--host", default=None, help="FalkorDB host. Default: the configured backend.")
+@click.option("--port", default=None, type=int, help="FalkorDB port (only with --host).")
+@click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
+@click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
+@click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
+def git_info_sync(path, host, port, username, password, ssl) -> None:
+    """Collect all locally reachable Git history and public GitHub metadata for PATH."""
+    import dataclasses
+    from pathlib import Path
+    from auryn.core.app_config import get_repo
+    from auryn.core.project import default_graph_name, resolve_project_root
+    from auryn.core.ingest import _spawn_git_info
+
+    root = Path(resolve_project_root(path))
+    reg = get_repo(str(root))
+    graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
+    config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
+    _spawn_git_info(GraphWriter(connect(config)), str(root), str(root), force_remote=True)
+    click.echo("Git information sync queued in the background.")
+
+
+@git_info_group.command("enable")
+@click.argument("path", required=False, default=".")
+@click.option("--host", default=None, help="FalkorDB host. Default: the configured backend.")
+@click.option("--port", default=None, type=int, help="FalkorDB port (only with --host).")
+@click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
+@click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
+@click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
+@click.pass_context
+def git_info_enable(ctx, path, host, port, username, password, ssl) -> None:
+    """Enable Git information collection and sync PATH immediately."""
+    from auryn.core.app_config import set_git_info_enabled
+    set_git_info_enabled(True)
+    ctx.invoke(git_info_sync, path=path, host=host, port=port, username=username,
+               password=password, ssl=ssl)
+
+
+@git_info_group.command("disable")
+def git_info_disable() -> None:
+    """Disable Git information collection on future ingests."""
+    from auryn.core.app_config import set_git_info_enabled
+    removed = _purge_git_info_backend()
+    set_git_info_enabled(False)
+    click.echo(f"Git information disabled; removed {removed} provenance nodes from the configured backend.")
 
 
 def _conn_options(fn):

@@ -8,7 +8,7 @@ The commands fall into six groups:
 | group | commands |
 |-------|----------|
 | **Set up / tear down** | `install`, `uninstall`, `serve`, `stop` |
-| **Ingest** | `ingest dir`, `ingest repo`, `quickstart`, `run <ingestor>`, `git-sync <ingestor>`, `enrich` |
+| **Ingest** | `ingest dir`, `ingest repo`, `quickstart`, `run <ingestor>`, `git-sync <ingestor>`, `git-info sync`, `enrich` |
 | **Hooks** | `hooks list`, `hooks new`, `hooks enable`, `hooks disable` |
 | **Keep fresh** | `sync`, `watch` |
 | **Manage what's ingested** | `list`, `forget`, `stats` |
@@ -29,6 +29,8 @@ every detected agent (e.g. Claude Code).
 - `--backend local|remote` — bundled falkordb-lite vs. an existing server (prompted if omitted).
 - `--host/--port/--username/--password/--ssl` — the remote server (with `--backend remote`).
 - `--trigger manual|commit|save` — how the graph is kept fresh after an edit (prompted if omitted).
+- `--git-info on|off` — collect local Git history and public GitHub metadata after ingestion
+  (prompted if omitted; defaults off; `--yes` defaults off).
 - `-y/--yes` — non-interactive (local backend unless `--backend` is given).
 
 ### `uninstall`
@@ -155,6 +157,13 @@ Resync a repo's graph **incrementally** — the target of the commit hook / save
 Reads the git diff + graph blast radius; re-parses only what changed. Post [hooks](#hooks) run at
 the tail (honouring install-wide/per-repo disables). `--deep off|inline|background`
 (default `off` = the fast freshness path) + connection options.
+
+### `git-info sync [<path>]`
+Collect all reachable commits, contributors, local branches/tags, and (for a verified public GitHub
+repository) issues, pull requests, releases, and remote tags. Git information collection is opt-in
+through `auryn install --git-info on`; when enabled, normal ingestion also refreshes it. `git-info
+enable [<path>]` changes the machine-wide setting and immediately syncs that checkout. `git-info disable`
+turns it off and removes Git-information nodes from existing graphs without touching code nodes.
 
 ### `watch`
 The save-trigger watcher daemon: resyncs a repo's graph when its files change (ADR 0003).

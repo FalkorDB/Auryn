@@ -1,6 +1,6 @@
 # ADR 0008 — Git & GitHub information: the repository-provenance layer
 
-Status: **Proposed (design only — no code yet).** Date: 2026-11-19.
+Status: **Accepted; initial implementation in progress.** Date: 2026-11-22.
 
 Builds on ADR 0007 (image-keyed deployment tier), ADR 0004 (external references as upgradable
 placeholder nodes), ADR 0002/0003 (incremental resync + triggers), and the
@@ -15,9 +15,9 @@ information" — three axes with different sources, ingestion modes, costs, and 
 
 | Axis | Answers | Source | Mode | Auth? |
 |---|---|---|---|---|
-| **A. CI** | what builds & deploys this image/service? | workflow YAML (**in-repo**) + optionally the runs API | static parse (config) / API (runs) | no (config) / yes (runs) |
+| **A. CI** | which checks passed or failed for a commit? | public GitHub Checks API | paged API (check suites/runs) | no (public repos) |
 | **B. History / ownership** | who wrote / last touched / how hot is this? | `git log` (local) | append-by-commit | no |
-| **C. GitHub platform** | which PR/issue/review changed this; who owns this path? | GitHub/GitLab API | networked, cursor-paged | yes |
+| **C. GitHub platform** | which PR/issue/review changed this; who owns this path? | public GitHub API | networked, paged | no (public repos only) |
 
 The decisions below are driven by five concerns the reviewer raised: **(1)** how we connect to the
 remote to pull PRs/issues, **(2)** keeping this *out* of the branch-/commit-switched code sync,
@@ -28,14 +28,14 @@ remote to pull PRs/issues, **(2)** keeping this *out* of the branch-/commit-swit
 
 This is the spine that answers concern **(2)** and shapes the rest.
 
-- **Separate labels.** Provenance nodes (`Commit`, `Contributor`, `PullRequest`, `Issue`, `Review`,
-  `CIRun`, …) use labels that are **not in any code engine's `OWNED_LABELS`**. The code's scoped
-  incremental resync (`stream_apply(proj_id, <code labels>, …)`, ADR 0002/0005) is label-scoped, so a
-  **branch switch / commit / save-watcher re-ingest never touches provenance** — and vice-versa.
-- **Separate trigger & cadence.** Code triggers (commit hook, save watcher, branch checkout) must
-  **not** fire a remote pull — it's expensive, rate-limited, and repo-level-invariant. Provenance syncs
-  on its own cadence: **on-demand** (`auryn github-sync` / an MCP tool) and an **optional scheduled
-  refresh**. Switching branches re-syncs only code.
+- **Separate labels.** Provenance nodes (`GitCommit`, `GitUser`, `GitPullRequest`, `GitIssue`,
+  `GitRelease`, …) use labels that are **not in any code engine's `OWNED_LABELS`**. The code's scoped
+  incremental resync (`stream_apply(proj_id, <code labels>, …)`, ADR 0002/0005) is label-scoped, so
+  code delta application never deletes provenance nodes.
+- **Separate ownership, shared opt-in.** Code triggers never own or delete provenance labels. When
+  `git_info.enabled` is on, ingestion refreshes local provenance and checks remote metadata no more
+  than daily; `auryn git-info sync` forces a refresh. With the setting off, code ingestion does not
+  collect Git information.
 - **Repo-scoped keys, not commit-scoped.** PRs/issues/commits key on the **repo + their own id**
   (`github://<owner>/<repo>/pull/<n>`, `git://<repo>/<sha>`), so they persist across checkouts.
 - **Joins tolerate code churn.** Provenance→code edges reference code by **stable key** (file path,
@@ -46,50 +46,38 @@ This is the spine that answers concern **(2)** and shapes the rest.
   source**: parsed by the code/deployment-tier sync, not the provenance sync. Only CI *runs* are
   provenance. (See §A.)
 
-## Policy: public repos only, opt-in, via the GitHub CLI
+## Policy: public repos only, opt-in
 
-To avoid data leakage, **Auryn never pulls from a private GitHub/GitLab repo.** The networked github
-data — axis **C** (Issues/PRs/reviews) and **CI runs** — is collected **only when the user explicitly
-asks** (opt-in: an `auryn github-sync` command / MCP tool / config flag) and **only for public repos**:
-- **Via the user's GitHub CLI** (`gh`; `glab` for GitLab) — Auryn shells out to it, so the CLI owns
-  authentication and **Auryn stores, sees, and logs no token** of its own.
-- **Public-repo gate:** before any content pull, check visibility (`gh repo view <o>/<r> --json
-  isPrivate`, or the GitLab equivalent) and **refuse a private repo** (log why). Public data carries no
+To avoid data leakage, **Auryn never collects Git information from a private or unverified repo.**
+Collection is opt-in through the install-time setting `git_info.enabled` and only runs for a
+repository whose GitHub visibility can be verified as public:
+- **Via the anonymous GitHub REST API** — Auryn does not need a GitHub CLI or token for public data.
+- **Public-repo gate:** before any content pull, check visibility (`GET /repos/{owner}/{repo}`) and
+  **refuse a private repo** (log why). Public data carries no
   leakage risk.
-- **Never automatic:** not triggered by `ingest`, a commit hook, the save-watcher, or a branch switch
-  (the separate-trigger rule) — the user initiates it.
-- The **recommended v1 is unaffected** — it is **entirely local** (CI config + ownership rollup from the
-  checkout + `git log`) and pulls from no repo at all.
+- When enabled, ingestion collects local Git data and refreshes remote data at most daily. An explicit
+  `auryn git-info sync` forces a remote refresh.
 
-## Automatic? No — network egress is opt-in and explicit
+## Automatic? Only after opt-in
 
-**Auryn never auto-pulls from a (private or public) GitHub repo as a side-effect of ingesting code.**
-- The **recommended v1 (CI config + ownership rollup) makes zero network calls** — it reads only the
-  checkout's workflow YAML and local `git log`. Ingesting a private repo phones nothing.
-- The only networked axes — **C (PRs/issues/reviews) and CI *runs*** — are **opt-in and explicit**: a
-  deliberate `auryn github-sync` command / an MCP tool / a config flag the user turns on. They are
-  **never triggered by `ingest`, a commit hook, the save-watcher, or a branch switch** (the
-  separate-trigger rule above). The **first** remote pull requires an explicit opt-in that states it
-  reads via the user's `gh`/token access; a scheduled refresh is itself opt-in.
-- Private data that lands in the graph is governed by the PII / no-client-data rule below (redact/hash
-  identities; never in a shared/public/demo graph).
+With the setting off, ingestion makes no Git-information API calls. With it on, code ingestion also
+refreshes the provenance graph; remote issue/PR/release/tag enumeration is throttled to once per day.
+`auryn git-info sync` is available for an immediate refresh. The collector uses no credentials and
+first checks that the repository is public; private or unverified repositories contribute no Git
+information nodes.
 
-## (1) Connecting to the remote (for C, and CI runs) — via the CLI
+## (1) Connecting to GitHub
 
-- **Identify the repo** from the checkout's `origin` remote (git_sync already carries `repo_uri`) →
-  `(host, owner, repo)`; pick `gh` (GitHub) vs `glab` (GitLab) from the host.
-- **Auth is delegated to the CLI.** Auryn shells out to `gh`/`glab` (e.g. `gh api
-  repos/{owner}/{repo}/issues --paginate`), so the CLI's existing login is used and **Auryn never sees,
-  stores, or logs a token.** If the CLI is absent / not logged in, the github-data step is **skipped
-  with a clear log** — it never blocks the code ingest.
-- **Public-only gate:** `gh repo view <o>/<r> --json isPrivate` (or the GitLab equivalent) must report
-  **public** before any content is pulled; a private repo is **refused** (policy above).
+- Identify `(owner, repo)` from the origin URL.
+- Use the anonymous REST API and paginate responses. No token is requested, stored, or used.
+- Verify public visibility before reading local history or remote contents; failure skips the entire
+  Git-information layer without failing code ingestion.
 
 ## (2′) Keeping provenance out of the code sync — summary
 
-Covered by the separate-subgraph spine above: distinct labels (not resync-scoped), distinct triggers
-(no remote pull on branch switch), repo-scoped ids, churn-tolerant joins. Net effect the reviewer asked
-for: **switching branches/commits re-ingests code only; PR/issue/history/CI-run data is untouched.**
+Covered by the separate-subgraph spine above: distinct labels (not resync-scoped), repo-scoped ids,
+and churn-tolerant joins. A code sync may trigger a configured provenance refresh, but code delta
+calculation cannot delete or replace provenance nodes.
 
 ## (3) Which fields to index — and memory
 
@@ -123,70 +111,68 @@ and shouldn't require a user to stand up. Instead: **on-demand + optional schedu
 cheap and rate-limit-friendly. Webhooks remain a reasonable *later* option for a **hosted/server**
 deployment (push-based, real-time) — not the default.
 
-## (5) Do we track CI? — split config vs runs
+## (5) Do we track CI?
 
-**Yes to CI config; defer CI runs.**
-
-- **CI config (static, in-repo) — build now, highest value/cost ratio.** Parsing `.github/workflows/*`
-  / `.gitlab-ci.yml` needs **no auth**, is **branch-tied source** (synced with code/deployment tier,
-  not provenance), and **completes the ADR 0007 loop**: a `CIJob` `BUILDS_IMAGE` → the shared `Image`
-  hub, `STORED_IN` → `Registry`, `DEPLOYS` → the k8s/compose/Helm `Service`. (ADR 0007 already reserved
-  this `ci` row.) Recognize `docker build/push` and `kubectl/helm` steps with a small command-pattern
-  matcher (not a shell interpreter). Low memory, low risk.
-- **CI runs (dynamic, API) — provenance, defer.** Run history / pass-fail / which-commit-deployed is
-  API-based (auth, rate limits) and more *operational* than *structural* — lower value for a code graph
-  and unbounded memory (run history grows forever). Opt-in later if demanded; keep only a bounded recent
-  window.
+**Yes to public Checks API data, modeled provider-neutrally.** `GitCheckSuite` and `GitCheckRun`
+represent checks from GitHub Actions and third-party GitHub Apps alike; `GitHubApp` identifies the
+publisher. Public check reads are anonymous. To bound API traffic and graph growth, collect results
+for current local branch tips and PR head commits, not every commit in the repository history.
+Workflow YAML parsing remains a separate code/deployment-tier follow-up.
 
 ## The three axes (now informed by the above)
 
-- **A. CI** — config as a code/deployment-tier producer (`auryn-ci`, extends ADR 0007); runs deferred.
-  Nodes `Pipeline`/`CIJob` (a classified `Resource`); edges `HAS_JOB`/`BUILDS_IMAGE`/`STORED_IN`/
-  `DEPLOYS`/`NEEDS`; the `deploy-ci` arm runs the shared `core.deploy` image lifecycle.
-- **B. History / ownership** — **rollup-by-default** (props on `File`/`Function`), full
-  `Commit`/`Contributor` graph opt-in + bounded; local `git log`, append-by-SHA, no auth; **PII-gated**.
-- **C. GitHub platform** — `PullRequest`/`Issue`/`Review`/`Owner` (CODEOWNERS) via the **`gh`/`glab`
-  CLI**; separate subgraph, poll-based, joins to `Commit`/`File`/`Package` by stable key; **PII-gated**.
-  **Opt-in and public-repo-only (no private-repo pulls — see Policy).**
+- **A. CI** — public Checks API provenance: check suites and runs linked to commits, with publisher
+  GitHub Apps represented explicitly.
+- **B. History / ownership** — complete reachable `GitCommit`/`GitUser` graph, local Git data,
+  append-by-branch-tip; public repository gate applies to the entire layer.
+- **C. GitHub platform** — `GitPullRequest`/`GitIssue`/`GitRelease` via the anonymous public GitHub
+  API; separate repo-scoped subgraph, refreshed at most daily during ingestion.
+  Issue and PR authors connect through `OPENED_BY`; PR text references connect to same-repository
+  issues through `REFERENCES_ISSUE`, and merged PRs with explicit closing keywords use `CLOSES_ISSUE`.
+  **Opt-in and public-repo-only (no private-repo collection — see Policy).**
 
 ## Cross-cutting: PII & the public-repo rule
 
-B and C introduce **human identities**. The hard rule is **no client/prospect data in the public repo**.
-So identities are **redacted/hashed by default**, real identities are **opt-in**, and **never** in a
-public/demo graph. This is the gating decision for B and C.
+B and C introduce **human identities**. This feature only collects verified public repositories, and
+the user has chosen to retain public contributor identities and public issue/PR content as returned
+by GitHub. Private or unverified repositories are excluded before any local history or remote content
+is ingested.
 
-## Recommended v1 (best value per memory, least setup — and zero network)
+## Initial implementation direction (user-approved)
 
-Both are **entirely local — no GitHub API, no egress, no token, nothing pulled from a private repo:**
+The user chose an all-or-none `git_info.enabled` setting, configured during install. When enabled,
+Auryn ingests all locally reachable commits, authors/committers, and tags, plus public GitHub issues,
+pull requests, releases, and tags. The initial implementation uses GitPython and anonymous GitHub
+REST API requests; it does not require `gh` authentication. It runs after code ingestion and writes
+repo-scoped provenance labels so code delta sync does not remove the data. CI workflow/run ingestion
+and review-level details remain follow-up work.
 
-1. **CI config** (A) — extends ADR 0007, no auth, branch-tied, completes the build→deploy loop.
-2. **Ownership rollup** (B-lite) — props on `File`/`Function` from `git log`, bounded, redacted; big
-   value (ownership/recency/hotspots) at near-zero memory.
+`auryn git-info enable [path]` sets the setting and syncs that checkout immediately. Disabling removes
+the provenance labels from existing graphs; a direct config-file change to disabled is reconciled on
+the next ingest. Changing a checkout's origin retargets its `GitCheckout` link and prunes the prior
+repository subgraph when no other checkout references it.
 
-Everything else — full commit graph, PR/issue/review graph (C), CI runs — is **opt-in later**, each
-ratified in its own ADR (C especially: auth + rate-limit + poll model + PII).
+The collector streams local commit nodes and edges in bounded batches. API pagination follows the
+GitHub `Link` header and is restricted to `api.github.com`. Remote API failures do not fail code
+ingestion; local Git information is still collected.
 
 ## Decided (this ADR)
 
-- **Private repos: never pulled.** Networked github data is **public-repo-only**, **opt-in** (explicit,
-  never automatic), and fetched **via the user's `gh`/`glab` CLI** (no token handled by Auryn).
-- **Provenance is a separate subgraph** (own labels, own trigger/cadence, repo-scoped ids,
-  churn-tolerant joins) → a branch/commit switch never touches it, and it never fires on a code ingest.
+- **Private repos: never collected.** The entire Git-information layer is gated by an anonymous
+  public-visibility check and enabled/disabled through configuration.
+- **Provenance is a separate subgraph** (own labels, repo-scoped ids, churn-tolerant joins); code
+  delta calculation never owns or deletes it.
 - **No webhooks** (poll on-demand/scheduled; webhooks only for a future hosted deployment).
 
-## Still open for the reviewer
+## Follow-up work
 
-1. **History granularity:** ownership **ROLLUP** (props on File/Function) by default, with a full
-   `Commit`/`Contributor` graph opt-in + bounded — or commit-level nodes from the start (memory cost)?
-2. **PII of public data:** author names in public PRs/issues/commits are low-stakes, but still —
-   redact/hash by default, or keep real identities for public repos?
-3. **Sequencing / appetite:** is the near-term build the **public github-data collector** (C + CI runs
-   via `gh`, opt-in) — the "real value" you flagged — the **local v1** (CI config + ownership rollup),
-   or both?
+1. Parse CI workflow configuration and connect declared build/deploy jobs to the deployment tier.
+2. Add review/comment detail with explicit API rate and graph-size limits.
+3. Add conditional request support so daily remote refreshes can avoid downloading unchanged data.
 
 ## Consequences
 
 - Committing to the separate-subgraph contract now lets any axis land without re-keying, and guarantees
   the code graph stays branch-correct while provenance stays repo-stable.
-- The rollup-first choice for history makes the highest-value ownership signal essentially free on
-  memory; the full history/PR/issue/run graphs are deliberately opt-in behind their memory/auth costs.
+- Full history has higher storage and initial-ingest cost than an ownership rollup. The feature is
+  opt-in, and remote collection is anonymous and public-only.
