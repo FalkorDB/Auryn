@@ -78,3 +78,18 @@ def test_embed_batch_reraises_at_single_doc_and_on_programming_errors():
 
     with pytest.raises(TypeError):
         worker._embed_batch(_Buggy(), _docs([("a", 1), ("b", 2)]))  # programming error is not retried
+
+    # An ImportError (fastembed's lazy install failing) must NOT be retried by halving -- a smaller
+    # batch can't fix it, and halving would repeat the failing install log2(batch) times.
+    class _ImportFails:
+        def __init__(self):
+            self.calls = 0
+
+        def embed(self, texts):
+            self.calls += 1
+            raise ImportError("fastembed not installed")
+
+    emb = _ImportFails()
+    with pytest.raises(ImportError):
+        worker._embed_batch(emb, _docs([(f"d{i}", 10) for i in range(8)]))
+    assert emb.calls == 1                                        # propagated immediately, no halving

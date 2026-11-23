@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from auryn.core.embeddings.documents import (
     CALLABLE_LABELS,
     CONTAINER_LABELS,
+    MAX_CHARS,
     TYPE_LABELS,
     build_document,
 )
@@ -64,7 +65,9 @@ def _batch_char_budget() -> int:
         override = int(os.environ.get("AURYN_EMBED_BATCH_BUDGET", "") or 0)
     except ValueError:
         override = 0
-    return override if override > 0 else 500_000_000  # 5e8 char^2; MAX_CHARS**2 == 4e8 fits one doc
+    # Never below MAX_CHARS**2: one longest document is a batch's unavoidable minimum window, so a
+    # smaller override can't help (it would still yield that doc alone) -- clamp so the bound holds.
+    return max(override or 500_000_000, MAX_CHARS * MAX_CHARS)  # default 5e8 char^2; floor 4e8
 
 
 def _memory_aware_batches(documents: list, char_budget: int, max_count: int):
@@ -88,22 +91,36 @@ def _memory_aware_batches(documents: list, char_budget: int, max_count: int):
         yield batch
 
 
+def _is_allocation_error(exc: BaseException) -> bool:
+    """Whether `exc` is an out-of-memory / allocation failure worth retrying at a smaller batch.
+    MemoryError always; otherwise ONNX Runtime surfaces an over-allocation as a RuntimeError (or an
+    onnxruntime-specific type) whose message names the allocation -- so match the message. A smaller
+    batch can't fix an ImportError (fastembed's lazy install), a programming error, or bad input, so
+    those must NOT be retried."""
+    if isinstance(exc, MemoryError):
+        return True
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(s in text for s in ("alloc", "out of memory", "oom", "onnxruntimeerror"))
+
+
 def _embed_batch(embedder: "Embedder", docs: list) -> list:
-    """`embedder.embed` for one batch, with a halve-on-failure retry: ONNX Runtime can still
-    over-allocate on a memory-constrained machine even within the char budget, so on an allocation
-    failure split the batch and retry each half (down to a single document, then re-raise). Genuine
-    programming errors are re-raised immediately, not retried."""
+    """`embedder.embed` for one batch, halving on an ALLOCATION failure and retrying each half (down
+    to a single document, then re-raising). Only out-of-memory failures are retried -- an ImportError
+    from fastembed's lazy install, a programming error, or bad input won't improve with a smaller
+    batch and is propagated immediately (no repeating a failing install log2(batch) times). The retry
+    recursion runs OUTSIDE the except block, so the failed call's frame -- and any large buffers it
+    still references -- is released before the smaller retry; the point is to reduce memory pressure,
+    not keep the over-allocation alive underneath it."""
     try:
         return embedder.embed([doc for _, _, doc, _ in docs])
-    except (TypeError, KeyError, AttributeError, ValueError):
-        raise
-    except Exception as exc:  # noqa: BLE001 -- MemoryError / onnxruntime alloc failures aren't a fixed type
-        if len(docs) <= 1:
+    except Exception as exc:  # noqa: BLE001 -- allocation failures aren't a single fixed exception type
+        if len(docs) <= 1 or not _is_allocation_error(exc):
             raise
-        mid = len(docs) // 2
-        logger.warning("Embedding a batch of %d failed (%s); halving to %d/%d and retrying",
-                       len(docs), exc, mid, len(docs) - mid)
-        return _embed_batch(embedder, docs[:mid]) + _embed_batch(embedder, docs[mid:])
+        failure = exc
+    mid = len(docs) // 2
+    logger.warning("Embedding a batch of %d over-allocated (%s); halving to %d/%d and retrying",
+                   len(docs), failure, mid, len(docs) - mid)
+    return _embed_batch(embedder, docs[:mid]) + _embed_batch(embedder, docs[mid:])
 
 _ID_CHUNK = 1000
 """Ids per `WHERE id IN $ids` member-gathering query -- keeps a single request's parameter list
