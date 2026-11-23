@@ -142,6 +142,30 @@ def test_call_sites_record_transparent_callee_wrappers():
     assert {("run", 2), ("ping", 3), ("send", 4), ("recv", 5)} <= caller.called_sites
 
 
+def test_call_cols_record_callee_columns_in_utf16_not_bytes():
+    # The column-precise gate (#802) joins on (line, column), and scip-typescript emits occurrence columns in
+    # UTF-16 code units. call_cols must use the SAME encoding -- tree-sitter gives a BYTE column, which differs
+    # when non-ASCII precedes the callee. `éé` = 4 bytes but 2 UTF-16 units; `😀` (astral) = 4 bytes but 2.
+    src = (
+        b"function g() {\n"
+        b'  const s = "\xc3\xa9\xc3\xa9"; foo();\n'   # line 2: `"éé"; foo()` -- byte col 20, UTF-16 col 18
+        b'  const e = "\xf0\x9f\x98\x80"; bar();\n'   # line 3: `"😀"; bar()` -- byte col 20, UTF-16 col 18
+        b"}\n"
+        b"function foo() {}\n"
+        b"function bar() {}\n"
+    )
+    locs = resolution.callable_locations([parse_source(src, "src/a.ts")], project_id("p"))
+    cols = next(l for l in locs if l.name == "g").call_cols
+    assert {(2, 18, "foo"), (3, 18, "bar")} <= cols     # UTF-16 columns (byte columns would be 20)
+    assert (2, 20, "foo") not in cols and (3, 20, "bar") not in cols
+
+
+def test_call_cols_are_populated_so_the_column_gate_activates():
+    # When call_cols is non-empty the resolver switches from the (name, line) gate to the (line, column)
+    # position gate -- the whole point of the TS adoption. The fixture's locations must carry them.
+    assert any(loc.call_cols for loc in _fixture_locations())
+
+
 # -- the resolver: inferred-receiver dispatch, same-name disambiguation, cross-module ------------
 
 def test_resolve_calls_resolves_what_the_name_pass_cannot():

@@ -271,14 +271,16 @@ def callable_locations(files, proj_id: str):
             out.append(CallableLocation(
                 ids.function_id(mid, fn.name, _param_names(fn)), "Function", rel,
                 fn.line_start, fn.line_end, fn.name, frozenset(c.name for c in fn.calls),
-                frozenset((c.name, c.line) for c in fn.calls)))
+                frozenset((c.name, c.line) for c in fn.calls),
+                frozenset((c.line, c.col, c.name) for c in fn.calls)))
         for c in rf.classes:
             cid = ids.class_id(mid, c.name)
             for m in c.methods:
                 out.append(CallableLocation(
                     ids.method_id(cid, m.name, _param_names(m)), "Method", rel,
                     m.line_start, m.line_end, m.name, frozenset(cc.name for cc in m.calls),
-                    frozenset((cc.name, cc.line) for cc in m.calls)))
+                    frozenset((cc.name, cc.line) for cc in m.calls),
+                    frozenset((cc.line, cc.col, cc.name) for cc in m.calls)))
         for it in rf.interfaces:
             iid = ids.interface_id(mid, it.name)
             for m in it.methods:
