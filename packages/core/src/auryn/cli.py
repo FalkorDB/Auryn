@@ -20,11 +20,33 @@ the CLI twin of the MCP `ingest_repository`/`ingest_directory` tools.
 
 from __future__ import annotations
 
+import io
+import sys
+
 import click
 
 from auryn.core.graph_client import FalkorDBConfig, GraphWriter, connect, connect_client
 from auryn.core.logging_config import setup_logging
 from auryn.core.registry import discover_ingestors
+
+# A character the CLI prints in several messages (install summaries, progress output).
+_PROBE_CHAR = "\u2192"  # →
+
+
+def _ensure_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8 when the active codec cannot represent the
+    Unicode the CLI prints. On Windows, both console streams and redirects default to a
+    locale codec (cp1252 in Western locales), which raises UnicodeEncodeError on arrows,
+    dots and box characters instead of writing them. Leave every other stream alone: a
+    wrapper that already speaks UTF-8 (the MCP server's JSON-RPC stdio) and capture
+    buffers used by tests must not be rewrapped."""
+    for stream in (sys.stdout, sys.stderr):
+        if not isinstance(stream, io.TextIOWrapper):
+            continue
+        try:
+            _PROBE_CHAR.encode(stream.encoding or "ascii")
+        except (LookupError, UnicodeEncodeError):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 @click.group()
@@ -36,6 +58,7 @@ def cli(verbose: bool) -> None:
     """Extracts structural metadata from various sources into a FalkorDB graph."""
     from auryn.core import progress
 
+    _ensure_utf8_stdio()
     setup_logging()
     # --verbose only ever forces per-file logging ON; absence leaves AURYN_VERBOSE as-is, so an
     # externally-set env var still enables it (e.g. for the MCP server or a wrapper script).
