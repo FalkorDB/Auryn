@@ -171,12 +171,12 @@ def _deep_sync_at(writer, source, target_sha: str, files, module_map, modules, p
         return _fall_back()
 
     locations = resolution.callable_locations(files, proj_id)
-    # NO require_syntactic_call for Go: its fast parser omits a RawCall for a chained-selector call
-    # (`svc.store.Put()` -- a receiver too complex to name), so gating on the fast call-name set would drop
-    # those genuine deep-resolved method calls (the deep pass's main win). The cost is that a function used
-    # as a VALUE could yield a spurious edge; recovering that precision needs the fast parser to record
-    # every call-site name (shared v2 follow-up with the line-precise work).
-    deep = resolve_calls(scip_bytes, locations)
+    # require_call_site (#802): Go records every syntactic call's (name, line) in `called_sites` -- INCLUDING
+    # the chained-selector calls (`svc.store.Put()`) its fast `calls` list omits (receiver too complex to
+    # name) -- so the line-precise gate keeps those genuine deep-resolved method dispatches (the deep pass's
+    # main win) while dropping a callable used as a VALUE (`return helper`): a SCIP reference on a line with
+    # no syntactic call of that name is a value use, not a call, so it no longer yields a spurious edge.
+    deep = resolve_calls(scip_bytes, locations, require_call_site=True)
     if locations and not deep.covered_ids:
         # scip-go ran but analyzed none of our callables (module won't load, no toolchain): don't make a
         # hollow depth="deep" claim -- fall back to the fast graph.

@@ -174,20 +174,52 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
 
     # -- call / construction extraction -----------------------------------------------------
 
+    def callee_site(fn):
+        """(callee simple name, 1-based callee-identifier line) for the deep call-site gate -- unwrapping
+        parentheses and generic instantiation so `(helper)()`, `(s.store.Put)()` and the callee of a generic
+        call all yield a site. None when the callee isn't a plain named identifier/selector (an IIFE,
+        `arr[0]()`, ...). Over-recording is safe: a non-call (a generic TYPE conversion) resolves in SCIP to a
+        non-callable symbol, so the gate still emits no edge for it; under-recording would silently drop a
+        real deep call under `require_call_site`, so this must cover every named-callee syntax."""
+        while fn is not None:
+            t = fn.type
+            if t in ("identifier", "field_identifier", "type_identifier", "package_identifier"):
+                return txt(fn), fn.start_point[0] + 1
+            if t == "selector_expression":
+                field_node = fieldn(fn, "field")
+                return (txt(field_node), field_node.start_point[0] + 1) if field_node is not None else None
+            if t == "parenthesized_expression":
+                fn = fn.named_children[0] if fn.named_children else None
+            elif t == "generic_type":                     # `F[T]` / `x.M[T]` -- descend to the base name
+                fn = fieldn(fn, "type")
+            elif t == "qualified_type":                   # `pkg.F` / `x.M` -- the final component is the callee
+                fn = fn.named_children[-1] if fn.named_children else None
+            else:
+                return None
+        return None
+
     def collect_calls(body):
-        """(calls, construct_refs) from a function/method body. A selector call keeps its
-        operand identifier as the receiver; construction (`T{}`, `&T{}`, `new(T)`) yields
-        type refs, not calls (Go has no constructor to CALL)."""
+        """(calls, construct_refs, call_sites) from a function/method body. A selector call keeps its
+        operand identifier as the receiver; construction (`T{}`, `&T{}`, `new(T)`) yields type refs, not
+        calls (Go has no constructor to CALL). `call_sites` records (name, callee-identifier line) for EVERY
+        syntactic call -- chained-selector (`svc.store.Put()`), parenthesized (`(helper)()`), a shadowed
+        `new()`, and a generic call (`F[T](x)` / `x.M[T](y)`, which tree-sitter parses as a type conversion
+        over a generic_type, not a call_expression) -- so the deep pass's line-precise `require_call_site`
+        gate keeps scip-go's resolution of the forms `calls` omits instead of dropping them."""
         calls: list[RawCall] = []
         construct_refs: list[str] = []
+        call_sites: list[tuple[str, int]] = []
         if body is None:
-            return calls, construct_refs
+            return calls, construct_refs, call_sites
         seen: set = set()
         stack = [body]
         while stack:
             n = stack.pop()
             if n.type == "call_expression":
                 fn = fieldn(n, "function")
+                site = callee_site(fn)  # deep gate: unwraps parens, covers new()/chained/complex receivers
+                if site is not None:
+                    call_sites.append(site)
                 if fn is not None and fn.type == "identifier":
                     name = txt(fn)
                     if name == "new":
@@ -202,18 +234,26 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                             calls.append(RawCall(name=name, receiver=None))
                 elif fn is not None and fn.type == "selector_expression":
                     operand = fieldn(fn, "operand")
-                    field_node = fieldn(fn, "field")
-                    name = txt(field_node)
+                    name = txt(fieldn(fn, "field"))
                     recv = txt(operand) if operand is not None and operand.type == "identifier" else None
                     if name and recv is not None:
                         key = (name, recv)
                         if key not in seen:
                             seen.add(key)
                             calls.append(RawCall(name=name, receiver=recv))
+            elif n.type == "type_conversion_expression":
+                # `F[T](x)` / `x.M[T](y)` parse as a conversion over a generic_type, NOT a call_expression;
+                # record the generic callee's site so require_call_site accepts scip-go's resolution (SCIP
+                # decides function-vs-type: a real generic type conversion resolves to a non-callable symbol).
+                gt = n.named_children[0] if n.named_children else None
+                if gt is not None and gt.type == "generic_type":
+                    site = callee_site(gt)
+                    if site is not None:
+                        call_sites.append(site)
             elif n.type == "composite_literal":
                 construct_refs.extend(type_refs(fieldn(n, "type")))
             stack.extend(n.children)
-        return calls, construct_refs
+        return calls, construct_refs, call_sites
 
     # -- functions / methods ----------------------------------------------------------------
 
@@ -235,7 +275,7 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
     def build_function(node, receiver) -> RawFunction:
         params = parameters(fieldn(node, "parameters"))
         result = fieldn(node, "result")
-        calls, construct_refs = collect_calls(fieldn(node, "body"))
+        calls, construct_refs, call_sites = collect_calls(fieldn(node, "body"))
         ls, le = lines(node)
         refs = signature_refs(fieldn(node, "parameters"), result)
         refs.extend(construct_refs)
@@ -246,6 +286,7 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             return_type=type_text(result),
             type_refs=refs,
             calls=calls,
+            call_sites=call_sites,
             source=txt(node),
             doc=leading_comment(node, source),
             line_start=ls,
