@@ -112,6 +112,29 @@ func helper() {}
     assert save.called_names == names  # called_names mirrors the call-site names (attribute() disambiguation)
 
 
+def test_call_sites_cover_paren_generic_and_shadowed_new():
+    """Forms the fast `calls` list omits but scip-go still resolves -- so the strict require_call_site gate
+    must find a call site for each, or it would silently drop the deep edge (regression guard)."""
+    src = b"""package app
+
+func gen() {
+\thelper()
+\t(helper)()
+\tF[int](x)
+\tnew()
+\ty.M[int](z)
+}
+
+func helper() {}
+
+func new() {}
+"""
+    locs = resolution.callable_locations([parse_source(src, "app/gen.go")], _PROJ)
+    names = {n for n, _ in next(loc for loc in locs if loc.name == "gen").called_sites}
+    # bare + parenthesized `(helper)()`, generic `F[int](x)`, generic-method `y.M[int](z)`, shadowed `new()`
+    assert {"helper", "F", "M", "new"} <= names
+
+
 # -- the resolver: receiver-typed method dispatch + cross-package resolution ----------------------
 
 def test_resolve_calls_resolves_what_the_name_pass_cannot():
