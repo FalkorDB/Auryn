@@ -147,6 +147,28 @@ def test_changes_link_to_existing_code_file_instead_of_duplicate_git_file(graph,
     assert _count(graph, "GitFile") == 0
 
 
+def test_changed_edges_skipped_when_only_another_repos_project_is_present(graph, tmp_path, monkeypatch):
+    # A graph whose one Project belongs to a DIFFERENT repo must NOT get this repo's commits
+    # cross-linked to that repo's same-named files (the scoped match fails; the all-files fallback is
+    # unsafe here because a single project doesn't prove it is this repo).
+    repo = _make_repo(tmp_path / "checkout")
+    writer = GraphWriter(graph)
+    monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
+    monkeypatch.setattr(git_info, "_github_metadata", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
+    writer.merge_node(GraphNode("Project", {"id": "proj-other"},
+                                {"id": "proj-other", "repo_uri": "https://github.com/other/repo"}))
+    writer.merge_node(GraphNode("File", {"id": "other://file/main.py"},
+                                {"id": "other://file/main.py", "path": "main.py"}))
+    graph.query("MATCH (p:Project {id:'proj-other'}), (f:File {id:'other://file/main.py'}) "
+                "CREATE (p)-[:HAS_FILE]->(f)")
+
+    git_info.sync_git_info(writer, repo.working_tree_dir)
+
+    assert graph.ro_query("MATCH (:GitCommit)-[:CHANGED]->(:File) RETURN count(*)").result_set[0][0] == 0
+
+
 def test_changed_file_without_code_node_has_no_duplicate_file_entity(graph, tmp_path, monkeypatch):
     repo = _make_repo(tmp_path / "checkout")
     writer = GraphWriter(graph)
@@ -689,6 +711,39 @@ def test_urlopen_retrying_recovers_from_transport_drop(monkeypatch):
         git_info.urllib.request.Request("https://api.github.com/x"), timeout=5)
     assert attempts["n"] == 2  # retried once after the drop
     assert body == b'{"ok": true}'
+
+
+def test_urlopen_retrying_recovers_from_incomplete_read(monkeypatch):
+    # A truncated body raises http.client.IncompleteRead, which is neither URLError nor ConnectionError
+    # -- it must still be treated as a transient transport drop and retried.
+    import http.client
+
+    attempts = {"n": 0}
+
+    class _Resp:
+        headers = {"Link": ""}
+
+        def read(self):
+            return b'{"ok": true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(request, timeout):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise http.client.IncompleteRead(partial=b"trunc")
+        return _Resp()
+
+    monkeypatch.setattr(git_info.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(git_info.time, "sleep", lambda *_: None)
+
+    body, _ = git_info._urlopen_retrying(
+        git_info.urllib.request.Request("https://api.github.com/x"), timeout=5)
+    assert attempts["n"] == 2 and body == b'{"ok": true}'
 
 
 def test_urlopen_retrying_normalizes_exhausted_transport_drop_to_urlerror(monkeypatch):

@@ -255,17 +255,18 @@ def _code_file_index(writer: GraphWriter, source_uri: str, canonical: str) -> di
         {"origins": [source_uri, canonical]},
     ).result_set
     if not rows:
-        # No Project provenance matched this repo. Falling back to every File by path is only unsafe in
-        # a MULTI-repo graph -- there it would link this repo's commits to another repo's same-named
-        # files. When the graph holds at most one repo's project (the common single-repo case), the
-        # fallback is safe and keeps CHANGED edges working. Otherwise skip them (commits still carry
-        # their changed_files property).
+        # The scoped query found no matching Project for this repo. Falling back to every File by path
+        # risks cross-linking to another repo's same-named files, so only do it when the graph has NO
+        # repo-scoped projects at all (code not ingested, or a bare test graph -- at most this one repo).
+        # A single project that is NOT this repo must NOT be matched: if any repo project exists but
+        # none matched, this repo isn't identifiable here, so skip CHANGED edges rather than guess
+        # (commits still carry their changed_files property).
         distinct = writer.ro_query(
             "MATCH (p:Project) WHERE p.repo_uri IS NOT NULL RETURN count(DISTINCT p.repo_uri)"
         ).result_set
         repo_count = int(distinct[0][0]) if distinct and distinct[0] else 0
-        if repo_count > 1:
-            logger.debug("No Project matched %r/%r in a %d-repo graph; skipping CHANGED edges",
+        if repo_count != 0:
+            logger.debug("No Project matched %r/%r (%d repo project(s) present); skipping CHANGED edges",
                          source_uri, canonical, repo_count)
             return {}
         rows = writer.ro_query("MATCH (f:File) RETURN DISTINCT f.path, f.id").result_set
@@ -306,7 +307,7 @@ _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 # of commits): a dropped connection (RemoteDisconnected), a reset, or a read timeout. These surface
 # NOT as an HTTPError (which carries a status code) but as a bare transport exception, so the status
 # retry in `_graphql` never caught them. TimeoutError covers socket.timeout (its alias since 3.10).
-_TRANSPORT_ERRORS = (http.client.RemoteDisconnected, ConnectionError, TimeoutError)
+_TRANSPORT_ERRORS = (http.client.RemoteDisconnected, http.client.IncompleteRead, ConnectionError, TimeoutError)
 
 
 def _urlopen_retrying(request: urllib.request.Request, timeout: int, retries: int = 3):
@@ -951,8 +952,11 @@ def sync_git_info(
         {"repo": repo_id},
     )
     for tag in local_tags:
+        try:
+            target = tag.commit.hexsha
+        except (ValueError, TypeError, git.GitCommandError):
+            continue  # a tag pointing at a tree/blob (not a commit) -- no TAGS_COMMIT edge, don't abort
         tag_id = f"{repo_id}/tag/{urllib.parse.quote(tag.name, safe='')}"
-        target = tag.commit.hexsha
         ref_nodes.append(_node("GitTag", tag_id, name=tag.name, target_sha=target, source="git"))
         ref_edges.extend((
             _edge("HAS_TAG", "GitRepository", repo_id, "GitTag", tag_id),
