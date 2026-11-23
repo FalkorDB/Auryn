@@ -70,3 +70,11 @@ def test_resync_removes_deleted_workload(graph, tmp_path):
         "apiVersion: v1\nkind: Pod\nmetadata: {name: p, namespace: shop}\nspec:\n  containers:\n    - {name: c, image: x}\n"})
     assert sorted(r[0] for r in q("MATCH (s:Service) RETURN s.name")) == ["p"]
     assert q("MATCH (i:Ingress) RETURN count(i)") == [[0]]  # the Ingress was removed
+
+
+def test_resync_after_an_interrupted_sync_removes_the_last_workload(graph, tmp_path):
+    _ingest(graph, tmp_path, {"k8s/deploy.yaml": _MANIFEST})
+    graph.query("MATCH (p:Project) SET p.commit_sha = NULL")  # what a sync that died mid-apply leaves
+    (tmp_path / "k8s" / "deploy.yaml").unlink()
+    q = _ingest(graph, tmp_path, {})
+    assert q("MATCH (s:Service) RETURN count(s)") == [[0]]  # no stamp is not "never ingested"

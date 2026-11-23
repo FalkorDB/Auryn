@@ -218,6 +218,72 @@ def test_claudecode_register_then_deregister(tmp_path):
     assert not (tmp_path / "skills" / "auryn").exists()  # skill removed
 
 
+def test_claudecode_deregister_leaves_the_users_own_files_in_the_skill_dir(tmp_path):
+    # Uninstall removes what install copied -- not the whole folder: a file the user added next
+    # to the bundled skill (a note, their own variant) is theirs and must survive.
+    from auryn.core.agents import ClaudeCode
+
+    skill = tmp_path / "skills" / "auryn"
+    skill.mkdir(parents=True)
+    (skill / "MINE.md").write_text("mine")
+
+    cc = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills")
+    reg = cc.register(["PY", "-m", "auryn", "mcp"])
+    assert (skill / "SKILL.md").exists()
+
+    cc.deregister(reg)
+    assert not (skill / "SKILL.md").exists()  # ours: gone
+    assert (skill / "MINE.md").read_text() == "mine"  # theirs: untouched
+
+
+def test_claudecode_never_reaches_through_a_symlinked_skill_dir(tmp_path):
+    # After install the user replaces the skill folder with a link to a skill they maintain
+    # elsewhere. Its SKILL.md has the bundled file's name but is theirs: a re-install must not
+    # copy the bundled skill over it through the link (it still registers the MCP server), and
+    # uninstall must not follow the link and delete it.
+    from auryn.core.agents import ClaudeCode
+
+    cc = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills")
+    reg = cc.register(["PY", "-m", "auryn", "mcp"])
+
+    theirs = tmp_path / "my-skill"
+    theirs.mkdir()
+    (theirs / "SKILL.md").write_text("mine")
+    skill = tmp_path / "skills" / "auryn"
+    (skill / "SKILL.md").unlink()
+    skill.rmdir()
+    skill.symlink_to(theirs, target_is_directory=True)
+
+    reinstalled = cc.register(["PY", "-m", "auryn", "mcp"])
+    assert reinstalled.skill_path is None and reinstalled.server_name == "auryn"
+    assert [p.name for p in theirs.iterdir()] == ["SKILL.md"]
+    assert (theirs / "SKILL.md").read_text() == "mine"
+
+    cc.deregister(reg)
+    cc.deregister(reinstalled)
+    assert (theirs / "SKILL.md").read_text() == "mine"
+
+
+@pytest.mark.parametrize("denied_call", ["unlink", "is_symlink"])
+def test_claudecode_deregister_carries_on_past_a_file_it_cannot_remove(tmp_path, monkeypatch, denied_call):
+    # Best-effort, as the rmtree(ignore_errors=True) it replaced: an unremovable skill file -- or a
+    # skills folder it cannot even look into -- must not raise out of deregister and strand the
+    # agents and the manifest after it.
+    from pathlib import Path
+
+    from auryn.core.agents import ClaudeCode
+
+    cc = ClaudeCode(run=_ok, skills_dir=tmp_path / "skills")
+    reg = cc.register(["PY", "-m", "auryn", "mcp"])
+
+    def denied(self, *a, **k):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(Path, denied_call, denied)
+    cc.deregister(reg)  # does not raise
+    assert (tmp_path / "skills" / "auryn" / "SKILL.md").exists()  # and leaves what it couldn't check
+
+
 def test_claudecode_register_sets_always_load(tmp_path):
     # `claude mcp add` can't set alwaysLoad, so register() patches the config it wrote so the
     # server's tools load into the agent's INITIAL tool list instead of being deferred.
@@ -497,6 +563,21 @@ def test_mcp_config_agent_refuses_to_clobber_invalid_json(tmp_path):
     assert "// a comment" in cfg.read_text()  # left untouched
 
 
+@pytest.mark.parametrize("content", ['[{"theirs": 1}]', '{"mcpServers": [{"name": "theirs"}], "note": 1}'])
+def test_mcp_config_agent_refuses_to_clobber_a_config_of_another_shape(tmp_path, content):
+    # Valid JSON, but not the `{"mcpServers": {...}}` object we know how to merge one entry into:
+    # it used to be replaced wholesale by a config holding only our server.
+    from auryn.core.agents import McpConfigAgent
+
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(content)
+    agent = McpConfigAgent("cursor", tmp_path, cfg)
+
+    with pytest.raises(RuntimeError, match="refusing to overwrite"):
+        agent.register(["cairn", "mcp"])
+    assert cfg.read_text() == content  # left untouched
+
+
 def test_default_adapters_cover_the_agents():
     from auryn.core.agents import default_adapters
 
@@ -652,6 +733,54 @@ def test_agents_md_deregister_keeps_file_when_it_predated_us(tmp_path):
     reg = agent.register(["cairn", "mcp"])
     agent.deregister(reg)
     assert md.exists() and md.read_text() == "# Preexisting\n"
+
+
+def test_mcp_config_agent_treats_a_null_servers_map_as_absent(tmp_path):
+    # `"mcpServers": null` holds nothing to preserve, unlike a map of another shape: merge into
+    # it as if the key weren't there, and keep the rest of the file.
+    from auryn.core.agents import McpConfigAgent
+
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text('{"mcpServers": null, "note": 1}')
+    McpConfigAgent("cursor", tmp_path, cfg).register(["cairn", "mcp"])
+
+    data = json.loads(cfg.read_text())
+    assert data["note"] == 1 and data["mcpServers"]["auryn"]["command"] == "cairn"
+
+
+def test_agents_md_deregister_keeps_an_empty_file_that_predated_us(tmp_path):
+    # "Predated us" holds for an EMPTY file too: with only our section left it looked like a file
+    # install had created, and was deleted. Also after a re-install in between.
+    from auryn.core.agents import AgentsMdAgent
+
+    md = tmp_path / "AGENTS.md"
+    md.write_text("")
+    agent = AgentsMdAgent("agents-md", md)
+    agent.register(["cairn", "mcp"])
+    reg = agent.register(["cairn", "mcp"])  # re-run of install
+    agent.deregister(reg)
+    assert md.exists() and md.read_text() == ""
+
+
+@pytest.mark.parametrize("editor_added_a_bom", [False, True])
+def test_agents_md_deregister_removes_a_file_install_created(tmp_path, monkeypatch, editor_added_a_bom):
+    # ...while a file that exists only because install wrote it is removed again -- also after a
+    # re-install in between (the block is still the file's first byte), and also when an editor
+    # has since put a byte-order mark in front of it. Under a locale that isn't UTF-8 (Windows'
+    # cp1252, as patched here) too: the file is read back as the UTF-8 it was written in.
+    import io
+
+    from auryn.core.agents import AgentsMdAgent
+
+    monkeypatch.setattr(io, "text_encoding", lambda encoding, stacklevel=2: encoding or "cp1252")
+    md = tmp_path / "AGENTS.md"
+    agent = AgentsMdAgent("agents-md", md)
+    agent.register(["cairn", "mcp"])
+    reg = agent.register(["cairn", "mcp"])  # re-run of install
+    if editor_added_a_bom:
+        md.write_text("\ufeff" + md.read_text(encoding="utf-8"), encoding="utf-8")
+    agent.deregister(reg)
+    assert not md.exists()
 
 
 def test_do_install_skips_a_failing_adapter(tmp_path, monkeypatch):

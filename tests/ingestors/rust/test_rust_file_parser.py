@@ -252,3 +252,38 @@ def test_blank_line_between_comment_and_decl_is_not_doc():
         """
     )
     assert next(f for f in rf.functions if f.name == "loose").doc == ""
+
+
+def test_macro_internal_calls_are_counted():
+    # calls inside macros produce no CALLS edge (a macro body is a token tree) -- counted for #792
+    rf = _parse('fn f() { let x = format!("{}", helper()); assert!(x.is_empty()); }')
+    fn = {f.name: f for f in rf.functions}["f"]
+    assert fn.unresolved_macro_calls == 2  # helper() + is_empty()
+
+
+def test_macro_without_a_call_counts_zero():
+    rf = _parse('fn f() { println!("hello"); let v = vec![1, 2, 3]; }')
+    assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 0
+
+
+def test_macro_internal_turbofish_call_is_counted():
+    # a turbofish call inside a macro (`helper::<u32>()`) is still a call the engine can't see -- counted
+    rf = _parse('fn f() { println!("{}", helper::<u32>()); }')
+    assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 1
+
+
+def test_macro_string_literal_parens_are_not_counted():
+    # a `(` inside a macro's format/string literal is not a call -- it must not inflate the count
+    rf = _parse('fn f() { println!("example: helper()"); }')
+    assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 0
+
+
+def test_macro_raw_string_does_not_hide_following_call():
+    # a raw string `r#"..."#` may contain a bare `"`; it must not swallow a real call after it
+    rf = _parse('fn f() { format!(r#"a" {} {}"#, helper(), other()); }')
+    assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 2  # helper() + other()
+
+
+def test_macro_raw_string_with_embedded_quote_counts_zero_when_callfree():
+    rf = _parse('fn f() { println!(r#"value "{}" done"#); }')
+    assert {f.name: f for f in rf.functions}["f"].unresolved_macro_calls == 0

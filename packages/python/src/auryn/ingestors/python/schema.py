@@ -50,6 +50,7 @@ EDGE_SCHEMAS = [
     EdgeSchema(rel_type="HAS_ATTRIBUTE"),  # Class -> Attribute
     EdgeSchema(rel_type="HAS_PARAMETER"),  # Function|Method -> Parameter
     EdgeSchema(rel_type="HAS_NESTED_CLASS"),  # Class -> Class
+    EdgeSchema(rel_type="HAS_NESTED_FUNCTION"),  # Function|Method -> Function (a def nested in a body)
     # Semantic layer -- every one carries a provenance property (see contract).
     EdgeSchema(rel_type="EXTENDS"),  # Class -> Class (local base); {resolution, mro_index}
     EdgeSchema(rel_type="IMPLEMENTS"),  # Class -> Class (local ABC/Protocol base); {resolution}

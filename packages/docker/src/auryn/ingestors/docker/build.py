@@ -15,7 +15,8 @@ from collections.abc import Iterator
 
 from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.ingestors.docker import ids
-from auryn.ingestors.docker.image_ref import SCRATCH, image_id, parse_image_ref
+from auryn.core.image_ref import image_node
+from auryn.ingestors.docker.image_ref import SCRATCH, image_id
 from auryn.ingestors.docker.model import ParsedDockerfile, Stage
 
 # A whole `${...}` brace expression OR a bare `$NAME`. The brace form is matched as ONE unit so a
@@ -97,7 +98,7 @@ def _emit_stage(stage: Stage, parsed: ParsedDockerfile, fid: str, stage_ids: dic
         yield GraphEdge("BASED_ON", "BuildStage", {"id": sid}, "BuildStage", {"id": stage_ids[base]},
                         {"resolution": "declared"})
     elif base and base != SCRATCH:
-        yield from _emit_base_image(base)
+        yield image_node(base)
         yield GraphEdge("BASED_ON", "BuildStage", {"id": sid}, "Image", {"id": image_id(base)},
                         {"resolution": "declared"})
 
@@ -106,23 +107,3 @@ def _emit_stage(stage: Stage, parsed: ParsedDockerfile, fid: str, stage_ids: dic
         if c.from_stage and c.from_stage in stage_ids and stage_ids[c.from_stage] != sid:
             yield GraphEdge("COPIES_FROM", "BuildStage", {"id": sid}, "BuildStage", {"id": stage_ids[c.from_stage]})
 
-
-def _emit_base_image(ref: str) -> Iterator[GraphNode]:
-    """A base `Image` as a shared, project-independent node (`image://<normalized>`), emitted
-    `resolved:false` -- the stitch flips it true iff something BUILDS_IMAGE it. MERGE-dedup means the
-    same base used by many Dockerfiles across repos is ONE node (the shared-base signal)."""
-    r = parse_image_ref(ref)
-    yield GraphNode(
-        "Image",
-        {"id": image_id(ref)},
-        {
-            "ref": r.normalized,
-            "registry": r.registry,
-            "repository": r.repository,
-            "tag": r.tag,
-            "digest": r.digest,
-            "resolved": False,
-            "origin": "registry",  # an external pull until a BUILDS_IMAGE proves it internal
-            **({"raw": r.raw} if r.unresolved else {}),
-        },
-    )

@@ -51,9 +51,11 @@ def test_save_repo_dirs_filters(monkeypatch, tmp_path):
     assert watcher._save_repo_dirs() == {str(d1.resolve())}
 
 
-def test_suffix_and_exclude_sets():
-    suf = watcher._code_suffixes()
-    assert ".py" in suf and ".ts" in suf
+def test_watch_patterns_and_exclude_sets():
+    pats = watcher._watch_patterns()
+    assert "*.py" in pats and "*.ts" in pats          # code suffixes -> `*<suffix>` globs
+    # a basename-aware glob the old suffix set could not express (docker is installed in the test env)
+    assert "Dockerfile.*" in pats
     assert {".git", "node_modules"} <= watcher._excluded_dirs()
 
 

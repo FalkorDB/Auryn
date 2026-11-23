@@ -199,13 +199,18 @@ def test_deep_off_leaves_a_shallow_fast_graph(graph):
     assert not _has_inferred_receiver_call(graph)  # ast-only: no receiver-typed call
 
 
-def test_deep_inline_is_default_and_upgrades_in_place(graph):
-    # Default deep="inline": the fast (ast) pass runs, then the deep (jedi) pass upgrades the
-    # same nodes in place -- ending at the full jedi graph, same as a single jedi pass.
+def test_deep_async_default_downgrades_to_inline_on_embedded_backend(graph):
+    # The default is deep="async", but a detached daemon can't reach this in-process embedded DB, so
+    # it downgrades to inline: the fast (ast) pass runs, then the deep (jedi) pass upgrades the same
+    # nodes in place -- ending at the full jedi graph, synchronously, exactly as deep="inline" would.
+    from auryn.core.ingest import _daemon_can_reach
+
+    if _daemon_can_reach(GraphWriter(graph)):  # a server backend WOULD queue to the daemon; skip that path
+        pytest.skip("server backend: async queues to the deepen daemon, not the embedded-downgrade path")
     report = ingest.ingest_directory(GraphWriter(graph), str(_SAMPLE), project_name="demo")
 
     py = next(r for r in report.languages if r.language == "python")
-    assert py.deep_status == "inline"
+    assert py.deep_status == "inline"  # async -> inline (embedded backend unreachable by a daemon)
     assert py.deep_result is not None and py.deep_result.nodes_updated > 0  # upgraded, not re-added
     assert _depth(graph) == "deep"
     assert _has_inferred_receiver_call(graph)
@@ -283,3 +288,19 @@ def test_emit_streaming_matches_resolve():
     assert any(rel == "CALLS" for (rel, _f, _t, _p) in a_edges)                     # self.greet()/s.run()
     assert any(rel in ("INHERITS_FROM", "EXTENDS") for (rel, _f, _t, _p) in a_edges)  # Sub(Base) cross-module
     assert plan.broken == []
+
+
+def test_incremental_seeds_class_init_for_constructor_resolution(graph, tmp_path):
+    # #785 review: a constructor call collects only the CLASS name (not "__init__"), so the incremental
+    # symbol seed must still load the class's __init__ -- else the no-local-__init__ class-node fallback
+    # wrongly fires on a resync for a class that DOES define one (full vs incremental divergence).
+    from auryn.ingestors.python import incremental
+
+    (tmp_path / "svc.py").write_text("class Service:\n    def __init__(self):\n        pass\n")
+    (tmp_path / "app.py").write_text("from svc import Service\n\ndef boot():\n    return Service()\n")
+    ingest.ingest_directory(GraphWriter(graph), str(tmp_path), project_name="demo")
+    # a resync of only app.py references the class name 'Service', never '__init__'
+    idx = incremental.read_graph_index(
+        GraphWriter(graph), "python://demo", exclude_keys={"app"}, names={"Service", "boot"}
+    )
+    assert "svc.Service.__init__" in idx.callable_by_qname
