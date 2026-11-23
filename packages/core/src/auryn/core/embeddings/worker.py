@@ -27,12 +27,14 @@ What gets embedded:
 from __future__ import annotations
 
 import logging
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 
 from auryn.core.embeddings.documents import (
     CALLABLE_LABELS,
     CONTAINER_LABELS,
+    MAX_CHARS,
     TYPE_LABELS,
     build_document,
 )
@@ -48,8 +50,79 @@ _CONTAINER_SCAN_LABELS = tuple(sorted(CONTAINER_LABELS))
 _MEMBER_KINDS = sorted(CALLABLE_LABELS | TYPE_LABELS)
 
 _DEFAULT_BATCH = 128
-"""Documents embedded per model call. Batching amortizes model-call overhead; kept modest so a
-single batch's texts (which can each be a full function body) stay a reasonable payload."""
+"""Upper bound on documents per model call (a count cap). The ACTUAL batch is also bounded by
+memory via `_memory_aware_batches` below, so this only caps the short-document case."""
+
+
+def _batch_char_budget() -> int:
+    """Ceiling on `len(batch) * longest_doc_chars**2` per model call. fastembed pads a batch to its
+    longest encoding, and transformer attention costs `batch * heads * L**2 * 4 bytes` -- so one long
+    document in a large batch can allocate hundreds of GB (issue #835: a 217 GB fused-MatMul alloc).
+    Bounding batch*chars^2 caps that quadratic term. The default keeps peak attention near ~2 GB for
+    the default 12-head model (~3.5 chars/token); override with AURYN_EMBED_BATCH_BUDGET on a smaller
+    or larger machine. Kept >= MAX_CHARS**2 so a single longest document always fits a batch alone."""
+    try:
+        override = int(os.environ.get("AURYN_EMBED_BATCH_BUDGET", "") or 0)
+    except ValueError:
+        override = 0
+    # Never below MAX_CHARS**2: one longest document is a batch's unavoidable minimum window, so a
+    # smaller override can't help (it would still yield that doc alone) -- clamp so the bound holds.
+    return max(override or 500_000_000, MAX_CHARS * MAX_CHARS)  # default 5e8 char^2; floor 4e8
+
+
+def _memory_aware_batches(documents: list, char_budget: int, max_count: int):
+    """Yield batches of `documents` (each `(kind, id, doc, fp)`) so every batch keeps
+    `len(batch) * longest_doc_chars**2 <= char_budget` and `len(batch) <= max_count`. Documents are
+    sorted by length first, so long ones batch TOGETHER instead of padding many short docs up to a
+    single long one's length (which is what makes `batch * longest^2` explode). A document on its own
+    always fits (the budget is >= MAX_CHARS**2)."""
+    ordered = sorted(documents, key=lambda d: len(d[2]))
+    batch: list = []
+    longest = 0
+    for item in ordered:
+        candidate_longest = max(longest, len(item[2]))
+        if batch and ((len(batch) + 1) * candidate_longest * candidate_longest > char_budget
+                      or len(batch) >= max_count):
+            yield batch
+            batch, longest, candidate_longest = [], 0, len(item[2])
+        batch.append(item)
+        longest = candidate_longest
+    if batch:
+        yield batch
+
+
+def _is_allocation_error(exc: BaseException) -> bool:
+    """Whether `exc` is an out-of-memory / allocation failure worth retrying at a smaller batch.
+    MemoryError always; otherwise ONNX Runtime surfaces an over-allocation as a RuntimeError (or an
+    onnxruntime-specific type) whose message names the allocation -- so match the message. A smaller
+    batch can't fix an ImportError (fastembed's lazy install), a programming error, or bad input, so
+    those must NOT be retried."""
+    if isinstance(exc, MemoryError):
+        return True
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(s in text for s in ("alloc", "out of memory", "oom", "onnxruntimeerror"))
+
+
+def _embed_batch(embedder: "Embedder", docs: list) -> list:
+    """`embedder.embed` for one batch, halving on an ALLOCATION failure and retrying each half (down
+    to a single document, then re-raising). Only out-of-memory failures are retried -- an ImportError
+    from fastembed's lazy install, a programming error, or bad input won't improve with a smaller
+    batch and is propagated immediately (no repeating a failing install log2(batch) times). The retry
+    recursion runs OUTSIDE the except block, so the failed call's frame -- and any large buffers it
+    still references -- is released before the smaller retry; the point is to reduce memory pressure,
+    not keep the over-allocation alive underneath it."""
+    try:
+        return embedder.embed([doc for _, _, doc, _ in docs])
+    except Exception as exc:  # noqa: BLE001 -- allocation failures aren't a single fixed exception type
+        if len(docs) <= 1 or not _is_allocation_error(exc):
+            raise
+        # Keep the message TEXT, not the exception: its traceback would pin the failed embed frame's
+        # locals (the big batch) alive through the retry, defeating the release described above.
+        failure = f"{type(exc).__name__}: {exc}"
+    mid = len(docs) // 2
+    logger.warning("Embedding a batch of %d over-allocated (%s); halving to %d/%d and retrying",
+                   len(docs), failure, mid, len(docs) - mid)
+    return _embed_batch(embedder, docs[:mid]) + _embed_batch(embedder, docs[mid:])
 
 _ID_CHUNK = 1000
 """Ids per `WHERE id IN $ids` member-gathering query -- keeps a single request's parameter list
@@ -203,8 +276,8 @@ def embed_graph(
     )
 
     embedded = 0
-    for chunk in _chunked(documents, batch_size):
-        vectors = embedder.embed([doc for _, _, doc, _ in chunk])
+    for chunk in _memory_aware_batches(documents, _batch_char_budget(), batch_size):
+        vectors = _embed_batch(embedder, chunk)
         writer.write_embeddings(
             [(kind_label, node_id, vec, fp)
              for (kind_label, node_id, _, fp), vec in zip(chunk, vectors)]
