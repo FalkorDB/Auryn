@@ -12,6 +12,7 @@ import functools
 import hashlib
 import http.client
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -49,10 +50,9 @@ GIT_INFO_LABELS = tuple(schema.label for schema in NODE_SCHEMAS)
 
 
 def purge_git_info(writer: GraphWriter) -> int:
-    """Remove the Git-information subgraph from this graph, preserving code and other data."""
-    roots = writer.ro_query("MATCH (n:GitRepository) RETURN count(n)").result_set
-    if not roots or not roots[0][0]:
-        return 0
+    """Remove the Git-information subgraph from this graph, preserving code and other data. Iterates
+    every provenance label unconditionally (no GitRepository-present shortcut) so a purge that died
+    mid-loop after deleting GitRepository still cleans the remaining labels on retry."""
     removed = 0
     for label in GIT_INFO_LABELS:
         try:
@@ -121,6 +121,28 @@ def remove_git_info_for_source(writer: GraphWriter, source: str | Path) -> None:
     source_path = str(candidate.resolve()) if candidate.exists() else str(source)
     _unlink_checkout(writer, source_path)
 
+
+def _github_owner_repo(remote: str) -> tuple[str, str] | None:
+    """`(owner, repo)` iff `remote` is a GitHub remote whose HOST is exactly github.com. A substring
+    match (the old approach) accepted `https://notgithub.com/acme/demo.git` and
+    `/srv/x/github.com/acme/demo`, which would then verify visibility against the real `acme/demo` and
+    ingest an unrelated local repo under its identity -- so parse the remote and require the host."""
+    remote = remote.strip()
+    # SCP-like syntax ([user@]host:path) has no scheme; everything else is a URL urlparse understands.
+    scp = re.match(r"^(?:[^@/]+@)?([^/:]+):(?!/)(.+)$", remote)
+    if scp and "://" not in remote:
+        host, path = scp.group(1), scp.group(2)
+    else:
+        parsed = urllib.parse.urlparse(remote)
+        host, path = (parsed.hostname or ""), parsed.path
+    if host.lower() not in ("github.com", "www.github.com"):
+        return None
+    m = re.match(r"/?([^/]+)/([^/]+?)(?:\.git)?/?$", path)
+    if not m or not m.group(1) or not m.group(2):
+        return None
+    return m.group(1), m.group(2)
+
+
 def _canonical_repo(repo: git.Repo, source_uri: str) -> tuple[str, tuple[str, str] | None]:
     remote = source_uri
     try:
@@ -129,10 +151,10 @@ def _canonical_repo(repo: git.Repo, source_uri: str) -> tuple[str, tuple[str, st
             origin = next((r for r in remotes if r.name == "origin"), remotes[0])
             remote = origin.url
     except (AttributeError, IndexError):
-        pass
+        logger.debug("Could not read remotes for %r; falling back to source_uri %r as the remote",
+                     getattr(repo, "working_tree_dir", "?"), source_uri)
     remote = remote.strip()
-    match = re.search(r"(?:github\.com[:/])([^/]+)/([^/]+?)(?:\.git)?/?$", remote, re.I)
-    github = (match.group(1), match.group(2)) if match else None
+    github = _github_owner_repo(remote)
     if github:
         canonical = f"https://github.com/{github[0]}/{github[1]}"
     else:
@@ -171,6 +193,18 @@ def _commit_file_changes(commit: git.Commit) -> list[dict]:
     return changes
 
 
+def _clean_git_env() -> dict:
+    """The environment with Git's location overrides removed, so a `git` subprocess honors `-C <dir>`
+    instead of an inherited GIT_DIR/GIT_WORK_TREE. Those are set inside a git hook -- which is one of
+    this feature's triggers -- and would otherwise make `git log` read a different checkout than the
+    one we passed with -C."""
+    env = dict(os.environ)
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                "GIT_COMMON_DIR", "GIT_NAMESPACE"):
+        env.pop(var, None)
+    return env
+
+
 def _batch_commit_file_changes(repo: git.Repo, commits: list[git.Commit]) -> dict[str, list[dict]]:
     """Read per-commit A/M/D statuses with a small number of `git log` processes.
 
@@ -188,7 +222,7 @@ def _batch_commit_file_changes(repo: git.Repo, commits: list[git.Commit]) -> dic
              "--root", "--diff-merges=first-parent", "--no-renames",
              "--format=%x1e%H%x00%P", "--name-status", "-z",
              *(commit.hexsha for commit in batch)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, env=_clean_git_env(),
         ).stdout
         for record in output.split(b"\x1e"):
             if not record:
@@ -221,6 +255,19 @@ def _code_file_index(writer: GraphWriter, source_uri: str, canonical: str) -> di
         {"origins": [source_uri, canonical]},
     ).result_set
     if not rows:
+        # No Project provenance matched this repo. Falling back to every File by path is only unsafe in
+        # a MULTI-repo graph -- there it would link this repo's commits to another repo's same-named
+        # files. When the graph holds at most one repo's project (the common single-repo case), the
+        # fallback is safe and keeps CHANGED edges working. Otherwise skip them (commits still carry
+        # their changed_files property).
+        distinct = writer.ro_query(
+            "MATCH (p:Project) WHERE p.repo_uri IS NOT NULL RETURN count(DISTINCT p.repo_uri)"
+        ).result_set
+        repo_count = int(distinct[0][0]) if distinct and distinct[0] else 0
+        if repo_count > 1:
+            logger.debug("No Project matched %r/%r in a %d-repo graph; skipping CHANGED edges",
+                         source_uri, canonical, repo_count)
+            return {}
         rows = writer.ro_query("MATCH (f:File) RETURN DISTINCT f.path, f.id").result_set
     paths: dict[str, list[str]] = {}
     for path, file_id in rows:
@@ -278,9 +325,16 @@ def _urlopen_retrying(request: urllib.request.Request, timeout: int, retries: in
         except (urllib.error.URLError, *_TRANSPORT_ERRORS) as exc:  # transport drop (wrapped or bare)
             last_exc = exc
             if attempt == retries - 1:
-                raise
+                if isinstance(exc, urllib.error.URLError):
+                    raise
+                # Normalize a bare transport drop (RemoteDisconnected / ConnectionError / timeout) to
+                # URLError: every caller already catches URLError, so an exhausted transport failure
+                # degrades that one fetch instead of propagating raw and aborting the whole sync.
+                raise urllib.error.URLError(exc) from exc
         time.sleep(1.5 * (attempt + 1))
-    raise last_exc  # unreachable (the loop re-raises on the last attempt), but satisfies the type checker
+    if last_exc is not None:  # reached only if retries < 1; otherwise the loop returns or raises
+        raise last_exc
+    raise RuntimeError("_urlopen_retrying made no attempt (retries < 1)")
 
 
 def _api_pages(path: str) -> list[dict]:
@@ -340,9 +394,11 @@ def _verify_public_github(owner: str, name: str) -> str | None:
 
 
 _ISSUE_REF = re.compile(r"(?:(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+))?#(?P<number>\d+)")
+# GitHub closes only the issue immediately after a closing keyword -- "Fixes #4 and #5" closes #4,
+# not #5 (each target needs its own keyword). So capture just the one ref per keyword (not a list),
+# and allow the optional colon form ("Fixes: #4").
 _CLOSING_BLOCK = re.compile(
-    r"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+((?:(?:[\w.-]+/[\w.-]+)?#\d+)"
-    r"(?:\s*(?:,|and|&)\s*(?:(?:[\w.-]+/[\w.-]+)?#\d+))*)",
+    r"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\b:?\s+((?:[\w.-]+/[\w.-]+)?#\d+)",
     re.IGNORECASE,
 )
 
@@ -445,11 +501,16 @@ def _github_metadata(owner: str, name: str, repo_id: str,
         head_sha = (pr.get("head") or {}).get("sha") or ""
         base_sha = (pr.get("base") or {}).get("sha") or ""
         merge_sha = pr.get("merge_commit_sha") or ""
+        # The pulls LIST endpoint omits the `merged` boolean (only the single-PR GET has it) but does
+        # return `merged_at`, so derive merged from either. Without this, `merged` is always False --
+        # CLOSES_ISSUE never fires and MERGED_AS would key off merge_commit_sha, which GitHub also sets
+        # to a throwaway test-merge SHA for an OPEN mergeable PR (mislabeling open PRs as merged).
+        is_merged = bool(pr.get("merged") or pr.get("merged_at"))
         nodes.append(_node("GitPullRequest", pr_id, number=number, title=pr.get("title", ""),
                            body=pr.get("body") or "", state=pr.get("state", ""),
                            url=pr.get("html_url", ""), created_at=pr.get("created_at", ""),
                            updated_at=pr.get("updated_at", ""), closed_at=pr.get("closed_at") or "",
-                           merged=bool(pr.get("merged")), merged_at=pr.get("merged_at") or "",
+                           merged=is_merged, merged_at=pr.get("merged_at") or "",
                            draft=bool(pr.get("draft")), head_sha=head_sha, base_sha=base_sha,
                            merge_commit_sha=merge_sha))
         add_github_user(pr.get("user"), "GitPullRequest", pr_id)
@@ -457,7 +518,7 @@ def _github_metadata(owner: str, name: str, repo_id: str,
         referenced = _same_repo_issue_refs(f"{pr.get('title') or ''}\n{body}", owner, name) & issue_numbers
         base_ref = ((pr.get("base") or {}).get("ref") or "")
         closing = (_same_repo_closing_refs(body, owner, name) & issue_numbers
-                   if bool(pr.get("merged")) and default_branch and base_ref == default_branch else set())
+                   if is_merged and default_branch and base_ref == default_branch else set())
         for issue_number in sorted(referenced):
             issue_id = f"{repo_id}/issue/{issue_number}"
             edges.append(_edge("REFERENCES_ISSUE", "GitPullRequest", pr_id, "GitIssue", issue_id))
@@ -468,13 +529,17 @@ def _github_metadata(owner: str, name: str, repo_id: str,
             if sha:
                 commit_id = f"{repo_id}/commit/{sha}"
                 nodes.append(_node("GitCommit", commit_id, sha=sha, source="github"))
-        if merge_sha:
+        if is_merged and merge_sha:
             edges.append(_edge("MERGED_AS", "GitPullRequest", pr_id, "GitCommit",
                                f"{repo_id}/commit/{merge_sha}"))
 
     for release in _fetched["releases"]:
         tag = release.get("tag_name") or ""
         if not tag:
+            continue
+        if release.get("draft"):
+            # Drafts are unpublished and only visible with a push-authorized token -- collecting them
+            # would leak unpublished content, violating the public-only policy. Prereleases are public.
             continue
         obj_id = f"{repo_id}/release/{release.get('id', tag)}"
         nodes.append(_node("GitRelease", obj_id, tag_name=tag, name=release.get("name") or tag,
@@ -493,6 +558,9 @@ def _github_metadata(owner: str, name: str, repo_id: str,
         nodes.append(_node("GitTag", tag_id, name=name, target_sha=sha or "", source="github"))
         edges.append(_edge("HAS_TAG", "GitRepository", repo_id, "GitTag", tag_id))
         if sha:
+            # Emit a placeholder commit for the tag target (as the PR SHAs do above), so TAGS_COMMIT
+            # isn't silently dropped by merge_edges when the target isn't present locally.
+            nodes.append(_node("GitCommit", f"{repo_id}/commit/{sha}", sha=sha, source="github"))
             edges.append(_edge("TAGS_COMMIT", "GitTag", tag_id, "GitCommit", f"{repo_id}/commit/{sha}"))
     return nodes, edges
 
@@ -734,10 +802,12 @@ def sync_git_info(
         logger.warning("Git information skipped for %s: public visibility check failed (%s)", canonical, exc)
         return {"repository": canonical, "skipped": "public visibility check failed"}
     except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
-        # A transient API outage must not erase data previously collected from this same
-        # public repo. If origin changed, unlink the old repo because it no longer describes
-        # this checkout, even while the new target's visibility remains unverified.
-        if any(old_id != prospective_repo_id for (old_id,) in linked_before_check):
+        # A 404/451 means the repo is gone or has turned private (for anonymous access) -- that's a
+        # failed visibility check, so unlink the now-leaked provenance, exactly like PermissionError.
+        # Everything else (5xx, timeouts, connection drops) is a transient outage: keep data already
+        # collected from this same public repo -- but if the origin changed, unlink the stale repo.
+        gone_private = isinstance(exc, urllib.error.HTTPError) and exc.code in (404, 451)
+        if gone_private or any(old_id != prospective_repo_id for (old_id,) in linked_before_check):
             _unlink_checkout(writer, source_path)
         logger.warning("Git information skipped for %s: public visibility check failed (%s)", canonical, exc)
         return {"repository": canonical, "skipped": "public visibility check failed"}
@@ -770,7 +840,17 @@ def sync_git_info(
     ).result_set
     previous_tips = json.loads(state_rows[0][0]) if state_rows and state_rows[0][0] else {}
     previous_remote_sync = state_rows[0][1] if state_rows else None
-    current_tips = {branch.name: branch.commit.hexsha for branch in repo.heads}
+    # Track ALL refs (local branches + remote-tracking + tags), keyed by ref path, not just local
+    # branches -- so the incremental cursor covers the same scope as the initial `--all` walk.
+    # Otherwise fetched remote-tracking or tag-only commits that didn't move a local branch head are
+    # never collected on a later sync. (Keys changed from branch name to ref path; the first sync
+    # after this ships re-walks each ref once, which is idempotent.)
+    current_tips: dict[str, str] = {}
+    for ref in repo.refs:
+        try:
+            current_tips[ref.path] = ref.commit.hexsha
+        except (ValueError, TypeError, git.GitCommandError):
+            continue
 
     def commits_to_add():
         seen: set[str] = set()
@@ -857,6 +937,19 @@ def sync_git_info(
 
     local_tags = list(repo.tags)
     ref_nodes, ref_edges = [], []
+    # A ref can move (A->B); merge_edges only ADDS B's edge, leaving the stale edge to A behind, which
+    # accumulates on every resync of a moved ref. Delete the current refs' prior target edges before
+    # re-adding, so each ends with exactly one target. Local tags: delete just these tags' TAGS_COMMIT
+    # (leaves github-only tags' edges intact when a local tag counterpart is re-added here anyway).
+    local_tag_ids = [f"{repo_id}/tag/{urllib.parse.quote(t.name, safe='')}" for t in local_tags]
+    if local_tag_ids:
+        writer.query("MATCH (t:GitTag)-[e:TAGS_COMMIT]->() WHERE t.id IN $ids DELETE e", {"ids": local_tag_ids})
+    # Branches are fully re-enumerated from repo.heads below, so drop all of this repo's branch target
+    # edges up front and re-add the current set.
+    writer.query(
+        "MATCH (:GitRepository {id: $repo})-[:HAS_BRANCH]->(:GitBranch)-[e:POINTS_TO_COMMIT]->() DELETE e",
+        {"repo": repo_id},
+    )
     for tag in local_tags:
         tag_id = f"{repo_id}/tag/{urllib.parse.quote(tag.name, safe='')}"
         target = tag.commit.hexsha
@@ -889,32 +982,40 @@ def sync_git_info(
             remote_due = True
     remote_synced_at = previous_remote_sync
     if remote_due:
+        _remote_errs = (urllib.error.URLError, TimeoutError, PermissionError, ValueError, json.JSONDecodeError)
         try:
             remote_nodes, remote_edges = _github_metadata(*github, repo_id, default_branch)
-            check_shas = {commit.hexsha for commit in commits}   # CI for EVERY ingested commit (full history)
-            check_shas.update(current_tips.values())
-            check_shas.update(
-                str(node.properties.get("head_sha")) for node in remote_nodes
-                if node.label == "GitPullRequest" and node.properties.get("head_sha")
-            )
-            check_nodes, check_edges = _github_checks(*github, repo_id, check_shas)
-            remote_nodes.extend(check_nodes)
-            remote_edges.extend(check_edges)
-            # Metadata volumes are normally far smaller than commit history; still batch writes.
+            # Persist metadata FIRST so a later Checks failure can't discard it (batched writes).
             _replace_github_issue_edges(writer, repo_id)
             writer.merge_nodes(remote_nodes)
             writer.merge_edges(remote_edges)
-            remote_stats = {
+            remote_stats.update({
                 "issues": sum(n.label == "GitIssue" for n in remote_nodes),
                 "pull_requests": sum(n.label == "GitPullRequest" for n in remote_nodes),
                 "releases": sum(n.label == "GitRelease" for n in remote_nodes),
                 "github_tags": sum(n.label == "GitTag" and n.properties.get("source") == "github" for n in remote_nodes),
-                "check_suites": sum(n.label == "GitCheckSuite" for n in remote_nodes),
-                "check_runs": sum(n.label == "GitCheckRun" for n in remote_nodes),
-            }
+            })
             remote_synced_at = datetime.now(timezone.utc).isoformat()
-        except (urllib.error.URLError, TimeoutError, PermissionError, ValueError, json.JSONDecodeError) as exc:
+        except _remote_errs as exc:
             logger.warning("GitHub metadata was skipped for %s: %s", canonical, exc)
+            remote_nodes = []
+        else:
+            # Checks fetch+write runs SEPARATELY: on a big repo the anonymous 60/hr budget can exhaust
+            # mid-way, and that must NOT roll back the metadata already written above.
+            try:
+                check_shas = {commit.hexsha for commit in commits}   # CI for EVERY ingested commit
+                check_shas.update(current_tips.values())
+                check_shas.update(
+                    str(node.properties.get("head_sha")) for node in remote_nodes
+                    if node.label == "GitPullRequest" and node.properties.get("head_sha")
+                )
+                check_nodes, check_edges = _github_checks(*github, repo_id, check_shas)
+                writer.merge_nodes(check_nodes)
+                writer.merge_edges(check_edges)
+                remote_stats["check_suites"] = sum(n.label == "GitCheckSuite" for n in check_nodes)
+                remote_stats["check_runs"] = sum(n.label == "GitCheckRun" for n in check_nodes)
+            except _remote_errs as exc:
+                logger.warning("GitHub checks were skipped for %s (metadata kept): %s", canonical, exc)
 
     writer.merge_node(_node("GitRepository", repo_id, name=canonical.rstrip("/").rsplit("/", 1)[-1],
                             canonical_url=canonical, provider="github", source_path=source_path,

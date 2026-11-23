@@ -244,6 +244,70 @@ def test_github_mapping_captures_issues_prs_releases_and_users(monkeypatch):
     assert not any(rel == "CLOSES_ISSUE" and src.endswith("pull/7") for rel, src, _ in triples)
 
 
+def _meta_responses(*, issues=(), pulls=(), releases=(), tags=()):
+    return {
+        "repos/acme/demo/issues?state=all&sort=created&direction=desc&per_page=100": list(issues),
+        "repos/acme/demo/pulls?state=all&sort=created&direction=desc&per_page=100": list(pulls),
+        "repos/acme/demo/releases?per_page=100": list(releases),
+        "repos/acme/demo/tags?per_page=100": list(tags),
+    }
+
+
+def test_pr_merged_derived_from_merged_at_fires_closes_issue_and_merged_as(monkeypatch):
+    # The pulls LIST endpoint omits the `merged` boolean but returns `merged_at`; a merged PR must
+    # still close its issue and record MERGED_AS.
+    responses = _meta_responses(
+        issues=[{"number": 4, "title": "Bug", "body": "", "state": "closed",
+                 "user": {"login": "r"}, "labels": []}],
+        pulls=[{"number": 5, "title": "Fix", "body": "Fixes #4", "state": "closed",
+                "merged_at": "2025-01-02T00:00:00Z",  # NO `merged` key (the list-endpoint reality)
+                "user": {"login": "a"}, "head": {"sha": "a" * 40},
+                "base": {"sha": "b" * 40, "ref": "main"}, "merge_commit_sha": "c" * 40}],
+    )
+    monkeypatch.setattr(git_info, "_api_pages", lambda path: responses[path])
+    nodes, edges = git_info._github_metadata("acme", "demo", "github://acme/demo", "main")
+    pr = next(n for n in nodes if n.label == "GitPullRequest")
+    assert pr.properties["merged"] is True
+    triples = {(e.rel_type, e.from_key["id"], e.to_key["id"]) for e in edges}
+    assert ("CLOSES_ISSUE", "github://acme/demo/pull/5", "github://acme/demo/issue/4") in triples
+    assert ("MERGED_AS", "github://acme/demo/pull/5", f"github://acme/demo/commit/{'c' * 40}") in triples
+
+
+def test_open_pr_with_test_merge_sha_is_not_marked_merged(monkeypatch):
+    # GitHub sets merge_commit_sha to a throwaway test-merge SHA for an OPEN mergeable PR. That must
+    # not be mistaken for a merge.
+    responses = _meta_responses(
+        pulls=[{"number": 8, "title": "WIP", "body": "", "state": "open",  # no merged / merged_at
+                "user": {"login": "a"}, "head": {"sha": "h" * 40},
+                "base": {"sha": "b" * 40, "ref": "main"}, "merge_commit_sha": "t" * 40}],
+    )
+    monkeypatch.setattr(git_info, "_api_pages", lambda path: responses[path])
+    nodes, edges = git_info._github_metadata("acme", "demo", "github://acme/demo", "main")
+    pr = next(n for n in nodes if n.label == "GitPullRequest")
+    assert pr.properties["merged"] is False
+    assert not any(e.rel_type == "MERGED_AS" for e in edges)
+
+
+def test_draft_releases_are_not_collected(monkeypatch):
+    responses = _meta_responses(releases=[
+        {"id": 1, "tag_name": "v9", "name": "Draft", "draft": True, "prerelease": False},
+        {"id": 2, "tag_name": "v8", "name": "Published", "draft": False, "prerelease": False},
+    ])
+    monkeypatch.setattr(git_info, "_api_pages", lambda path: responses[path])
+    nodes, _ = git_info._github_metadata("acme", "demo", "github://acme/demo", "main")
+    assert {n.properties["tag_name"] for n in nodes if n.label == "GitRelease"} == {"v8"}
+
+
+def test_github_owner_repo_requires_exact_host():
+    f = git_info._github_owner_repo
+    assert f("https://github.com/acme/demo.git") == ("acme", "demo")
+    assert f("git@github.com:acme/demo.git") == ("acme", "demo")
+    assert f("ssh://git@github.com/acme/demo") == ("acme", "demo")
+    assert f("https://notgithub.com/acme/demo.git") is None       # lookalike host
+    assert f("https://github.com.evil.com/acme/demo") is None     # subdomain trick
+    assert f("/srv/x/github.com/acme/demo") is None               # github.com in a path, not the host
+
+
 def test_issue_reference_parser_ignores_other_repositories():
     body = "Fixes #1 and resolves acme/demo#2; mentions acme/other#3 and #4."
     assert git_info._same_repo_issue_refs(body, "acme", "demo") == {1, 2, 4}
@@ -482,14 +546,12 @@ def test_ingest_toggle_on_remote_change_and_off_reconciles_graph(
 
     set_git_info_enabled(True)
     ingest.ingest_directory(writer, str(root), project_name="Checkout", deep="off", auto_install=False)
-    ingest.join_git_info()
     assert _count(graph, "GitRepository") == 1
     assert _count(graph, "GitCommit") == 1
     assert _count(graph, "GitCheckout") == 1
 
     repo.remotes.origin.set_url("https://github.com/acme/renamed.git")
     ingest.ingest_directory(writer, str(root), project_name="Checkout", deep="off", auto_install=False)
-    ingest.join_git_info()
     assert graph.ro_query("MATCH (r:GitRepository) RETURN r.id").result_set == [
         ["github://acme/renamed"]
     ]
@@ -498,7 +560,6 @@ def test_ingest_toggle_on_remote_change_and_off_reconciles_graph(
     # provenance for that checkout while leaving the source/code graph intact.
     shutil.rmtree(root / ".git")
     ingest.ingest_directory(writer, str(root), project_name="Checkout", deep="off", auto_install=False)
-    ingest.join_git_info()
     assert _count(graph, "GitRepository") == 0
 
     set_git_info_enabled(False)
@@ -525,7 +586,6 @@ def test_enable_command_queues_background_sync_for_existing_checkout(graph, tmp_
     result = CliRunner().invoke(cli_module.cli, ["git-info", "enable", str(root)])
     assert result.exit_code == 0, result.output
     assert load_config().git_info_enabled is True
-    ingest.join_git_info()
     assert calls == [(str(root), True)]
 
 
@@ -538,6 +598,7 @@ def test_watch_command_force_refreshes_each_tick_until_interrupted(graph, tmp_pa
 
     root = tmp_path / "checkout"
     _make_repo(root)
+    set_git_info_enabled(True)  # git_info_sync skips when the feature is off
     calls = []
     monkeypatch.setattr(cli_module, "_resolve_connection", lambda *_: FalkorDBConfig())
     monkeypatch.setattr(cli_module, "connect", lambda _config: graph)
@@ -575,6 +636,7 @@ def test_watch_command_without_path_refreshes_every_registered_repo(graph, tmp_p
     # Two repos in two different graphs — the whole point: one daemon, multiple projects.
     register_repo(RepoRegistration(local_dir=str(repo_a.resolve()), graph_name="alpha_graph"))
     register_repo(RepoRegistration(local_dir=str(repo_b.resolve()), graph_name="beta_graph"))
+    set_git_info_enabled(True)  # git_info_sync skips when the feature is off
 
     calls = []
     monkeypatch.setattr(cli_module, "_resolve_connection", lambda *_: FalkorDBConfig())
@@ -629,9 +691,8 @@ def test_urlopen_retrying_recovers_from_transport_drop(monkeypatch):
     assert body == b'{"ok": true}'
 
 
-def test_urlopen_retrying_gives_up_after_exhausting_retries(monkeypatch):
+def test_urlopen_retrying_normalizes_exhausted_transport_drop_to_urlerror(monkeypatch):
     import http.client
-    import pytest
 
     def fake_urlopen(request, timeout):
         raise http.client.RemoteDisconnected("down")
@@ -639,7 +700,10 @@ def test_urlopen_retrying_gives_up_after_exhausting_retries(monkeypatch):
     monkeypatch.setattr(git_info.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(git_info.time, "sleep", lambda *_: None)
 
-    with pytest.raises(http.client.RemoteDisconnected):
+    # An exhausted BARE transport drop is normalized to URLError so every caller (which all catch
+    # URLError) degrades that one fetch instead of the raw exception aborting the whole sync.
+    with pytest.raises(git_info.urllib.error.URLError) as caught:
         git_info._urlopen_retrying(
             git_info.urllib.request.Request("https://api.github.com/x"), timeout=5, retries=2)
+    assert isinstance(caught.value.__cause__, http.client.RemoteDisconnected)
 

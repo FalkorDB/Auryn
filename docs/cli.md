@@ -15,7 +15,8 @@ The commands fall into six groups:
 | **Use the graph** | `mcp`, `view` |
 
 **Shared FalkorDB connection options** (on the connecting commands): `--host`, `--port`,
-`--username`, `--password`, `--ssl`, and (where a single graph is targeted) `--graph-name`.
+`--username`, `--password`, `--ssl`, and (where a single graph is targeted) `--graph-name` (the
+`git-info sync`/`git-info watch` commands spell this option `--graph`).
 Omit them and the command uses the backend chosen at `install` time (a local bundled FalkorDB is
 started on demand); the default graph is one per repository/directory.
 
@@ -159,8 +160,9 @@ the tail (honouring install-wide/per-repo disables). `--deep off|inline|backgrou
 (default `off` = the fast freshness path) + connection options.
 
 ### `git-info sync [<path>]`
-Collect all reachable commits, contributors, local branches/tags, and (for a verified public GitHub
-repository) issues, pull requests, releases, and remote tags. Git information collection is opt-in
+For a repository verified as **public** on GitHub, collect all reachable commits, contributors, local
+branches/tags, issues, pull requests, releases, and remote tags. A private or unverifiable repository
+contributes nothing — the entire layer (local history included) is skipped. Git information collection is opt-in
 through `auryn install --git-info on`; when enabled, normal ingestion also refreshes it. `git-info
 enable [<path>]` changes the machine-wide setting and immediately syncs that checkout. `git-info disable`
 turns it off and removes Git-information nodes from existing graphs without touching code nodes.

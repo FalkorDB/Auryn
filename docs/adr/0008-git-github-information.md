@@ -51,7 +51,8 @@ This is the spine that answers concern **(2)** and shapes the rest.
 To avoid data leakage, **Auryn never collects Git information from a private or unverified repo.**
 Collection is opt-in through the install-time setting `git_info.enabled` and only runs for a
 repository whose GitHub visibility can be verified as public:
-- **Via the anonymous GitHub REST API** — Auryn does not need a GitHub CLI or token for public data.
+- **Via the local `gh` token when present, else the anonymous REST API** — a token is used only to
+  raise the rate limit and reads only public data; none is required (see "(1) Connecting to GitHub").
 - **Public-repo gate:** before any content pull, check visibility (`GET /repos/{owner}/{repo}`) and
   **refuse a private repo** (log why). Public data carries no
   leakage risk.
@@ -62,9 +63,10 @@ repository whose GitHub visibility can be verified as public:
 
 With the setting off, ingestion makes no Git-information API calls. With it on, code ingestion also
 refreshes the provenance graph; remote issue/PR/release/tag enumeration is throttled to once per day.
-`auryn git-info sync` is available for an immediate refresh. The collector uses no credentials and
-first checks that the repository is public; private or unverified repositories contribute no Git
-information nodes.
+`auryn git-info sync` is available for an immediate refresh. The collector uses the local `gh` token
+when one is present (only to raise the rate limit — it reads only public data) and the anonymous public
+API otherwise, and first checks that the repository is public; private or unverified repositories
+contribute no Git information nodes.
 
 ## (1) Connecting to GitHub
 
@@ -96,7 +98,14 @@ unindexed properties.** High-cardinality free text (PR/issue titles & bodies, co
 | `CIRun` | `commit_sha`, image ref via the shared `image://` key | status, started_at |
 
 **Memory is the dominant design lever for history (B).** A busy repo has 10⁵+ commits; a full
-`Commit` + `CHANGED`-edge graph can **dwarf the code graph**. So B defaults to an **ownership ROLLUP**,
+`Commit` + `CHANGED`-edge graph can **dwarf the code graph**.
+
+> **Status (not yet implemented):** the current collector always walks the full commit history (an
+> `--all` walk) into `GitCommit`/`GitUser` nodes with `CHANGED` edges. The ownership-rollup default and
+> the bounded (last-N / since-date) opt-in described below are the **intended** memory design, tracked
+> as follow-up work — they do not yet ship. Until then, a very large repo pays full-history storage.
+
+So B is intended to default to an **ownership ROLLUP**,
 not a history graph: aggregate `git log` into **properties on the existing `File`/`Function` nodes** —
 `last_author`, `last_changed`, `commit_count`/`churn`, `author_count`. That delivers ~all the *value*
 (ownership, recency, hotspots, reviewer suggestion) at a **tiny fraction of the memory** (no node/edge

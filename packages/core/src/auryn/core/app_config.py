@@ -125,7 +125,11 @@ def load_config() -> Config:
     embed_mode = str(data.get("embeddings", {}).get("mode", "background")).strip().lower()
     if embed_mode not in ("inline", "background", "off"):
         embed_mode = "background"  # a stray value must never break an ingest; fall back to the default
-    git_info_enabled = bool(data.get("git_info", {}).get("enabled", False))
+    # Robust against a malformed config: `git_info = false` (a bare value, not a table) would make
+    # `.get("enabled")` raise AttributeError and crash every ingest; `enabled = "false"` (a string)
+    # is truthy under bool() and would silently opt IN. Require a real TOML boolean `true` in a table.
+    gi = data.get("git_info", {})
+    git_info_enabled = isinstance(gi, dict) and gi.get("enabled") is True
     return Config(backend=backend, agents=agents, resync_trigger=trigger, repos=repos,
                   disabled_hooks=disabled_hooks, embed_mode=embed_mode,
                   git_info_enabled=git_info_enabled)

@@ -538,7 +538,10 @@ def git_info_group() -> None:
 @click.option("--graph", "graph_name", default=None, help="Target graph. Default: resolved from PATH.")
 @click.option("--force-remote/--no-force-remote", default=True,
               help="Refresh GitHub metadata now (default), or respect the once-a-day throttle.")
-def git_info_sync(path, host, port, username, password, ssl, graph_name, force_remote) -> None:
+@click.option("--source-uri", "source_uri", default=None,
+              help="Canonical source URI (e.g. the clone URL) when it differs from PATH; links "
+                   "provenance to the code graph's Project.repo_uri. Default: PATH.")
+def git_info_sync(path, host, port, username, password, ssl, graph_name, force_remote, source_uri) -> None:
     """Collect all locally reachable Git history and public GitHub metadata for PATH.
 
     Runs synchronously (this process does the work) and is single-flight per graph: if a sync is
@@ -547,7 +550,7 @@ def git_info_sync(path, host, port, username, password, ssl, graph_name, force_r
     import dataclasses
     import hashlib
     from pathlib import Path
-    from auryn.core.app_config import get_repo
+    from auryn.core.app_config import get_repo, load_config
     from auryn.core.git_info import sync_git_info
     from auryn.core.home import run_dir
     from auryn.core.project import default_graph_name, resolve_project_root
@@ -555,6 +558,12 @@ def git_info_sync(path, host, port, username, password, ssl, graph_name, force_r
         import fcntl
     except ImportError:  # pragma: no cover -- native Windows: no single-flight lock, just run
         fcntl = None
+
+    if not load_config().git_info_enabled:
+        # Honor the opt-out: a trigger (the watcher, a commit/save hook) must not recreate the subgraph
+        # after `git-info disable`. `git-info enable` flips the setting before it invokes this.
+        click.echo("Git information is disabled; skipping. Run `auryn git-info enable` to turn it on.")
+        return
 
     root = Path(resolve_project_root(path))
     if not graph_name:
@@ -573,8 +582,8 @@ def git_info_sync(path, host, port, username, password, ssl, graph_name, force_r
             lock.close()
             return
     try:
-        summary = sync_git_info(GraphWriter(connect(config)), str(root), source_uri=str(root),
-                                force_remote=force_remote)
+        summary = sync_git_info(GraphWriter(connect(config)), str(root),
+                                source_uri=source_uri or str(root), force_remote=force_remote)
         click.echo(f"Git information synced: {summary}")
     finally:
         if fcntl is not None:

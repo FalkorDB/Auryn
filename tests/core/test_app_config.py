@@ -144,3 +144,24 @@ def test_set_hook_disabled_per_repo_upserts_registration(tmp_path, monkeypatch):
     set_hook_disabled("sample-hook", False, local_dir="/work/acme")
     reg = next(r for r in load_config().repos if r.local_dir == "/work/acme")
     assert reg.disabled_hooks == ()
+
+
+def test_git_info_enabled_requires_a_real_toml_boolean(tmp_path, monkeypatch):
+    from auryn.core.app_config import load_config
+    home = tmp_path / "cg"
+    home.mkdir()
+    monkeypatch.setenv("AURYN_HOME", str(home))
+
+    # A bare `git_info = false` (a value, not a table) must not crash the loader with AttributeError.
+    (home / "config.toml").write_text("git_info = false\n")
+    assert load_config().git_info_enabled is False
+
+    # A string is not a real boolean -> stay disabled; never silently opt in on a truthy string.
+    (home / "config.toml").write_text('[git_info]\nenabled = "false"\n')
+    assert load_config().git_info_enabled is False
+    (home / "config.toml").write_text('[git_info]\nenabled = "true"\n')
+    assert load_config().git_info_enabled is False
+
+    # Only a real TOML boolean `true` enables the feature.
+    (home / "config.toml").write_text("[git_info]\nenabled = true\n")
+    assert load_config().git_info_enabled is True

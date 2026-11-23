@@ -75,7 +75,6 @@ DEEP_MODES = ("inline", "background", "async", "off")
 # Background deep passes started by this process (daemon threads). join_deep_phase() awaits
 # them -- optional for a server, used by tests and any caller that must not exit early.
 _deep_threads: list[threading.Thread] = []
-_git_info_threads: list[threading.Thread] = []
 
 
 def _build_filter(include_dirs, exclude_dirs, include_suffixes, exclude_suffixes):
@@ -813,14 +812,21 @@ def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
 
     graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
     if detachable and graph_name:
-        from auryn.core.home import run_dir
-        run_dir().mkdir(parents=True, exist_ok=True)
-        log = open(run_dir() / "git-info.log", "ab")  # noqa: SIM115 -- handed to the detached child
-        argv = [sys.executable, "-m", "auryn", "git-info", "sync", "--graph", graph_name,
-                "--force-remote" if force_remote else "--no-force-remote", str(repo_path)]
-        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         start_new_session=True, close_fds=True)
-        logger.info("Git information sync spawned (detached) for graph %r", graph_name)
+        try:
+            from auryn.core.home import run_dir
+            run_dir().mkdir(parents=True, exist_ok=True)
+            argv = [sys.executable, "-m", "auryn", "git-info", "sync", "--graph", graph_name,
+                    "--force-remote" if force_remote else "--no-force-remote",
+                    "--source-uri", source_uri, str(repo_path)]
+            # `with` closes the PARENT's fd right after Popen returns (the child already dup'd it) --
+            # avoids leaking a descriptor on every detached ingest. The whole spawn is guarded so an
+            # unwritable run dir logs and returns instead of failing the already-written code graph.
+            with open(run_dir() / "git-info.log", "ab") as log:
+                subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                 start_new_session=True, close_fds=True)
+            logger.info("Git information sync spawned (detached) for graph %r", graph_name)
+        except Exception:
+            logger.exception("Git information spawn failed; code ingestion succeeded")
         return
 
     try:  # inline (blocking) -- the only way an embedded / ad-hoc-host backend completes reliably
@@ -829,13 +835,6 @@ def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
         logger.info("Git information synced (inline): %s", summary)
     except Exception:
         logger.exception("Git information sync failed; code ingestion succeeded")
-
-
-def join_git_info(timeout: float | None = None) -> None:
-    """Wait for Git information workers started by this process (primarily for tests)."""
-    for thread in list(_git_info_threads):
-        thread.join(timeout)
-    _git_info_threads[:] = [thread for thread in _git_info_threads if thread.is_alive()]
 
 
 def deep_threads() -> list[threading.Thread]:
