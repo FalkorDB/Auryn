@@ -8,14 +8,15 @@ The commands fall into six groups:
 | group | commands |
 |-------|----------|
 | **Set up / tear down** | `install`, `uninstall`, `serve`, `stop` |
-| **Ingest** | `ingest dir`, `ingest repo`, `quickstart`, `run <ingestor>`, `git-sync <ingestor>`, `enrich` |
+| **Ingest** | `ingest dir`, `ingest repo`, `quickstart`, `run <ingestor>`, `git-sync <ingestor>`, `git-info sync`, `enrich` |
 | **Hooks** | `hooks list`, `hooks new`, `hooks enable`, `hooks disable` |
 | **Keep fresh** | `sync`, `watch` |
 | **Manage what's ingested** | `list`, `forget`, `stats` |
 | **Use the graph** | `mcp`, `view` |
 
 **Shared FalkorDB connection options** (on the connecting commands): `--host`, `--port`,
-`--username`, `--password`, `--ssl`, and (where a single graph is targeted) `--graph-name`.
+`--username`, `--password`, `--ssl`, and (where a single graph is targeted) `--graph-name` (the
+`git-info sync`/`git-info watch` commands spell this option `--graph`).
 Omit them and the command uses the backend chosen at `install` time (a local bundled FalkorDB is
 started on demand); the default graph is one per repository/directory.
 
@@ -29,6 +30,8 @@ every detected agent (e.g. Claude Code).
 - `--backend local|remote` — bundled falkordb-lite vs. an existing server (prompted if omitted).
 - `--host/--port/--username/--password/--ssl` — the remote server (with `--backend remote`).
 - `--trigger manual|commit|save` — how the graph is kept fresh after an edit (prompted if omitted).
+- `--git-info on|off` — collect local Git history and public GitHub metadata after ingestion
+  (prompted if omitted; defaults off; `--yes` defaults off).
 - `-y/--yes` — non-interactive (local backend unless `--backend` is given; an omitted `--trigger`
   keeps the saved setting).
 
@@ -158,6 +161,20 @@ Resync a repo's graph **incrementally** — the target of the commit hook / save
 Reads the git diff + graph blast radius; re-parses only what changed. Post [hooks](#hooks) run at
 the tail (honouring install-wide/per-repo disables). `--deep off|inline|background`
 (default `off` = the fast freshness path) + connection options.
+
+### `git-info sync [<path>]`
+For a repository verified as **public** on GitHub, collect all reachable commits, contributors, local
+branches/tags, issues, pull requests, releases, and remote tags. A private or unverifiable repository
+contributes nothing — the entire layer (local history included) is skipped. Git information collection is opt-in
+through `auryn install --git-info on`; when enabled, normal ingestion also refreshes it. `git-info
+enable [<path>]` changes the machine-wide setting and immediately syncs that checkout. `git-info disable`
+turns it off and removes Git-information nodes from existing graphs without touching code nodes.
+`git-info watch --interval <seconds>` is a **multi-project** daemon: each interval it force-refreshes
+GitHub metadata for **every registered repository across every graph** (re-reading the registry each
+tick, so newly ingested repos are picked up automatically), so new issues/PRs/releases/CI are seen even
+when the code isn't changing. Pass a `<path>` to watch a single checkout instead. One watcher runs per
+machine (a second invocation exits immediately); run it in the foreground under a process manager
+(systemd, nohup, a container) alongside the ingest client.
 
 ### `watch`
 The save-trigger watcher daemon: resyncs a repo's graph when its files change (ADR 0003).

@@ -118,6 +118,12 @@ def parse_module(source: bytes | str, path: str, package_dirs: frozenset[str] | 
     dotted = ids.dotted_module_path(path, package_dirs)
     module = RawModule(path=path, dotted=dotted, is_package=ids.is_package_init(path))
     text = source.decode("utf-8", "replace") if isinstance(source, bytes) else source
+    if text.startswith("\ufeff"):
+        # Python accepts a leading UTF-8 BOM, but ast.parse() on a str rejects it with
+        # "invalid non-printable character U+FEFF", which would skip the whole file. Drop the
+        # single leading BOM so BOM-prefixed source is parsed. _Source sees the same stripped
+        # text below, so byte offsets/segments stay consistent.
+        text = text[1:]
     try:
         with _parse_deadline(_max_parse_seconds()):
             tree = ast.parse(text, filename=path)
