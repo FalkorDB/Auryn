@@ -130,9 +130,11 @@ func helper() {}
 func new() {}
 """
     locs = resolution.callable_locations([parse_source(src, "app/gen.go")], _PROJ)
-    names = {n for n, _ in next(loc for loc in locs if loc.name == "gen").called_sites}
-    # bare + parenthesized `(helper)()`, generic `F[int](x)`, generic-method `y.M[int](z)`, shadowed `new()`
-    assert {"helper", "F", "M", "new"} <= names
+    sites = set(next(loc for loc in locs if loc.name == "gen").called_sites)
+    # exact (name, callee-identifier line) so each form is guarded DISTINCTLY -- a name-only check would let
+    # the bare `helper()` mask the parenthesized `(helper)()`, and would miss a wrong line:
+    #   line 4 helper()   5 (helper)()   6 F[int](x)   7 new()   8 y.M[int](z)
+    assert {("helper", 4), ("helper", 5), ("F", 6), ("new", 7), ("M", 8)} <= sites
 
 
 # -- the resolver: receiver-typed method dispatch + cross-package resolution ----------------------
