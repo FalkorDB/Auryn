@@ -524,16 +524,20 @@ def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT, *,
             for rel_type, cnt in graph.ro_query(count_q, {"id": node_id},
                                                 timeout=DEFAULT_QUERY_TIMEOUT_MS).result_set:
                 edge_counts[direction][rel_type] = int(cnt)
-            for rel_type, total in edge_counts[direction].items():
+            for rel_type in edge_counts[direction]:
                 if not _SAFE_REL_TYPE.match(rel_type):  # rel_type comes from the DB; validate before interpolating
                     continue
                 fetch_q = (f"MATCH (n:Entity {{id: $id}})-[r:{rel_type}]->(m) RETURN properties(r), m LIMIT $lim"
                            if direction == "out"
                            else f"MATCH (n:Entity {{id: $id}})<-[r:{rel_type}]-(m) RETURN properties(r), m LIMIT $lim")
-                rows = graph.ro_query(fetch_q, {"id": node_id, "lim": per_type_cap},
+                # Fetch one past the cap and derive `truncated` from THIS fetch, not the separate count
+                # query above -- a concurrent write between the two would otherwise make the stale count
+                # under-report truncation.
+                rows = graph.ro_query(fetch_q, {"id": node_id, "lim": per_type_cap + 1},
                                       timeout=DEFAULT_QUERY_TIMEOUT_MS).result_set
-                if total > len(rows):
+                if len(rows) > per_type_cap:
                     truncated = True
+                    rows = rows[:per_type_cap]
                 for rel_props, neighbor in rows:
                     serialized = ser(neighbor)
                     nodes_by_id[serialized["id"]] = serialized
