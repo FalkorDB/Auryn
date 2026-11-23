@@ -27,8 +27,11 @@ _PROJ = project_id("goprobe")
 
 
 def _fixture_files():
+    # Normalize to forward slashes so the relative path matches scip-go's (and what the real ingest
+    # emits via LocalSource.as_posix()); os.path.relpath would hand back backslashes on Windows.
     return [parse_source((_SRC / rel).read_bytes(), rel)
-            for rel in sorted(os.path.relpath(p, _SRC) for p in glob.glob(str(_SRC / "**/*.go"), recursive=True))]
+            for rel in sorted(os.path.relpath(p, _SRC).replace(os.sep, "/")
+                              for p in glob.glob(str(_SRC / "**/*.go"), recursive=True))]
 
 
 def _fixture_locations():
