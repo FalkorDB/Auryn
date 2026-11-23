@@ -206,14 +206,16 @@ def embed(
     is fixed-dimension). Idempotent: only nodes without an embedding are processed. The local
     embedding model is auto-installed on first use (opt-out; AURYN_AUTO_INSTALL=0). See
     auryn/core/embeddings/."""
-    from auryn.core.embeddings import get_embedder
+    from auryn.core.embeddings import configured_model, get_embedder
     from auryn.core.embeddings.worker import embed_graph, reembed_all
     from auryn.core.project import default_graph_name
 
     config = _resolve_connection(host, port, username, password, ssl)
     graph = connect_client(config).select_graph(graph_name or default_graph_name())
     run = reembed_all if reembed else embed_graph
-    stats = run(GraphWriter(graph), get_embedder(model))
+    # Fall back to the AURYN_EMBED_MODEL override (what the auto-embed path honors) when --model is
+    # not given, so the CLI can pin a smaller model than the default on memory-constrained machines.
+    stats = run(GraphWriter(graph), get_embedder(model or configured_model()))
     # `index_ready` is False both when nothing was embedded (the index wasn't touched) and when the
     # build couldn't be confirmed (it outlasted the wait, or its state can't be read -- see
     # GraphWriter.await_indexes). `--reembed` DROPS the index up front, so "unchanged" would be wrong
