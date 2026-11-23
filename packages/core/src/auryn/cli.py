@@ -538,26 +538,71 @@ def git_info_disable() -> None:
     click.echo(f"Git information disabled; removed {removed} provenance nodes from the configured backend.")
 
 
+def _git_info_watch_targets() -> list[str]:
+    """Every registered repo's local checkout that still exists on disk, de-duplicated by resolved
+    path. This is the enumeration the multi-project watcher refreshes. The registry (keyed by local
+    checkout, ADR 0003) is the right source: git-info needs a local path to read `git log`, so a
+    *remote-only* ingest -- which has a graph `Project` node but no checkout -- isn't a target anyway.
+    Co-located repos in one graph each have their own registry entry, so they are all enumerated."""
+    from pathlib import Path
+    from auryn.core.app_config import load_config
+    seen: set[str] = set()
+    targets: list[str] = []
+    for reg in load_config().repos:
+        p = Path(reg.local_dir)
+        if p.is_dir():
+            resolved = str(p.resolve())
+            if resolved not in seen:
+                seen.add(resolved)
+                targets.append(resolved)
+    return targets
+
+
 @git_info_group.command("watch")
-@click.argument("path", required=False, default=".")
+@click.argument("path", required=False, default=None)
 @click.option("--host", default=None, help="FalkorDB host. Default: the configured backend.")
 @click.option("--port", default=None, type=int, help="FalkorDB port (only with --host).")
 @click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
 @click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
 @click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
-@click.option("--graph", "graph_name", default=None, help="Target graph. Default: resolved from PATH.")
+@click.option("--graph", "graph_name", default=None,
+              help="Target graph (single-repo mode). Default: resolved from PATH.")
 @click.option("--interval", default=3600, type=int, show_default=True,
               help="Seconds between GitHub refreshes.")
 @click.pass_context
 def git_info_watch(ctx, path, host, port, username, password, ssl, graph_name, interval) -> None:
-    """Periodically refresh GitHub metadata for PATH so new issues/PRs/releases/CI are picked up even
-    when the code isn't changing (code-triggered syncs otherwise refresh GitHub at most once a day).
+    """Periodically refresh GitHub metadata so new issues/PRs/releases/CI are picked up even when the
+    code isn't changing (code-triggered syncs otherwise refresh GitHub at most once a day).
 
-    Runs in the foreground until interrupted -- run it under your process manager (systemd, nohup, a
-    container) alongside the ingest/sync client. Each tick re-runs `git-info sync --force-remote`, which
-    is single-flight per graph, so it never collides with a code-triggered sync."""
+    With no PATH (and no --graph) this is a MULTI-PROJECT daemon: each interval it refreshes EVERY
+    registered repository across EVERY graph, re-reading the registry each tick so newly ingested repos
+    are picked up automatically. Pass a PATH to watch a single checkout instead.
+
+    One watcher runs per machine -- a second invocation exits immediately. Within a graph, co-located
+    repos are refreshed sequentially so they never trip the per-graph single-flight lock. Runs in the
+    foreground -- run it under your process manager (systemd, nohup, a container) alongside the ingest
+    client."""
     import signal
     import time
+    from auryn.core.home import run_dir
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover -- native Windows: no single-instance guard, just run
+        fcntl = None
+
+    multi = path is None and not graph_name
+
+    # Hard single-instance guard (one watcher per machine). A flock, not a bare pidfile, so a crashed
+    # watcher's lock is released by the OS automatically -- no stale-pid races.
+    run_dir().mkdir(parents=True, exist_ok=True)
+    guard = open(run_dir() / "git-info-watch.lock", "w")  # noqa: SIM115 -- held for the daemon's life
+    if fcntl is not None:
+        try:
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            click.echo("A git-info watcher is already running; exiting.")
+            guard.close()
+            return
 
     stop = {"flag": False}
 
@@ -566,17 +611,34 @@ def git_info_watch(ctx, path, host, port, username, password, ssl, graph_name, i
 
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)
-    click.echo(f"Watching GitHub activity for {path} every {interval}s (Ctrl-C to stop).")
-    while not stop["flag"]:
-        try:
-            ctx.invoke(git_info_sync, path=path, host=host, port=port, username=username,
-                       password=password, ssl=ssl, graph_name=graph_name, force_remote=True)
-        except Exception as exc:  # noqa: BLE001 -- a transient failure must not kill the watcher
-            click.echo(f"Refresh failed ({exc}); will retry next interval.", err=True)
-        for _ in range(max(interval, 1)):  # sleep in 1s steps so Ctrl-C is responsive
-            if stop["flag"]:
-                break
-            time.sleep(1)
+
+    scope = "all registered repositories" if multi else (path or ".")
+    click.echo(f"Watching GitHub activity for {scope} every {interval}s (Ctrl-C to stop).")
+    try:
+        while not stop["flag"]:
+            if multi:
+                targets = [(t, None) for t in _git_info_watch_targets()]
+                if not targets:
+                    click.echo("No registered repositories yet; will re-check next interval.")
+            else:
+                targets = [(path or ".", graph_name)]
+            for target_path, target_graph in targets:  # sequential: never collides with the per-graph lock
+                if stop["flag"]:
+                    break
+                try:
+                    ctx.invoke(git_info_sync, path=target_path, host=host, port=port,
+                               username=username, password=password, ssl=ssl,
+                               graph_name=target_graph, force_remote=True)
+                except Exception as exc:  # noqa: BLE001 -- one repo's failure must not stop the rest
+                    click.echo(f"Refresh failed for {target_path} ({exc}); continuing.", err=True)
+            for _ in range(max(interval, 1)):  # sleep in 1s steps so Ctrl-C is responsive
+                if stop["flag"]:
+                    break
+                time.sleep(1)
+    finally:
+        if fcntl is not None:
+            fcntl.flock(guard, fcntl.LOCK_UN)
+        guard.close()
     click.echo("Stopped watching GitHub activity.")
 
 

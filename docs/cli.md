@@ -164,9 +164,12 @@ repository) issues, pull requests, releases, and remote tags. Git information co
 through `auryn install --git-info on`; when enabled, normal ingestion also refreshes it. `git-info
 enable [<path>]` changes the machine-wide setting and immediately syncs that checkout. `git-info disable`
 turns it off and removes Git-information nodes from existing graphs without touching code nodes.
-`git-info watch [<path>] --interval <seconds>` runs a single-flight, force-remote `git-info sync` on a
-schedule so new issues/PRs/releases/CI are picked up even when the code isn't changing — run it in the
-foreground under a process manager (systemd, nohup, a container) alongside the ingest client.
+`git-info watch --interval <seconds>` is a **multi-project** daemon: each interval it force-refreshes
+GitHub metadata for **every registered repository across every graph** (re-reading the registry each
+tick, so newly ingested repos are picked up automatically), so new issues/PRs/releases/CI are seen even
+when the code isn't changing. Pass a `<path>` to watch a single checkout instead. One watcher runs per
+machine (a second invocation exits immediately); run it in the foreground under a process manager
+(systemd, nohup, a container) alongside the ingest client.
 
 ### `watch`
 The save-trigger watcher daemon: resyncs a repo's graph when its files change (ADR 0003).

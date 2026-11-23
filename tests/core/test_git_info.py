@@ -559,3 +559,40 @@ def test_watch_command_force_refreshes_each_tick_until_interrupted(graph, tmp_pa
     assert isinstance(result.exception, _Break)  # loop was still running (interrupt-driven), not a crash
     assert calls == [(str(root), True)]  # one tick, and it forced a remote refresh
 
+
+def test_watch_command_without_path_refreshes_every_registered_repo(graph, tmp_path, monkeypatch):
+    import signal as _signal
+    import time as _time
+    from click.testing import CliRunner
+    from auryn import cli as cli_module
+    from auryn.core.app_config import register_repo, RepoRegistration
+    from auryn.core.graph_client import FalkorDBConfig
+
+    repo_a = tmp_path / "alpha"
+    repo_b = tmp_path / "beta"
+    _make_repo(repo_a)
+    _make_repo(repo_b)
+    # Two repos in two different graphs — the whole point: one daemon, multiple projects.
+    register_repo(RepoRegistration(local_dir=str(repo_a.resolve()), graph_name="alpha_graph"))
+    register_repo(RepoRegistration(local_dir=str(repo_b.resolve()), graph_name="beta_graph"))
+
+    calls = []
+    monkeypatch.setattr(cli_module, "_resolve_connection", lambda *_: FalkorDBConfig())
+    monkeypatch.setattr(cli_module, "connect", lambda _config: graph)
+    monkeypatch.setattr(git_info, "sync_git_info",
+                        lambda writer, path, **kw: calls.append(path) or {"repository": path})
+    monkeypatch.setattr(_signal, "signal", lambda *a, **k: None)
+
+    class _Break(Exception):
+        pass
+
+    def _stop_after_first_tick(_seconds):
+        raise _Break()
+
+    monkeypatch.setattr(_time, "sleep", _stop_after_first_tick)
+
+    # No PATH and no --graph -> multi-project mode: enumerate the registry, refresh each.
+    result = CliRunner().invoke(cli_module.cli, ["git-info", "watch", "--interval", "900"])
+    assert isinstance(result.exception, _Break)
+    assert set(calls) == {str(repo_a.resolve()), str(repo_b.resolve())}  # both repos in one tick
+
