@@ -76,11 +76,47 @@ def test_callable_locations_match_resolution_node_ids():
     assert {loc.name for loc in locs} >= {"Run", "NewService", "Save", "Count", "New", "Put"}
 
 
+def test_callable_locations_record_every_call_site_including_chained_selectors():
+    """The #802 line-precise bridge: a CallableLocation's called_sites carries (name, line) for EVERY
+    syntactic call -- including a chained-selector call (`s.store.Put()`) the fast `calls` list omits -- so
+    the deep pass's require_call_site gate keeps those resolutions while value references stay absent."""
+    src = b"""package app
+
+type Store struct{}
+
+func (s *Store) Put() {}
+
+type Service struct {
+\tstore *Store
+}
+
+func (s *Service) Save() {
+\ts.store.Put()
+\thelper()
+\ts.local()
+\t_ = helper
+}
+
+func (s *Service) local() {}
+
+func helper() {}
+"""
+    locs = resolution.callable_locations([parse_source(src, "app/svc.go")], _PROJ)
+    save = next(loc for loc in locs if loc.name == "Save")
+    names = {n for n, _ in save.called_sites}
+    assert names == {"Put", "helper", "local"}  # chained `s.store.Put()` captured though it has no RawCall
+    # `_ = helper` is a value reference, not a call -> helper is recorded exactly once (the helper() call)
+    assert sum(1 for n, _ in save.called_sites if n == "helper") == 1
+    # every site's line is the callee identifier's, 1-based, inside Save's body span
+    assert all(save.line_start <= line <= save.line_end for _, line in save.called_sites)
+    assert save.called_names == names  # called_names mirrors the call-site names (attribute() disambiguation)
+
+
 # -- the resolver: receiver-typed method dispatch + cross-package resolution ----------------------
 
 def test_resolve_calls_resolves_what_the_name_pass_cannot():
     locs = _fixture_locations()
-    deep = resolve_calls(_SCIP.read_bytes(), locs)  # as the Go overlay runs it (no syntactic-call gate)
+    deep = resolve_calls(_SCIP.read_bytes(), locs, require_call_site=True)  # as the Go overlay runs it (#802)
     by_id = {loc.id: loc for loc in locs}
     for e in deep.edges:
         assert e.properties["resolution"] == "resolved"
@@ -103,7 +139,7 @@ def test_resolve_calls_resolves_what_the_name_pass_cannot():
 
 def test_resolve_calls_tracks_coverage():
     locs = _fixture_locations()
-    deep = resolve_calls(_SCIP.read_bytes(), locs)
+    deep = resolve_calls(_SCIP.read_bytes(), locs, require_call_site=True)
     by_name = {loc.name: loc for loc in locs}
     assert {by_name[n].id for n in ("Run", "NewService", "Save")} <= deep.covered_ids
     assert deep.metrics["resolved"] >= 5 and deep.metrics["external"] >= 1  # genuine stdlib externals kept

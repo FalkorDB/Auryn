@@ -114,8 +114,9 @@ def make_type_stub(type_id: str, kind: str, name: str, pkg_dir: str, pkg_name: s
 
 
 def callable_locations(raw_files: list[RawFile], project_id: str):
-    """Every Go callable's SCIP-join location (graph id, file, 1-based line span, name, called names) --
-    the bridge the deep (scip-go / SCIP) pass needs. Reuses the SAME id builders as the fast pass
+    """Every Go callable's SCIP-join location (graph id, file, 1-based line span, name, called names, and
+    per-call-site (name, line) for the line-precise `require_call_site` gate) -- the bridge the deep
+    (scip-go / SCIP) pass needs. Reuses the SAME id builders as the fast pass
     (dir-keyed package -> type/func/method ids), so deep CALLS edges land byte-identically on the nodes
     resolve() authored -- no module map or type inference needed: ids are dir-keyed, and a Go method's
     receiver type is always in the method's own package, so a per-(package-key, type-name) index resolves
@@ -158,7 +159,8 @@ def callable_locations(raw_files: list[RawFile], project_id: str):
                     continue
                 cid, label = ids.method_id(owner_tid, rfn.name, ptypes), "Method"
             out.append(CallableLocation(cid, label, rel, rfn.line_start, rfn.line_end, rfn.name,
-                                        frozenset(c.name for c in rfn.calls)))
+                                        frozenset(name for name, _ in rfn.call_sites),
+                                        frozenset(rfn.call_sites)))
     return out
 
 

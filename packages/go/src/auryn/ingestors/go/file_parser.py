@@ -175,13 +175,16 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
     # -- call / construction extraction -----------------------------------------------------
 
     def collect_calls(body):
-        """(calls, construct_refs) from a function/method body. A selector call keeps its
-        operand identifier as the receiver; construction (`T{}`, `&T{}`, `new(T)`) yields
-        type refs, not calls (Go has no constructor to CALL)."""
+        """(calls, construct_refs, call_sites) from a function/method body. A selector call keeps its
+        operand identifier as the receiver; construction (`T{}`, `&T{}`, `new(T)`) yields type refs, not
+        calls (Go has no constructor to CALL). `call_sites` records (name, callee-identifier line) for every
+        syntactic call -- including a chained-selector call whose receiver is unnameable (`svc.store.Put()`),
+        which `calls` omits -- to feed the deep pass's line-precise `require_call_site` gate."""
         calls: list[RawCall] = []
         construct_refs: list[str] = []
+        call_sites: list[tuple[str, int]] = []
         if body is None:
-            return calls, construct_refs
+            return calls, construct_refs, call_sites
         seen: set = set()
         stack = [body]
         while stack:
@@ -195,25 +198,31 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                         if args is not None:
                             first = next((a for a in args.named_children), None)
                             construct_refs.extend(type_refs(first))
-                    elif name and name not in _BUILTIN_FUNCS:
-                        key = (name, None)
-                        if key not in seen:
-                            seen.add(key)
-                            calls.append(RawCall(name=name, receiver=None))
+                    elif name:
+                        call_sites.append((name, fn.start_point[0] + 1))  # every bare call (incl. builtins)
+                        if name not in _BUILTIN_FUNCS:
+                            key = (name, None)
+                            if key not in seen:
+                                seen.add(key)
+                                calls.append(RawCall(name=name, receiver=None))
                 elif fn is not None and fn.type == "selector_expression":
                     operand = fieldn(fn, "operand")
                     field_node = fieldn(fn, "field")
                     name = txt(field_node)
                     recv = txt(operand) if operand is not None and operand.type == "identifier" else None
-                    if name and recv is not None:
-                        key = (name, recv)
-                        if key not in seen:
-                            seen.add(key)
-                            calls.append(RawCall(name=name, receiver=recv))
+                    if name:
+                        # record the call site even when the receiver is too complex to name (chained
+                        # selector `a.b.M()`): scip-go still resolves M, and the deep gate needs its line.
+                        call_sites.append((name, field_node.start_point[0] + 1))
+                        if recv is not None:
+                            key = (name, recv)
+                            if key not in seen:
+                                seen.add(key)
+                                calls.append(RawCall(name=name, receiver=recv))
             elif n.type == "composite_literal":
                 construct_refs.extend(type_refs(fieldn(n, "type")))
             stack.extend(n.children)
-        return calls, construct_refs
+        return calls, construct_refs, call_sites
 
     # -- functions / methods ----------------------------------------------------------------
 
@@ -235,7 +244,7 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
     def build_function(node, receiver) -> RawFunction:
         params = parameters(fieldn(node, "parameters"))
         result = fieldn(node, "result")
-        calls, construct_refs = collect_calls(fieldn(node, "body"))
+        calls, construct_refs, call_sites = collect_calls(fieldn(node, "body"))
         ls, le = lines(node)
         refs = signature_refs(fieldn(node, "parameters"), result)
         refs.extend(construct_refs)
@@ -246,6 +255,7 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             return_type=type_text(result),
             type_refs=refs,
             calls=calls,
+            call_sites=call_sites,
             source=txt(node),
             doc=leading_comment(node, source),
             line_start=ls,
