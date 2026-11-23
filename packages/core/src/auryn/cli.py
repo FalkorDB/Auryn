@@ -466,20 +466,51 @@ def git_info_group() -> None:
 @click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
 @click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
 @click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
-def git_info_sync(path, host, port, username, password, ssl) -> None:
-    """Collect all locally reachable Git history and public GitHub metadata for PATH."""
+@click.option("--graph", "graph_name", default=None, help="Target graph. Default: resolved from PATH.")
+@click.option("--force-remote/--no-force-remote", default=True,
+              help="Refresh GitHub metadata now (default), or respect the once-a-day throttle.")
+def git_info_sync(path, host, port, username, password, ssl, graph_name, force_remote) -> None:
+    """Collect all locally reachable Git history and public GitHub metadata for PATH.
+
+    Runs synchronously (this process does the work) and is single-flight per graph: if a sync is
+    already running for the same graph it exits, so overlapping triggers never collect twice. Code
+    ingestion spawns this DETACHED, so a one-shot `auryn ingest` doesn't cut the collection short."""
     import dataclasses
+    import hashlib
     from pathlib import Path
     from auryn.core.app_config import get_repo
+    from auryn.core.git_info import sync_git_info
+    from auryn.core.home import run_dir
     from auryn.core.project import default_graph_name, resolve_project_root
-    from auryn.core.ingest import _spawn_git_info
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover -- native Windows: no single-flight lock, just run
+        fcntl = None
 
     root = Path(resolve_project_root(path))
-    reg = get_repo(str(root))
-    graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
-    config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
-    _spawn_git_info(GraphWriter(connect(config)), str(root), str(root), force_remote=True)
-    click.echo("Git information sync queued in the background.")
+    if not graph_name:
+        reg = get_repo(str(root))
+        graph_name = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
+    config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph_name)
+
+    run_dir().mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(graph_name.encode()).hexdigest()[:16]
+    lock = open(run_dir() / f"git-info-{key}.lock", "w")  # noqa: SIM115 -- held for the sync's duration
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            click.echo("Git information sync already running for this graph; skipping.")
+            lock.close()
+            return
+    try:
+        summary = sync_git_info(GraphWriter(connect(config)), str(root), source_uri=str(root),
+                                force_remote=force_remote)
+        click.echo(f"Git information synced: {summary}")
+    finally:
+        if fcntl is not None:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
 
 
 @git_info_group.command("enable")

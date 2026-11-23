@@ -623,6 +623,57 @@ def _github_checks_rest(owner: str, name: str, repo_id: str, sha_list: list[str]
     return nodes, edges
 
 
+_AUTHOR_FRAGMENT = "fragment AU on Commit { oid author { user { login } } committer { user { login } } }"
+
+
+def _github_commit_logins(owner: str, name: str, shas) -> dict[str, dict]:
+    """Map each commit SHA to its GitHub author/committer login, when the commit's email is linked to a
+    GitHub account. This lets commit authorship UNIFY onto the SAME GitUser node that opens PRs/issues/
+    releases (keyed `github:<login>`), instead of a second node keyed by git email -- no duplicate identity
+    per person. Batched GraphQL in parallel, like the checks. Best-effort: returns {} without a token or on
+    error, so commit ingestion still works offline (it then keys GitUsers by git email as before)."""
+    sha_list = sorted({str(s) for s in shas if s and _HEX_SHA.match(str(s))})
+    if not sha_list or not _github_token():
+        return {}
+    chunks = [sha_list[i:i + 50] for i in range(0, len(sha_list), 50)]
+
+    def fetch(chunk_shas: list[str]) -> dict:
+        fields = "\n".join(f'    c{i}: object(oid: "{sha}") {{ ...AU }}' for i, sha in enumerate(chunk_shas))
+        query = f"query($o:String!,$n:String!){{ repository(owner:$o,name:$n){{\n{fields}\n}} }}\n{_AUTHOR_FRAGMENT}"
+        try:
+            return _graphql(query, {"o": owner, "n": name})
+        except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError, PermissionError):
+            return {}
+
+    out: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(chunks))) as pool:
+        results = list(pool.map(fetch, chunks))
+    for data in results:
+        for commit in ((data or {}).get("repository") or {}).values():
+            if not isinstance(commit, dict) or not commit.get("oid"):
+                continue
+            entry = {}
+            author_login = ((commit.get("author") or {}).get("user") or {}).get("login")
+            committer_login = ((commit.get("committer") or {}).get("user") or {}).get("login")
+            if author_login:
+                entry["author"] = author_login
+            if committer_login:
+                entry["committer"] = committer_login
+            if entry:
+                out[commit["oid"]] = entry
+    return out
+
+
+def _commit_user(logins: dict, hexsha: str, role: str, git_email: str | None,
+                 git_name: str | None) -> tuple[str, str, str]:
+    """Resolve a commit's author/committer to a GitUser (identity, display, source). Prefer the GitHub
+    login (unifies with PR/issue/release authors); otherwise fall back to the git email/name."""
+    login = (logins.get(hexsha) or {}).get(role)
+    if login:
+        return f"github:{login}", login, "github"
+    return (git_email or git_name or ""), (git_name or git_email or ""), "git"
+
+
 def sync_git_info(
     writer: GraphWriter,
     repo_path: str | Path,
@@ -727,6 +778,7 @@ def sync_git_info(
     file_targets = _code_file_index(writer, source_uri or source_path, canonical)
     commits = list(commits_to_add())
     file_changes_by_sha = _batch_commit_file_changes(repo, commits)
+    commit_logins = _github_commit_logins(github[0], github[1], [c.hexsha for c in commits])
 
     for commit in commits:
         cid = f"{repo_id}/commit/{commit.hexsha}"
@@ -736,14 +788,15 @@ def sync_git_info(
                                 committed_at=commit.committed_datetime.isoformat(),
                                 summary=commit.summary, parents=[p.hexsha for p in commit.parents],
                                 changed_files=json.dumps(changes, separators=(",", ":"))))
-        for identity, display in (
-            (commit.author.email or commit.author.name, commit.author.name),
-            (commit.committer.email or commit.committer.name, commit.committer.name),
-        ):
+        for role, git_email, git_name in (("author", commit.author.email, commit.author.name),
+                                          ("committer", commit.committer.email, commit.committer.name)):
+            identity, display, source = _commit_user(commit_logins, commit.hexsha, role, git_email, git_name)
+            if not identity:
+                continue
             user_id = f"{repo_id}/user/{urllib.parse.quote(identity, safe='')}"
             if user_id not in user_ids_seen:
                 user_ids_seen.add(user_id)
-                node_batch.append(_node("GitUser", user_id, identity=identity, name=display))
+                node_batch.append(_node("GitUser", user_id, identity=identity, name=display, source=source))
         commit_count += 1
         if len(node_batch) >= 2000:
             writer.merge_nodes(node_batch)
@@ -755,10 +808,15 @@ def sync_git_info(
     for commit in commits:
         cid = f"{repo_id}/commit/{commit.hexsha}"
         edge_batch.append(_edge("HAS_COMMIT", "GitRepository", repo_id, "GitCommit", cid))
-        for role, identity in (("AUTHORED", commit.author.email or commit.author.name),
-                               ("COMMITTED", commit.committer.email or commit.committer.name)):
+        for rel, role, git_email, git_name in (
+            ("AUTHORED", "author", commit.author.email, commit.author.name),
+            ("COMMITTED", "committer", commit.committer.email, commit.committer.name),
+        ):
+            identity, _display, _source = _commit_user(commit_logins, commit.hexsha, role, git_email, git_name)
+            if not identity:
+                continue
             user_id = f"{repo_id}/user/{urllib.parse.quote(identity, safe='')}"
-            edge_batch.append(_edge(role, "GitCommit", cid, "GitUser", user_id))
+            edge_batch.append(_edge(rel, "GitCommit", cid, "GitUser", user_id))
         for parent in commit.parents:
             edge_batch.append(_edge("PARENT_COMMIT", "GitCommit", cid, "GitCommit",
                                     f"{repo_id}/commit/{parent.hexsha}"))

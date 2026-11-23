@@ -69,7 +69,9 @@ information nodes.
 ## (1) Connecting to GitHub
 
 - Identify `(owner, repo)` from the origin URL.
-- Use the anonymous REST API and paginate responses. No token is requested, stored, or used.
+- Prefer the local **`gh` CLI token, fetched once and reused** for every REST and GraphQL call this
+  process (the authenticated 5000/hr rate limit, and no `gh` subprocess per request); fall back to the
+  **anonymous** public REST API (60/hr) when `gh` is not logged in. Only public data is read either way.
 - Verify public visibility before reading local history or remote contents; failure skips the entire
   Git-information layer without failing code ingestion.
 
@@ -89,7 +91,7 @@ unindexed properties.** High-cardinality free text (PR/issue titles & bodies, co
 | Node | Indexed | Stored (unindexed) |
 |---|---|---|
 | `Commit` | `sha` | message, date, insertions/deletions |
-| `Contributor` | `identity` (normalized, **hashed by default** — see PII) | display name (opt-in) |
+| `GitUser` | `identity` — a commit's git email, OR `github:<login>` when the commit's email links to a GitHub account (unifies commit authors with PR/issue/release authors — one node per person) | display name |
 | `PullRequest`/`Issue` | `number`, `merge_commit_sha`/`head_sha` (join to `Commit`) | title, state, labels |
 | `CIRun` | `commit_sha`, image ref via the shared `image://` key | status, started_at |
 
@@ -115,9 +117,10 @@ deployment (push-based, real-time) — not the default.
 
 **Yes to public Checks API data, modeled provider-neutrally.** `GitCheckSuite` and `GitCheckRun`
 represent checks from GitHub Actions and third-party GitHub Apps alike; `GitHubApp` identifies the
-publisher. Public check reads are anonymous. To bound API traffic and graph growth, collect results
-for current local branch tips and PR head commits, not every commit in the repository history.
-Workflow YAML parsing remains a separate code/deployment-tier follow-up.
+publisher. To answer broad questions ("which commits/PRs failed CI", "how flaky is this area"), checks
+are collected for **every ingested commit** — made affordable by **batched GraphQL** (one round-trip per
+~10 commits) run in parallel, rather than one REST call per commit. Workflow YAML parsing remains a
+separate code/deployment-tier follow-up.
 
 ## The three axes (now informed by the above)
 
@@ -142,10 +145,14 @@ is ingested.
 
 The user chose an all-or-none `git_info.enabled` setting, configured during install. When enabled,
 Auryn ingests all locally reachable commits, authors/committers, and tags, plus public GitHub issues,
-pull requests, releases, and tags. The initial implementation uses GitPython and anonymous GitHub
-REST API requests; it does not require `gh` authentication. It runs after code ingestion and writes
-repo-scoped provenance labels so code delta sync does not remove the data. CI workflow/run ingestion
-and review-level details remain follow-up work.
+pull requests, releases, tags, and per-commit check suites/runs. The implementation uses GitPython for
+local history, the recycled `gh` token (anonymous fallback) for the REST API, and batched GraphQL both
+for check-suites and for resolving each commit author's GitHub login — so a person is a single `GitUser`
+(keyed `github:<login>`), not a git-email node plus a login node. It runs **asynchronously** after code
+ingestion: a **detached, single-flight `auryn git-info sync` subprocess** that outlives a one-shot
+`auryn ingest` (a plain in-process thread would die on interpreter exit), and that a concurrent trigger
+for the same graph skips rather than re-collects. It writes repo-scoped provenance labels so code delta
+sync never removes the data. CI workflow/run *config* parsing and review-level details remain follow-up.
 
 `auryn git-info enable [path]` sets the setting and syncs that checkout immediately. Disabling removes
 the provenance labels from existing graphs; a direct config-file change to disabled is reconciled on
@@ -168,7 +175,13 @@ ingestion; local Git information is still collected.
 
 1. Parse CI workflow configuration and connect declared build/deploy jobs to the deployment tier.
 2. Add review/comment detail with explicit API rate and graph-size limits.
-3. Add conditional request support so daily remote refreshes can avoid downloading unchanged data.
+3. Add conditional request support (ETag / `If-Modified-Since` / `since`) so a refresh that finds nothing
+   new is nearly free.
+4. **Scheduled GitHub refresh.** Today a GitHub refresh only happens on a *code-triggered* sync (throttled
+   to once a day) or a manual `auryn git-info sync`. On a repo whose code is static but whose issues/PRs/
+   releases keep moving, new activity isn't picked up until the next code sync. Add a periodic trigger —
+   a cron/timer running `auryn git-info sync`, or a tick in the watcher daemon — paired with (3) so
+   frequent polling stays cheap.
 
 ## Consequences
 

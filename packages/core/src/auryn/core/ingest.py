@@ -27,6 +27,9 @@ subgraph never aborts the whole source.
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterable
@@ -524,7 +527,13 @@ def _ingest_from_source(
             git_repo_path = source._root
         else:
             git_repo_path = None
-        _spawn_git_info(writer.sibling(), git_repo_path, source_uri)
+        sib = writer.sibling()
+        # Detach to a subprocess only when a config-based reconnect will reach THIS backend: a
+        # network FalkorDB (client has select_graph), not an ad-hoc --host (embed forced "inline")
+        # or an embedded in-process DB. Otherwise run inline so it still completes.
+        detachable = (embed != "inline" and os.name == "posix"
+                      and hasattr(getattr(getattr(sib, "_graph", None), "client", None), "select_graph"))
+        _spawn_git_info(sib, git_repo_path, source_uri, detachable=detachable)
     else:
         # The setting describes graph contents as well as future collection. This also
         # reconciles a direct config.toml edit on the next ingest.
@@ -740,25 +749,41 @@ def _spawn_deep(writer, source, target_sha, lang, *ctx) -> None:
 
 
 def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
-                    *, force_remote: bool = False) -> None:
-    """Collect repository provenance away from the code-ingest critical path."""
-    def _target() -> None:
-        try:
-            if repo_path is None:
-                from auryn.core.git_info import remove_git_info_for_source
-                remove_git_info_for_source(writer, source_uri)
-                logger.info("Git information skipped: source is not a Git repository")
-                return
-            from auryn.core.git_info import sync_git_info
-            summary = sync_git_info(writer, repo_path, source_uri=source_uri,
-                                    force_remote=force_remote)
-            logger.info("Git information synced: %s", summary)
-        except Exception:
-            logger.exception("Git information sync failed; code ingestion succeeded")
+                    *, detachable: bool = False, force_remote: bool = False) -> None:
+    """Collect repository provenance OFF the code-ingest critical path.
 
-    thread = threading.Thread(target=_target, name="git-info", daemon=True)
-    thread.start()
-    _git_info_threads.append(thread)
+    On a network-reachable configured backend (`detachable`), spawn a DETACHED `auryn git-info sync`
+    subprocess that OUTLIVES this process -- so a one-shot `auryn ingest` doesn't kill the collection
+    mid-flight (a plain daemon thread dies on interpreter exit). The worker is single-flight per graph,
+    so overlapping triggers never collect twice. Otherwise -- an embedded in-process DB, an ad-hoc
+    `--host`, or a platform without detach -- run it inline (blocking) so it still completes."""
+    if repo_path is None:
+        try:
+            from auryn.core.git_info import remove_git_info_for_source
+            remove_git_info_for_source(writer, source_uri)
+            logger.info("Git information skipped: source is not a Git repository")
+        except Exception:
+            logger.exception("Git information unlink failed; code ingestion succeeded")
+        return
+
+    graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
+    if detachable and graph_name:
+        from auryn.core.home import run_dir
+        run_dir().mkdir(parents=True, exist_ok=True)
+        log = open(run_dir() / "git-info.log", "ab")  # noqa: SIM115 -- handed to the detached child
+        argv = [sys.executable, "-m", "auryn", "git-info", "sync", "--graph", graph_name,
+                "--force-remote" if force_remote else "--no-force-remote", str(repo_path)]
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                         start_new_session=True, close_fds=True)
+        logger.info("Git information sync spawned (detached) for graph %r", graph_name)
+        return
+
+    try:  # inline (blocking) -- the only way an embedded / ad-hoc-host backend completes reliably
+        from auryn.core.git_info import sync_git_info
+        summary = sync_git_info(writer, repo_path, source_uri=source_uri, force_remote=force_remote)
+        logger.info("Git information synced (inline): %s", summary)
+    except Exception:
+        logger.exception("Git information sync failed; code ingestion succeeded")
 
 
 def join_git_info(timeout: float | None = None) -> None:

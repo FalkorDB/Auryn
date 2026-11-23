@@ -51,6 +51,7 @@ def test_full_history_is_incremental_and_remote_change_replaces_subgraph(
 
     monkeypatch.setattr(git_info, "_github_metadata", counted_remote_data)
     monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
     writer.merge_nodes([
         GraphNode("File", {"id": "python://checkout/file/main.py"},
                   {"id": "python://checkout/file/main.py", "path": "main.py"}),
@@ -133,6 +134,7 @@ def test_changes_link_to_existing_code_file_instead_of_duplicate_git_file(graph,
     monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
     monkeypatch.setattr(git_info, "_github_metadata", lambda *_: ([], []))
     monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
     writer.merge_node(GraphNode("File", {"id": "python://demo/file/main.py"},
                                 {"id": "python://demo/file/main.py", "path": "main.py"}))
 
@@ -151,6 +153,7 @@ def test_changed_file_without_code_node_has_no_duplicate_file_entity(graph, tmp_
     monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
     monkeypatch.setattr(git_info, "_github_metadata", lambda *_: ([], []))
     monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
 
     git_info.sync_git_info(writer, repo.working_tree_dir)
 
@@ -169,6 +172,7 @@ def test_remote_change_keeps_data_while_another_checkout_still_uses_old_repo(
     monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
     monkeypatch.setattr(git_info, "_github_metadata", lambda *_: ([], []))
     monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
 
     git_info.sync_git_info(writer, first_repo.working_tree_dir)
     git_info.sync_git_info(writer, second_repo.working_tree_dir)
@@ -329,6 +333,48 @@ def test_github_checks_via_graphql_batches_commits(monkeypatch):
     assert {edge.rel_type for edge in edges} == {"HAS_CHECK_SUITE", "HAS_CHECK_RUN", "PROVIDED_BY"}
 
 
+def test_commit_user_prefers_github_login_over_git_identity():
+    logins = {"sha1": {"author": "octocat", "committer": "web-flow"}}
+    assert git_info._commit_user(logins, "sha1", "author", "a@x.io", "Alice") == ("github:octocat", "octocat", "github")
+    assert git_info._commit_user(logins, "sha1", "committer", "c@x.io", "C") == ("github:web-flow", "web-flow", "github")
+    assert git_info._commit_user(logins, "unknown", "author", "b@x.io", "Bob") == ("b@x.io", "Bob", "git")
+    assert git_info._commit_user({}, "s", "author", None, "Only Name") == ("Only Name", "Only Name", "git")
+
+
+def test_commit_and_pr_by_same_github_login_share_one_gituser(graph, tmp_path, monkeypatch):
+    # No duplicate identity per person: a commit authored by GitHub login "ada" must land on the SAME
+    # GitUser node that opens a PR as "ada" -- not a second node keyed by the git email.
+    repo = _make_repo(tmp_path / "checkout")
+    writer = GraphWriter(graph)
+    head = repo.head.commit.hexsha
+    monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
+
+    def meta(owner, name, repo_id, default_branch=None):
+        # mirror _github_metadata.add_github_user: the identity is URL-quoted in the node id
+        uid = f"{repo_id}/user/{git_info.urllib.parse.quote('github:ada', safe='')}"
+        pid = f"{repo_id}/pull/1"
+        nodes = [GraphNode("GitPullRequest", {"id": pid}, {"id": pid, "number": 1}),
+                 GraphNode("GitUser", {"id": uid},
+                           {"id": uid, "identity": "github:ada", "name": "ada", "source": "github"})]
+        return nodes, [GraphEdge("OPENED_BY", "GitPullRequest", {"id": pid}, "GitUser", {"id": uid})]
+
+    monkeypatch.setattr(git_info, "_github_metadata", meta)
+    monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins",
+                        lambda *a, **k: {head: {"author": "ada", "committer": "ada"}})
+
+    git_info.sync_git_info(writer, repo.working_tree_dir, force_remote=True)
+
+    assert _count(graph, "GitUser") == 1  # commit author + PR author collapsed to one node
+    rels = graph.ro_query(
+        "MATCH ()-[e]->(:GitUser {identity:'github:ada'}) RETURN DISTINCT type(e)"
+    ).result_set
+    assert {r[0] for r in rels} == {"AUTHORED", "COMMITTED", "OPENED_BY"}  # all layers point at it
+    assert graph.ro_query(
+        "MATCH (u:GitUser {identity:'ada@example.org'}) RETURN count(u)"
+    ).result_set[0][0] == 0  # no stray git-email duplicate
+
+
 def test_public_gate_rejects_private_and_unverifiable_repos(monkeypatch):
     monkeypatch.setattr(git_info, "_api_pages", lambda _: [{"private": True, "visibility": "private"}])
     with pytest.raises(PermissionError):
@@ -388,6 +434,7 @@ def test_private_or_unverified_remote_removes_prior_checkout_data(graph, tmp_pat
     monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
     monkeypatch.setattr(git_info, "_github_metadata", lambda *_: ([], []))
     monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
     git_info.sync_git_info(writer, repo.working_tree_dir)
     assert _count(graph, "GitRepository") == 1
 
@@ -407,6 +454,7 @@ def test_temporary_visibility_api_failure_preserves_existing_data(graph, tmp_pat
     monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
     monkeypatch.setattr(git_info, "_github_metadata", lambda *_: ([], []))
     monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
     git_info.sync_git_info(writer, repo.working_tree_dir)
     assert _count(graph, "GitRepository") == 1
 
@@ -429,6 +477,7 @@ def test_ingest_toggle_on_remote_change_and_off_reconciles_graph(
     monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
     monkeypatch.setattr(git_info, "_github_metadata", lambda *_: ([], []))
     monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
     writer.merge_node(GraphNode("KeepNode", {"id": "keep"}, {"id": "keep"}))
 
     set_git_info_enabled(True)
