@@ -108,10 +108,15 @@ commit-level traversal. History is immutable → the rollup/append sync is cheap
 
 **Polling, not webhooks, for v1.** Webhooks need a **public HTTPS endpoint** to receive GitHub's POSTs
 plus per-repo webhook setup and secret handling — infrastructure a **local-first** tool doesn't have
-and shouldn't require a user to stand up. Instead: **on-demand + optional scheduled pull**, using
-**conditional requests (ETag / `If-Modified-Since`) and `since`/cursor pagination** so a refresh is
-cheap and rate-limit-friendly. Webhooks remain a reasonable *later* option for a **hosted/server**
-deployment (push-based, real-time) — not the default.
+and shouldn't require a user to stand up. Instead: **on-demand + optional scheduled pull**. On-demand is
+the code-triggered refresh (throttled daily) and the manual `auryn git-info sync`. The scheduled pull is
+**`auryn git-info watch [path] --interval <seconds>`**: a foreground loop that re-runs a single-flight,
+force-remote sync every interval, so a repo whose *code* is static still picks up new issues/PRs/releases/
+CI. It is run under a process manager (systemd, nohup, a container) alongside the ingest client — no
+webhook endpoint required. The remaining cost lever is **conditional requests (ETag / `If-Modified-Since`)
+and `since`/cursor pagination** so a poll that finds nothing new is nearly free (follow-up). Webhooks
+remain a reasonable *later* option for a **hosted/server** deployment (push-based, real-time) — not the
+default.
 
 ## (5) Do we track CI?
 
@@ -154,10 +159,12 @@ ingestion: a **detached, single-flight `auryn git-info sync` subprocess** that o
 for the same graph skips rather than re-collects. It writes repo-scoped provenance labels so code delta
 sync never removes the data. CI workflow/run *config* parsing and review-level details remain follow-up.
 
-`auryn git-info enable [path]` sets the setting and syncs that checkout immediately. Disabling removes
-the provenance labels from existing graphs; a direct config-file change to disabled is reconciled on
-the next ingest. Changing a checkout's origin retargets its `GitCheckout` link and prunes the prior
-repository subgraph when no other checkout references it.
+`auryn git-info enable [path]` sets the setting and syncs that checkout immediately; `auryn git-info sync`
+forces one refresh; `auryn git-info watch [path] --interval <s>` runs that forced refresh on a schedule
+so future GitHub activity is picked up without a code change. Disabling removes the provenance labels from
+existing graphs; a direct config-file change to disabled is reconciled on the next ingest. Changing a
+checkout's origin retargets its `GitCheckout` link and prunes the prior repository subgraph when no other
+checkout references it.
 
 The collector streams local commit nodes and edges in bounded batches. API pagination follows the
 GitHub `Link` header and is restricted to `api.github.com`. Remote API failures do not fail code
@@ -175,13 +182,11 @@ ingestion; local Git information is still collected.
 
 1. Parse CI workflow configuration and connect declared build/deploy jobs to the deployment tier.
 2. Add review/comment detail with explicit API rate and graph-size limits.
-3. Add conditional request support (ETag / `If-Modified-Since` / `since`) so a refresh that finds nothing
-   new is nearly free.
-4. **Scheduled GitHub refresh.** Today a GitHub refresh only happens on a *code-triggered* sync (throttled
-   to once a day) or a manual `auryn git-info sync`. On a repo whose code is static but whose issues/PRs/
-   releases keep moving, new activity isn't picked up until the next code sync. Add a periodic trigger —
-   a cron/timer running `auryn git-info sync`, or a tick in the watcher daemon — paired with (3) so
-   frequent polling stays cheap.
+3. Add conditional request support (ETag / `If-Modified-Since` / `since`) so a `git-info watch` poll that
+   finds nothing new is nearly free. A naïve page-1 ETag is *unsound* for this subgraph (a `sort=created`
+   list head is unchanged when an existing issue/PR merely changes state), so this needs `since`/`updated`
+   fetching with incremental merge, not a blanket short-circuit — hence a follow-up rather than shipped
+   with the watcher.
 
 ## Consequences
 

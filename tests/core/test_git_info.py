@@ -528,3 +528,34 @@ def test_enable_command_queues_background_sync_for_existing_checkout(graph, tmp_
     ingest.join_git_info()
     assert calls == [(str(root), True)]
 
+
+def test_watch_command_force_refreshes_each_tick_until_interrupted(graph, tmp_path, monkeypatch):
+    import signal as _signal
+    import time as _time
+    from click.testing import CliRunner
+    from auryn import cli as cli_module
+    from auryn.core.graph_client import FalkorDBConfig
+
+    root = tmp_path / "checkout"
+    _make_repo(root)
+    calls = []
+    monkeypatch.setattr(cli_module, "_resolve_connection", lambda *_: FalkorDBConfig())
+    monkeypatch.setattr(cli_module, "connect", lambda _config: graph)
+    monkeypatch.setattr(git_info, "sync_git_info", lambda writer, path, **kw: calls.append(
+        (path, kw.get("force_remote"))) or {"repository": "https://github.com/acme/one"})
+    # Don't clobber the test runner's real signal handlers.
+    monkeypatch.setattr(_signal, "signal", lambda *a, **k: None)
+
+    class _Break(Exception):
+        pass
+
+    # The watcher sleeps between ticks; raising from the first sleep ends it after exactly one refresh.
+    def _stop_after_first_tick(_seconds):
+        raise _Break()
+
+    monkeypatch.setattr(_time, "sleep", _stop_after_first_tick)
+
+    result = CliRunner().invoke(cli_module.cli, ["git-info", "watch", str(root), "--interval", "900"])
+    assert isinstance(result.exception, _Break)  # loop was still running (interrupt-driven), not a crash
+    assert calls == [(str(root), True)]  # one tick, and it forced a remote refresh
+

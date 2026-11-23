@@ -538,6 +538,48 @@ def git_info_disable() -> None:
     click.echo(f"Git information disabled; removed {removed} provenance nodes from the configured backend.")
 
 
+@git_info_group.command("watch")
+@click.argument("path", required=False, default=".")
+@click.option("--host", default=None, help="FalkorDB host. Default: the configured backend.")
+@click.option("--port", default=None, type=int, help="FalkorDB port (only with --host).")
+@click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
+@click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
+@click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
+@click.option("--graph", "graph_name", default=None, help="Target graph. Default: resolved from PATH.")
+@click.option("--interval", default=3600, type=int, show_default=True,
+              help="Seconds between GitHub refreshes.")
+@click.pass_context
+def git_info_watch(ctx, path, host, port, username, password, ssl, graph_name, interval) -> None:
+    """Periodically refresh GitHub metadata for PATH so new issues/PRs/releases/CI are picked up even
+    when the code isn't changing (code-triggered syncs otherwise refresh GitHub at most once a day).
+
+    Runs in the foreground until interrupted -- run it under your process manager (systemd, nohup, a
+    container) alongside the ingest/sync client. Each tick re-runs `git-info sync --force-remote`, which
+    is single-flight per graph, so it never collides with a code-triggered sync."""
+    import signal
+    import time
+
+    stop = {"flag": False}
+
+    def _handle(*_):
+        stop["flag"] = True
+
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
+    click.echo(f"Watching GitHub activity for {path} every {interval}s (Ctrl-C to stop).")
+    while not stop["flag"]:
+        try:
+            ctx.invoke(git_info_sync, path=path, host=host, port=port, username=username,
+                       password=password, ssl=ssl, graph_name=graph_name, force_remote=True)
+        except Exception as exc:  # noqa: BLE001 -- a transient failure must not kill the watcher
+            click.echo(f"Refresh failed ({exc}); will retry next interval.", err=True)
+        for _ in range(max(interval, 1)):  # sleep in 1s steps so Ctrl-C is responsive
+            if stop["flag"]:
+                break
+            time.sleep(1)
+    click.echo("Stopped watching GitHub activity.")
+
+
 def _conn_options(fn):
     """Standard FalkorDB connection flags (shared by list/forget). With no --host, the
     configured backend is used (local starts on demand)."""
