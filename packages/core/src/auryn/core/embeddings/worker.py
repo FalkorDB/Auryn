@@ -116,7 +116,9 @@ def _embed_batch(embedder: "Embedder", docs: list) -> list:
     except Exception as exc:  # noqa: BLE001 -- allocation failures aren't a single fixed exception type
         if len(docs) <= 1 or not _is_allocation_error(exc):
             raise
-        failure = exc
+        # Keep the message TEXT, not the exception: its traceback would pin the failed embed frame's
+        # locals (the big batch) alive through the retry, defeating the release described above.
+        failure = f"{type(exc).__name__}: {exc}"
     mid = len(docs) // 2
     logger.warning("Embedding a batch of %d over-allocated (%s); halving to %d/%d and retrying",
                    len(docs), failure, mid, len(docs) - mid)
