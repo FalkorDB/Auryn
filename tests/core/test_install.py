@@ -487,17 +487,21 @@ def test_yes_remote_honors_explicit_connection():
 def test_yes_keeps_the_saved_trigger(tmp_path, monkeypatch):
     """`install -y` re-run on a configured machine: a trigger that isn't passed keeps what
     config.toml already says. It used to fall back to `commit`, which silently turned a
-    save-triggered repo's watcher off. An explicit option still wins."""
+    save-triggered repo's watcher off. So does git info: falling back to `off` also purged the
+    history already collected. An explicit option still wins."""
     from click.testing import CliRunner
 
     from auryn.cli import cli
 
     monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
     monkeypatch.setattr("auryn.core.install.default_adapters", lambda: [_FakeAgent()])
-    save_config(Config(resync_trigger="save"))
+    purged = []
+    monkeypatch.setattr("auryn.cli._purge_git_info_backend", lambda: purged.append(1) or 0)
+    save_config(Config(resync_trigger="save", git_info_enabled=True))
 
     assert CliRunner().invoke(cli, ["install", "-y"]).exit_code == 0
     assert load_config().resync_trigger == "save"
+    assert load_config().git_info_enabled and purged == []
 
     assert CliRunner().invoke(cli, ["install", "-y", "--trigger", "manual"]).exit_code == 0
     assert load_config().resync_trigger == "manual"

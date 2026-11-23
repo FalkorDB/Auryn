@@ -31,9 +31,9 @@ every detected agent (e.g. Claude Code).
 - `--host/--port/--username/--password/--ssl` — the remote server (with `--backend remote`).
 - `--trigger manual|commit|save` — how the graph is kept fresh after an edit (prompted if omitted).
 - `--git-info on|off` — collect local Git history and public GitHub metadata after ingestion
-  (prompted if omitted; defaults off; `--yes` defaults off).
+  (prompted if omitted; defaults to the saved setting, else off).
 - `-y/--yes` — non-interactive (local backend unless `--backend` is given; an omitted `--trigger`
-  keeps the saved setting).
+  or `--git-info` keeps the saved setting).
 
 ### `uninstall`
 Reverse `install`: stop the local server and deregister Auryn from every agent.

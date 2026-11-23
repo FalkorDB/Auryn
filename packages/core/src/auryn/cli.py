@@ -479,9 +479,10 @@ def install(backend, host, port, username, password, ssl, trigger, git_info, yes
         trigger = saved.resync_trigger if yes else click.prompt(
             "Keep the graph fresh on", type=click.Choice(["commit", "save", "manual"]),
             default=saved.resync_trigger)
-    if git_info is None:
-        git_info = "off" if yes else ("on" if click.confirm(
-            "Collect full Git history and public GitHub issues, pull requests, releases, and tags?", default=False
+    if git_info is None:  # kept as saved too: turning it off purges the history already collected
+        git_info = ("on" if saved.git_info_enabled else "off") if yes else ("on" if click.confirm(
+            "Collect full Git history and public GitHub issues, pull requests, releases, and tags?",
+            default=saved.git_info_enabled,
         ) else "off")
     was_git_info_enabled = load_config().git_info_enabled
     config = do_install(chosen)
