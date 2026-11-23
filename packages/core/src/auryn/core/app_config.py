@@ -73,6 +73,7 @@ class Config:
     repos: tuple[RepoRegistration, ...] = ()
     disabled_hooks: tuple[str, ...] = ()  # post hooks turned off machine-wide (see core/registry.py)
     embed_mode: str = "background"  # inline | background | off -- how the always-on embed runs (see embedder.embed_mode)
+    git_info_enabled: bool = False  # collect local git history and public GitHub metadata on ingest
 
 
 def _parse_backend(section: dict) -> Backend:
@@ -124,8 +125,14 @@ def load_config() -> Config:
     embed_mode = str(data.get("embeddings", {}).get("mode", "background")).strip().lower()
     if embed_mode not in ("inline", "background", "off"):
         embed_mode = "background"  # a stray value must never break an ingest; fall back to the default
+    # Robust against a malformed config: `git_info = false` (a bare value, not a table) would make
+    # `.get("enabled")` raise AttributeError and crash every ingest; `enabled = "false"` (a string)
+    # is truthy under bool() and would silently opt IN. Require a real TOML boolean `true` in a table.
+    gi = data.get("git_info", {})
+    git_info_enabled = isinstance(gi, dict) and gi.get("enabled") is True
     return Config(backend=backend, agents=agents, resync_trigger=trigger, repos=repos,
-                  disabled_hooks=disabled_hooks, embed_mode=embed_mode)
+                  disabled_hooks=disabled_hooks, embed_mode=embed_mode,
+                  git_info_enabled=git_info_enabled)
 
 
 def load_backend() -> Backend:
@@ -170,6 +177,8 @@ def save_config(config: Config) -> None:
         doc["hooks"] = {"disabled": list(config.disabled_hooks)}
     if config.embed_mode and config.embed_mode != "background":
         doc["embeddings"] = {"mode": config.embed_mode}  # only persist a non-default mode
+    if config.git_info_enabled:
+        doc["git_info"] = {"enabled": True}
     if config.repos:
         doc["repo"] = [
             {k: v for k, v in {
@@ -209,6 +218,11 @@ def set_embed_mode(mode: str) -> None:
     if mode not in ("inline", "background", "off"):
         raise ValueError(f"embed mode must be one of ('inline', 'background', 'off'), got {mode!r}")
     save_config(replace(load_config(), embed_mode=mode))
+
+
+def set_git_info_enabled(enabled: bool) -> None:
+    """Enable or disable local Git and public GitHub metadata collection."""
+    save_config(replace(load_config(), git_info_enabled=bool(enabled)))
 
 
 def register_repo(reg: RepoRegistration) -> None:

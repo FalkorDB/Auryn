@@ -122,6 +122,14 @@ def _resolve_connection(
     return ensure_server(load_backend())
 
 
+def _purge_git_info_backend() -> int:
+    """Remove Git-information nodes from every graph on the configured backend."""
+    from auryn.core.git_info import purge_git_info
+
+    client = connect_client(_resolve_connection(None, None, None, None, False))
+    return sum(purge_git_info(GraphWriter(client.select_graph(name))) for name in client.list_graphs())
+
+
 @cli.command("view")
 @click.option("--host", default="127.0.0.1", show_default=True, help="Host the viewer's web server binds to.")
 @click.option("--port", default=8080, show_default=True, type=int, help="Port the viewer's web server binds to.")
@@ -441,22 +449,32 @@ def _prompt_backend(backend, host, port, username, password, ssl, assume_yes):
 @click.option("--ssl", is_flag=True, default=False, help="Connect to the remote FalkorDB over TLS.")
 @click.option("--trigger", type=click.Choice(["manual", "commit", "save"]), default=None,
               help="How the graph is kept fresh after an edit. Prompted for if omitted (default: commit).")
+@click.option("--git-info", "git_info", type=click.Choice(["on", "off"]), default=None,
+              help="Collect full local Git history and public GitHub metadata whenever a repo is ingested.")
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="Non-interactive: auto-select the backend (local unless --backend is given) and skip all prompts.")
-def install(backend, host, port, username, password, ssl, trigger, yes) -> None:
+def install(backend, host, port, username, password, ssl, trigger, git_info, yes) -> None:
     """Set up Auryn on this machine: choose a FalkorDB backend and register the MCP server
     with every detected agent (Claude Code, OpenAI Codex, Antigravity, GitHub Copilot, Cursor,
     Windsurf, Gemini CLI), user-scoped. Writes only to ~/.auryn and the agent's own config —
     never your repo. Re-runnable."""
-    from auryn.core.app_config import set_resync_trigger
+    from auryn.core.app_config import load_config, set_git_info_enabled, set_resync_trigger
     from auryn.core.install import default_server_command, do_install
 
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
     if trigger is None:
         trigger = "commit" if yes else click.prompt(
             "Keep the graph fresh on", type=click.Choice(["commit", "save", "manual"]), default="commit")
+    if git_info is None:
+        git_info = "off" if yes else ("on" if click.confirm(
+            "Collect full Git history and public GitHub issues, pull requests, releases, and tags?", default=False
+        ) else "off")
+    was_git_info_enabled = load_config().git_info_enabled
     config = do_install(chosen)
     set_resync_trigger(trigger)
+    set_git_info_enabled(git_info == "on")
+    if was_git_info_enabled and git_info == "off":
+        _purge_git_info_backend()
     # Semantic embeddings are always on (built in the background, off the ingest critical path) --
     # no install choice for it.
     click.echo("Semantic embeddings: on (built in the background on every ingest)")
@@ -464,6 +482,8 @@ def install(backend, host, port, username, password, ssl, trigger, yes) -> None:
                + {"commit": " (a git hook resyncs on each commit)",
                   "save": " (a watcher resyncs on save)",
                   "manual": " (resync on demand: `auryn sync`)"}[trigger])
+    click.echo(f"Git information: {'on' if git_info == 'on' else 'off'}"
+               + (" (local history plus public GitHub metadata on ingest)" if git_info == "on" else ""))
 
     if chosen.mode == "remote":
         click.echo(f"Backend: remote FalkorDB at {chosen.host}:{chosen.port}")
@@ -501,6 +521,203 @@ def uninstall(purge, yes) -> None:
     if purge:
         click.echo("Removed ~/.auryn.")
     click.echo("Remove the CLI itself with:  uv tool uninstall auryn")
+
+
+@cli.group("git-info")
+def git_info_group() -> None:
+    """Manage collection of local Git history and public GitHub metadata."""
+
+
+@git_info_group.command("sync")
+@click.argument("path", required=False, default=".")
+@click.option("--host", default=None, help="FalkorDB host. Default: the configured backend.")
+@click.option("--port", default=None, type=int, help="FalkorDB port (only with --host).")
+@click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
+@click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
+@click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
+@click.option("--graph", "graph_name", default=None, help="Target graph. Default: resolved from PATH.")
+@click.option("--force-remote/--no-force-remote", default=True,
+              help="Refresh GitHub metadata now (default), or respect the once-a-day throttle.")
+@click.option("--source-uri", "source_uri", default=None,
+              help="Canonical source URI (e.g. the clone URL) when it differs from PATH; links "
+                   "provenance to the code graph's Project.repo_uri. Default: PATH.")
+def git_info_sync(path, host, port, username, password, ssl, graph_name, force_remote, source_uri) -> None:
+    """Collect all locally reachable Git history and public GitHub metadata for PATH.
+
+    Runs synchronously (this process does the work) and is single-flight per graph: if a sync is
+    already running for the same graph it exits, so overlapping triggers never collect twice. Code
+    ingestion spawns this DETACHED, so a one-shot `auryn ingest` doesn't cut the collection short."""
+    import dataclasses
+    import hashlib
+    from pathlib import Path
+    from auryn.core.app_config import get_repo, load_config
+    from auryn.core.git_info import sync_git_info
+    from auryn.core.home import run_dir
+    from auryn.core.project import default_graph_name, resolve_project_root
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover -- native Windows: no single-flight lock, just run
+        fcntl = None
+
+    if not load_config().git_info_enabled:
+        # Honor the opt-out: a trigger (the watcher, a commit/save hook) must not recreate the subgraph
+        # after `git-info disable`. `git-info enable` flips the setting before it invokes this.
+        click.echo("Git information is disabled; skipping. Run `auryn git-info enable` to turn it on.")
+        return
+
+    root = Path(resolve_project_root(path))
+    if not graph_name:
+        reg = get_repo(str(root))
+        graph_name = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
+    config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph_name)
+
+    run_dir().mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(graph_name.encode()).hexdigest()[:16]
+    lock = open(run_dir() / f"git-info-{key}.lock", "w")  # noqa: SIM115 -- held for the sync's duration
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            click.echo("Git information sync already running for this graph; skipping.")
+            lock.close()
+            return
+    try:
+        summary = sync_git_info(GraphWriter(connect(config)), str(root),
+                                source_uri=source_uri or str(root), force_remote=force_remote)
+        click.echo(f"Git information synced: {summary}")
+    finally:
+        if fcntl is not None:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+
+
+@git_info_group.command("enable")
+@click.argument("path", required=False, default=".")
+@click.option("--host", default=None, help="FalkorDB host. Default: the configured backend.")
+@click.option("--port", default=None, type=int, help="FalkorDB port (only with --host).")
+@click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
+@click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
+@click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
+@click.pass_context
+def git_info_enable(ctx, path, host, port, username, password, ssl) -> None:
+    """Enable Git information collection and sync PATH immediately."""
+    from auryn.core.app_config import set_git_info_enabled
+    set_git_info_enabled(True)
+    ctx.invoke(git_info_sync, path=path, host=host, port=port, username=username,
+               password=password, ssl=ssl)
+
+
+@git_info_group.command("disable")
+def git_info_disable() -> None:
+    """Disable Git information collection on future ingests."""
+    from auryn.core.app_config import set_git_info_enabled
+    removed = _purge_git_info_backend()
+    set_git_info_enabled(False)
+    click.echo(f"Git information disabled; removed {removed} provenance nodes from the configured backend.")
+
+
+def _git_info_watch_targets() -> list[str]:
+    """Every registered repo's local checkout that still exists on disk, de-duplicated by resolved
+    path. This is the enumeration the multi-project watcher refreshes. The registry (keyed by local
+    checkout, ADR 0003) is the right source: git-info needs a local path to read `git log`, so a
+    *remote-only* ingest -- which has a graph `Project` node but no checkout -- isn't a target anyway.
+    Co-located repos in one graph each have their own registry entry, so they are all enumerated."""
+    from pathlib import Path
+    from auryn.core.app_config import load_config
+    seen: set[str] = set()
+    targets: list[str] = []
+    for reg in load_config().repos:
+        p = Path(reg.local_dir)
+        if p.is_dir():
+            resolved = str(p.resolve())
+            if resolved not in seen:
+                seen.add(resolved)
+                targets.append(resolved)
+    return targets
+
+
+@git_info_group.command("watch")
+@click.argument("path", required=False, default=None)
+@click.option("--host", default=None, help="FalkorDB host. Default: the configured backend.")
+@click.option("--port", default=None, type=int, help="FalkorDB port (only with --host).")
+@click.option("--username", default=None, help="FalkorDB username, if auth is enabled.")
+@click.option("--password", default=None, help="FalkorDB password, if auth is enabled.")
+@click.option("--ssl", is_flag=True, default=False, help="Connect to FalkorDB over TLS.")
+@click.option("--graph", "graph_name", default=None,
+              help="Target graph (single-repo mode). Default: resolved from PATH.")
+@click.option("--interval", default=3600, type=int, show_default=True,
+              help="Seconds between GitHub refreshes.")
+@click.pass_context
+def git_info_watch(ctx, path, host, port, username, password, ssl, graph_name, interval) -> None:
+    """Periodically refresh GitHub metadata so new issues/PRs/releases/CI are picked up even when the
+    code isn't changing (code-triggered syncs otherwise refresh GitHub at most once a day).
+
+    With no PATH (and no --graph) this is a MULTI-PROJECT daemon: each interval it refreshes EVERY
+    registered repository across EVERY graph, re-reading the registry each tick so newly ingested repos
+    are picked up automatically. Pass a PATH to watch a single checkout instead.
+
+    One watcher runs per machine -- a second invocation exits immediately. Within a graph, co-located
+    repos are refreshed sequentially so they never trip the per-graph single-flight lock. Runs in the
+    foreground -- run it under your process manager (systemd, nohup, a container) alongside the ingest
+    client."""
+    import signal
+    import time
+    from auryn.core.home import run_dir
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover -- native Windows: no single-instance guard, just run
+        fcntl = None
+
+    multi = path is None and not graph_name
+
+    # Hard single-instance guard (one watcher per machine). A flock, not a bare pidfile, so a crashed
+    # watcher's lock is released by the OS automatically -- no stale-pid races.
+    run_dir().mkdir(parents=True, exist_ok=True)
+    guard = open(run_dir() / "git-info-watch.lock", "w")  # noqa: SIM115 -- held for the daemon's life
+    if fcntl is not None:
+        try:
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            click.echo("A git-info watcher is already running; exiting.")
+            guard.close()
+            return
+
+    stop = {"flag": False}
+
+    def _handle(*_):
+        stop["flag"] = True
+
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
+
+    scope = "all registered repositories" if multi else (path or ".")
+    click.echo(f"Watching GitHub activity for {scope} every {interval}s (Ctrl-C to stop).")
+    try:
+        while not stop["flag"]:
+            if multi:
+                targets = [(t, None) for t in _git_info_watch_targets()]
+                if not targets:
+                    click.echo("No registered repositories yet; will re-check next interval.")
+            else:
+                targets = [(path or ".", graph_name)]
+            for target_path, target_graph in targets:  # sequential: never collides with the per-graph lock
+                if stop["flag"]:
+                    break
+                try:
+                    ctx.invoke(git_info_sync, path=target_path, host=host, port=port,
+                               username=username, password=password, ssl=ssl,
+                               graph_name=target_graph, force_remote=True)
+                except Exception as exc:  # noqa: BLE001 -- one repo's failure must not stop the rest
+                    click.echo(f"Refresh failed for {target_path} ({exc}); continuing.", err=True)
+            for _ in range(max(interval, 1)):  # sleep in 1s steps so Ctrl-C is responsive
+                if stop["flag"]:
+                    break
+                time.sleep(1)
+    finally:
+        if fcntl is not None:
+            fcntl.flock(guard, fcntl.LOCK_UN)
+        guard.close()
+    click.echo("Stopped watching GitHub activity.")
 
 
 def _conn_options(fn):
