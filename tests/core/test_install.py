@@ -348,12 +348,20 @@ def test_codex_register_raises_when_add_fails():
 
 
 # ── `install -y` auto-selection (the flag resolves a backend with no prompts) ─
+@pytest.mark.skipif(os.name == "nt",
+                    reason="local backend is unsupported on native Windows, so -y raises instead of "
+                           "auto-selecting local; that native-Windows branch is covered by "
+                           "test_platform_support.test_prompt_backend_yes_without_remote_errors_on_native_windows")
 def test_yes_auto_selects_local():
     from auryn.cli import _prompt_backend
 
     assert _prompt_backend(None, None, None, None, None, False, assume_yes=True).mode == "local"
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="local backend is unsupported on native Windows, so --backend local raises; that "
+                           "native-Windows branch is covered by "
+                           "test_platform_support.test_prompt_backend_explicit_local_errors_on_native_windows")
 def test_explicit_backend_local_needs_no_prompt():
     from auryn.cli import _prompt_backend
 

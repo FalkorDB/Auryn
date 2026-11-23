@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
 
 
 def _run(tmp_home, *args):
@@ -97,8 +99,11 @@ def test_hooks_disable_enable_per_repo_scope(tmp_path):
     # disable for this repo only
     r = _run(home, "hooks", "disable", "link-tests", "--repo", str(proj))
     assert r.returncode == 0, r.stderr
-    cfg = (home / "config.toml").read_text()
-    assert "disabled_hooks" in cfg and str(proj.resolve()) in cfg  # persisted per-repo
+    # Parse the TOML rather than substring-matching the raw text: on Windows the path is stored with
+    # escaped backslashes (C:\\Users\\...), so str(proj.resolve()) is not a literal substring of it.
+    repos = tomllib.loads((home / "config.toml").read_text()).get("repo", [])
+    assert any(Path(r["local_dir"]).resolve() == proj.resolve() and "link-tests" in r.get("disabled_hooks", [])
+               for r in repos)  # persisted per-repo
 
     # list --repo reflects the per-repo disable; the install-wide view does not
     assert "disabled" in _run(home, "hooks", "list", "--repo", str(proj)).stdout
