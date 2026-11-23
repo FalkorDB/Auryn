@@ -42,6 +42,9 @@ class Occurrence:
     symbol: str
     start_line: int  # 0-based (the SCIP range's first element)
     is_definition: bool
+    start_char: int = 0  # 0-based start column (2nd range element), in the index's position encoding --
+    # indexer-specific (scip-typescript emits UTF-16 code units, rust-analyzer UTF-8), so only a consumer
+    # that knows its indexer's encoding (and recorded call-site columns in the SAME one) may join on it.
 
 
 @dataclass(frozen=True)
@@ -93,42 +96,50 @@ def _packed_varints(data: bytes) -> list[int]:
     return out
 
 
-def _sub_field1_varint(data: bytes) -> int:
-    """The first varint field (field 1) of a sub-message -- the start line of a SingleLineRange (`line`)
-    or MultiLineRange (`start_line`). Field 1 is a proto3 scalar, so a producer OMITS it when it is 0
-    (line 0 = a file's first line); the sub-message's mere presence establishes a typed range, so an
-    absent field 1 means line 0, not 'missing'."""
+def _sub_range_line_char(data: bytes) -> tuple[int, int]:
+    """The (start line, start_character) of a SingleLineRange{line=1, start_character=2} / MultiLineRange
+    {start_line=1, start_character=2, ...}. Both are proto3 scalars, so a producer OMITS one when it is 0
+    (line/col 0 = a file's first line/column); the sub-message's mere presence establishes a typed range,
+    so an absent field means 0, not 'missing'."""
+    line = char = 0
     for field_num, wire, value in _fields(data):
-        if field_num == 1 and wire == _WIRE_VARINT:
-            return value
-    return 0
+        if wire == _WIRE_VARINT:
+            if field_num == 1:
+                line = value
+            elif field_num == 2:
+                char = value
+    return line, char
 
 
 def _parse_occurrence(data: bytes) -> Occurrence | None:
     symbol = ""
-    packed_line = -1       # deprecated range(1)
-    typed_line = -1        # single_line_range(8) / multi_line_range(9) line, once a typed range is seen
-    has_typed = False      # whether a typed-range field was present (it takes precedence per the proto)
+    packed: list[int] = []  # deprecated range(1): [startLine, startCol, endCol(, endLine, endCol)]
+    typed_line = -1         # single_line_range(8) / multi_line_range(9), once a typed range is seen
+    typed_char = 0
+    has_typed = False       # whether a typed-range field was present (it takes precedence per the proto)
     roles = 0
     for field_num, wire, value in _fields(data):
-        if field_num == 1:  # deprecated packed range: [line, startCol, endCol(, endLine, endCol)]
-            if wire == _WIRE_LEN:  # packed (proto3 default)
-                ints = _packed_varints(value)
-                if ints:
-                    packed_line = ints[0]
-            elif wire == _WIRE_VARINT and packed_line < 0:  # non-packed: first entry is the start line
-                packed_line = value
+        if field_num == 1:  # deprecated range -- packed (proto3 default) or, legacy, repeated varints
+            if wire == _WIRE_LEN:
+                packed = _packed_varints(value)
+            elif wire == _WIRE_VARINT:  # non-packed: appended in declared order (line, startCol, ...)
+                packed.append(value)
         elif field_num in (8, 9) and wire == _WIRE_LEN:  # single_line_range / multi_line_range
             has_typed = True
-            typed_line = _sub_field1_varint(value)
+            typed_line, typed_char = _sub_range_line_char(value)
         elif field_num == 2 and wire == _WIRE_LEN:  # symbol
             symbol = value.decode("utf-8", "replace")
         elif field_num == 3 and wire == _WIRE_VARINT:  # symbol_roles
             roles = value
-    start_line = typed_line if has_typed else packed_line  # a present typed range wins, even at line 0
+    if has_typed:  # a present typed range wins, even at line/col 0
+        start_line, start_char = typed_line, typed_char
+    else:
+        start_line = packed[0] if packed else -1
+        start_char = packed[1] if len(packed) >= 2 else 0  # 2nd element = startCol in both packed forms
     if not symbol or start_line < 0:
         return None
-    return Occurrence(symbol=symbol, start_line=start_line, is_definition=bool(roles & SYMBOL_ROLE_DEFINITION))
+    return Occurrence(symbol=symbol, start_line=start_line, start_char=start_char,
+                      is_definition=bool(roles & SYMBOL_ROLE_DEFINITION))
 
 
 def _parse_document(data: bytes) -> Document:
