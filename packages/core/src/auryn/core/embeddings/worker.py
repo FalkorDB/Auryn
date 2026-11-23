@@ -27,6 +27,7 @@ What gets embedded:
 from __future__ import annotations
 
 import logging
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -48,8 +49,61 @@ _CONTAINER_SCAN_LABELS = tuple(sorted(CONTAINER_LABELS))
 _MEMBER_KINDS = sorted(CALLABLE_LABELS | TYPE_LABELS)
 
 _DEFAULT_BATCH = 128
-"""Documents embedded per model call. Batching amortizes model-call overhead; kept modest so a
-single batch's texts (which can each be a full function body) stay a reasonable payload."""
+"""Upper bound on documents per model call (a count cap). The ACTUAL batch is also bounded by
+memory via `_memory_aware_batches` below, so this only caps the short-document case."""
+
+
+def _batch_char_budget() -> int:
+    """Ceiling on `len(batch) * longest_doc_chars**2` per model call. fastembed pads a batch to its
+    longest encoding, and transformer attention costs `batch * heads * L**2 * 4 bytes` -- so one long
+    document in a large batch can allocate hundreds of GB (issue #835: a 217 GB fused-MatMul alloc).
+    Bounding batch*chars^2 caps that quadratic term. The default keeps peak attention near ~2 GB for
+    the default 12-head model (~3.5 chars/token); override with AURYN_EMBED_BATCH_BUDGET on a smaller
+    or larger machine. Kept >= MAX_CHARS**2 so a single longest document always fits a batch alone."""
+    try:
+        override = int(os.environ.get("AURYN_EMBED_BATCH_BUDGET", "") or 0)
+    except ValueError:
+        override = 0
+    return override if override > 0 else 500_000_000  # 5e8 char^2; MAX_CHARS**2 == 4e8 fits one doc
+
+
+def _memory_aware_batches(documents: list, char_budget: int, max_count: int):
+    """Yield batches of `documents` (each `(kind, id, doc, fp)`) so every batch keeps
+    `len(batch) * longest_doc_chars**2 <= char_budget` and `len(batch) <= max_count`. Documents are
+    sorted by length first, so long ones batch TOGETHER instead of padding many short docs up to a
+    single long one's length (which is what makes `batch * longest^2` explode). A document on its own
+    always fits (the budget is >= MAX_CHARS**2)."""
+    ordered = sorted(documents, key=lambda d: len(d[2]))
+    batch: list = []
+    longest = 0
+    for item in ordered:
+        candidate_longest = max(longest, len(item[2]))
+        if batch and ((len(batch) + 1) * candidate_longest * candidate_longest > char_budget
+                      or len(batch) >= max_count):
+            yield batch
+            batch, longest, candidate_longest = [], 0, len(item[2])
+        batch.append(item)
+        longest = candidate_longest
+    if batch:
+        yield batch
+
+
+def _embed_batch(embedder: "Embedder", docs: list) -> list:
+    """`embedder.embed` for one batch, with a halve-on-failure retry: ONNX Runtime can still
+    over-allocate on a memory-constrained machine even within the char budget, so on an allocation
+    failure split the batch and retry each half (down to a single document, then re-raise). Genuine
+    programming errors are re-raised immediately, not retried."""
+    try:
+        return embedder.embed([doc for _, _, doc, _ in docs])
+    except (TypeError, KeyError, AttributeError, ValueError):
+        raise
+    except Exception as exc:  # noqa: BLE001 -- MemoryError / onnxruntime alloc failures aren't a fixed type
+        if len(docs) <= 1:
+            raise
+        mid = len(docs) // 2
+        logger.warning("Embedding a batch of %d failed (%s); halving to %d/%d and retrying",
+                       len(docs), exc, mid, len(docs) - mid)
+        return _embed_batch(embedder, docs[:mid]) + _embed_batch(embedder, docs[mid:])
 
 _ID_CHUNK = 1000
 """Ids per `WHERE id IN $ids` member-gathering query -- keeps a single request's parameter list
@@ -203,8 +257,8 @@ def embed_graph(
     )
 
     embedded = 0
-    for chunk in _chunked(documents, batch_size):
-        vectors = embedder.embed([doc for _, _, doc, _ in chunk])
+    for chunk in _memory_aware_batches(documents, _batch_char_budget(), batch_size):
+        vectors = _embed_batch(embedder, chunk)
         writer.write_embeddings(
             [(kind_label, node_id, vec, fp)
              for (kind_label, node_id, _, fp), vec in zip(chunk, vectors)]
