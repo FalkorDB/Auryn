@@ -73,12 +73,13 @@ def do_uninstall(*, purge: bool = False, force: bool = False, adapters=None) -> 
     failed = []
     for reg in prior.agents:
         adapter = by_name.get(reg.name)
-        if adapter is not None:
-            try:
-                adapter.deregister(reg)
-            except Exception as e:  # noqa: BLE001 -- e.g. its CLI is gone: the rest still get reversed
-                logger.warning("Could not deregister %s (%s)", reg.name, e)
-                failed.append(reg)
+        try:
+            if adapter is None:  # recorded by another version of Auryn: nothing here can reverse it
+                raise LookupError("this version of Auryn has no adapter for it")
+            adapter.deregister(reg)
+        except Exception as e:  # noqa: BLE001 -- e.g. its CLI is gone: the rest still get reversed
+            logger.warning("Could not deregister %s (%s)", reg.name, e)
+            failed.append(reg)
 
     if purge and (force or not failed):
         shutil.rmtree(home_dir(), ignore_errors=True)

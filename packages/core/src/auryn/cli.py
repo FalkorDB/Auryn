@@ -461,6 +461,8 @@ def install(backend, host, port, username, password, ssl, trigger, git_info, yes
     with every detected agent (Claude Code, OpenAI Codex, Antigravity, GitHub Copilot, Cursor,
     Windsurf, Gemini CLI), user-scoped. Writes only to ~/.auryn and the agent's own config —
     never your repo. Re-runnable."""
+    import tomllib
+
     from auryn.core.app_config import load_config, set_git_info_enabled, set_resync_trigger
     from auryn.core.home import config_path
     from auryn.core.install import default_server_command, do_install
@@ -471,9 +473,11 @@ def install(backend, host, port, username, password, ssl, trigger, git_info, yes
         # install before any agent is registered against it.
         saved = load_config()
     except Exception as e:  # noqa: BLE001 -- invalid TOML, or a section / field of the wrong shape
+        # Only a TOML error's text: it gives a line and column. Others can quote the bad value --
+        # a URL typed as the port, password and all -- and the repr of any holds even more.
+        reason = f"{type(e).__name__}: {e}" if isinstance(e, tomllib.TOMLDecodeError) else type(e).__name__
         raise click.ClickException(
-            f"{config_path()} can't be read ({type(e).__name__}: {e}). Fix or remove it, then re-run "
-            "`auryn install`.") from e  # never the repr: a decode error's holds the file, password and all
+            f"{config_path()} can't be read ({reason}). Fix or remove it, then re-run `auryn install`.") from e
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
     if trigger is None:
         trigger = saved.resync_trigger if yes else click.prompt(

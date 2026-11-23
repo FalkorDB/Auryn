@@ -107,6 +107,8 @@ def load_config() -> Config:
         )
         for a in data.get("install", {}).get("agents", [])
     )
+    if not all(isinstance(a.name, str) for a in agents):  # it keys the manifest: fail here, not mid-install
+        raise ValueError("an [[install.agents]] name is not text")
     trigger = data.get("resync", {}).get("trigger", "commit")
     if trigger not in VALID_TRIGGERS:
         trigger = "commit"

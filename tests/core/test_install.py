@@ -129,8 +129,11 @@ def test_install_stops_on_an_unreadable_config_before_touching_any_agent(tmp_pat
 
     with pytest.raises(tomllib.TOMLDecodeError):
         do_install(Backend(mode="local"), adapters=[agent], server_command=["x"])
-    # not TOML; TOML, but not a section; not text -- an error whose repr holds the whole file
-    for unreadable in (b"[backend\n", b"backend = 1\n", b'[backend]\npassword = "hunter2"\n\xff'):
+    # not TOML; TOML, but not a section; not text -- an error whose repr holds the whole file; an
+    # agent name that isn't text (it failed only after registering); a URL in the port's place
+    for unreadable in (b"[backend\n", b"backend = 1\n", b'[backend]\npassword = "hunter2"\n\xff',
+                       b'[[install.agents]]\nname = ["cursor"]\n',
+                       b'[backend]\nmode = "remote"\nport = "redis://u:hunter2@h"\n'):
         (home / "config.toml").write_bytes(unreadable)
         result = CliRunner().invoke(cli, ["install", "-y"])
 
@@ -482,6 +485,18 @@ def test_yes_remote_honors_explicit_connection():
 
     b = _prompt_backend("remote", "db.example", 6400, "u", "p", True, assume_yes=True)
     assert (b.mode, b.host, b.port, b.username, b.password, b.ssl) == ("remote", "db.example", 6400, "u", "p", True)
+
+
+def test_uninstall_keeps_an_agent_this_version_has_no_adapter_for(tmp_path, monkeypatch):
+    """An agent recorded by another version of Auryn, one this version doesn't know: nothing here
+    can deregister it, so it stays on record like any agent that failed -- only `--force` forgets it."""
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    save_config(Config(agents=(AgentRegistration(name="future-agent", scope="user", server_name="auryn"),)))
+
+    do_uninstall(adapters=[])
+    assert [a.name for a in load_config().agents] == ["future-agent"]
+    do_uninstall(adapters=[], force=True)
+    assert load_config().agents == ()
 
 
 def test_yes_keeps_the_saved_trigger(tmp_path, monkeypatch):
