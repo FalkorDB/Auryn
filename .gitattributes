@@ -1,0 +1,26 @@
+# Line-ending policy. Without this, GitHub's windows-latest runner (core.autocrlf=true)
+# checks text files out with CRLF, which shifts byte offsets and breaks the parser tests'
+# position/offset assertions on Windows while passing on POSIX. Force every text file to LF
+# in the repo AND on checkout on every platform, so the suite sees identical bytes everywhere.
+# On POSIX this is a no-op (files are already LF); nothing is renormalized.
+* text=auto eol=lf
+
+# Binary fixtures/assets must never be line-ending converted (text=auto would usually detect
+# them, but be explicit for the committed SCIP indexes the deep tests decode byte-for-byte).
+*.scip   binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.pdf    binary
+*.sqlite binary
+*.db     binary
+*.whl    binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+
+# Windows-only scripts, if any are ever added, must keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf

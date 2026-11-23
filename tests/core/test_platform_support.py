@@ -26,8 +26,10 @@ def native_windows(monkeypatch):
 
 
 def test_supported_off_native_windows():
-    # The real host running the suite is POSIX (Linux/macOS/WSL2), so local is supported here.
-    assert local_backend_supported() is True
+    # Mirrors the real host: local is supported everywhere EXCEPT native Windows. On the POSIX
+    # runners (Linux/macOS/WSL2) that's True; on the native-Windows CI runner it's False -- either
+    # way local_backend_supported() must agree with platform_support.IS_NATIVE_WINDOWS.
+    assert local_backend_supported() is (not platform_support.IS_NATIVE_WINDOWS)
 
 
 def test_ensure_server_local_raises_on_native_windows(native_windows, tmp_path, monkeypatch):

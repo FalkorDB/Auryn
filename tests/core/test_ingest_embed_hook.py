@@ -51,6 +51,10 @@ def _spies(monkeypatch):
         lambda *a, **k: inline.append((a, k)) or EmbedStats(scanned=0, embedded=0, model_id="x", dim=3),
     )
     monkeypatch.setattr(daemon_mod, "request_embed", lambda graph, model=None: enqueued.append(graph))
+    # The background route is gated on daemon_supported() (POSIX fcntl); force it on so these tests
+    # exercise the routing logic on every platform. On native Windows it is otherwise False, which
+    # correctly routes background -> inline (the fallback is covered by the inline/no-graph tests).
+    monkeypatch.setattr(daemon_mod, "daemon_supported", lambda: True)
     return inline, enqueued
 
 

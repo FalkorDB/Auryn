@@ -5,6 +5,7 @@ touching a real agent config."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import pytest
@@ -123,6 +124,7 @@ def test_claudecode_deregister_leaves_the_users_own_files_in_the_skill_dir(tmp_p
     assert (skill / "MINE.md").read_text() == "mine"  # theirs: untouched
 
 
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs privilege on Windows (os.symlink raises)")
 def test_claudecode_never_reaches_through_a_symlinked_skill_dir(tmp_path):
     # After install the user replaces the skill folder with a link to a skill they maintain
     # elsewhere. Its SKILL.md has the bundled file's name but is theirs: a re-install must not
@@ -284,6 +286,7 @@ def test_write_config_preserves_mode_and_is_clean(tmp_path):
     assert not list(tmp_path.glob("*.tmp"))  # no leftover temp files
 
 
+@pytest.mark.skipif(os.name == "nt", reason="creating a symlink needs privilege on Windows (os.symlink raises)")
 def test_write_config_follows_symlink(tmp_path):
     # A symlinked config (e.g. managed dotfiles) must be updated at its target, not have the link
     # replaced by a regular file -- which a naive atomic rename would do.
@@ -345,12 +348,20 @@ def test_codex_register_raises_when_add_fails():
 
 
 # ── `install -y` auto-selection (the flag resolves a backend with no prompts) ─
+@pytest.mark.skipif(os.name == "nt",
+                    reason="local backend is unsupported on native Windows, so -y raises instead of "
+                           "auto-selecting local; that native-Windows branch is covered by "
+                           "test_platform_support.test_prompt_backend_yes_without_remote_errors_on_native_windows")
 def test_yes_auto_selects_local():
     from auryn.cli import _prompt_backend
 
     assert _prompt_backend(None, None, None, None, None, False, assume_yes=True).mode == "local"
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="local backend is unsupported on native Windows, so --backend local raises; that "
+                           "native-Windows branch is covered by "
+                           "test_platform_support.test_prompt_backend_explicit_local_errors_on_native_windows")
 def test_explicit_backend_local_needs_no_prompt():
     from auryn.cli import _prompt_backend
 

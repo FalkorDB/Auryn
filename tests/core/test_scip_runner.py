@@ -35,9 +35,10 @@ def test_is_inside_detects_containment_and_symlinks(tmp_path):
     outside.parent.mkdir()
     outside.write_text("x")
     assert scip_runner.is_inside(str(outside), str(root)) is False
-    link = tmp_path / "link_to_inside"  # a symlink that points INTO root must be caught
-    link.symlink_to(inside)
-    assert scip_runner.is_inside(str(link), str(root)) is True
+    if os.name != "nt":  # creating a symlink needs privilege on Windows; the containment checks above run everywhere
+        link = tmp_path / "link_to_inside"  # a symlink that points INTO root must be caught
+        link.symlink_to(inside)
+        assert scip_runner.is_inside(str(link), str(root)) is True
 
 
 # -- resolve_trusted_tool ------------------------------------------------------------------------
@@ -49,6 +50,10 @@ def test_env_override_wins_and_is_realpathed(tmp_path, monkeypatch):
         env_var="AURYN_THING", which="scip-thing", unavailable=_Boom, hint="h") == [os.path.realpath(real)]
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="PATH lookup of an extensionless #!/bin/sh script: shutil.which needs a PATHEXT "
+                           "extension on Windows, so the fixture tool isn't found there (env-override path is "
+                           "covered by test_env_override_wins_and_is_realpathed, which runs everywhere)")
 def test_path_lookup_used_only_when_which_given(tmp_path, monkeypatch):
     bindir = tmp_path / "bin"
     bindir.mkdir()
