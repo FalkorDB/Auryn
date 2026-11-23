@@ -72,6 +72,41 @@ standard layers, so adding a language is additive and the join is written once.
 Reuse the doc/existing vocabulary: `APIEndpoint`, `CALLS_API`, `PROXIES_TO`. No new node label —
 the caller-side unresolved endpoint is a placeholder `APIEndpoint`, not a bespoke `HttpCall` node.
 
+## Go (callers and endpoints)
+
+Go takes part on both ends, through the same route-keyed node.
+
+- **Callers.** The Go parser records `http.Get/Head/Post/PostForm(url, …)`, `http.DefaultClient.Get(…)`,
+  the same verbs on a parameter or local known to be an `*http.Client`, and
+  `http.NewRequest(verb, url, …)` / `http.NewRequestWithContext(ctx, verb, url, …)`. The last two cover
+  a `client.Do(req)` flow: `Do` carries neither verb nor URL, so the request is keyed where it is built.
+  The URL is a string literal, a `fmt.Sprintf` format or a `+` chain, each dynamic part becoming
+  `{param}` (as a TS template string or a C# interpolation does). Resolution emits `CALLS_API` to the
+  placeholder with the same props as the TS and C# callers.
+- **Path-only key.** A Go service names its peer by a deployment host (`http://catalog:8080/api/x`),
+  which no handler declares, so Go keys a request by its path (`core.http_seam.strip_origin`, then
+  `normalize_route`). TS and C# still key an absolute URL as written, so a TS `fetch("http://host/x")`
+  does not resolve yet.
+- **Endpoints.** A Go route is registered away from its handler (`mux.HandleFunc("/x", CreateOrder)` in
+  `main`, `CreateOrder` in another file). The parser records each registration on the registering
+  `Function`/`Method` as an `http_routes` entry: verb, normalized route, a handler reference
+  (`inline`, `func:Name`, `func:<import path>.Name`, `method:[<import path>.][Type.]Name`) and the
+  framework. The `go-routes` enrichment (`packages/go`, `auryn.ingestors.goframework`) resolves the
+  handler by name against the current graph on every run, so a handler whose node id changed in an
+  incremental sync is still found. It writes the endpoint route-keyed (like C#'s declared routes), so it
+  merges with any caller's placeholder, and owns only its `provenance:"goframework"` `EXPOSES_ENDPOINT`
+  edges (they also carry `framework`).
+- **Frameworks.** net/http `HandleFunc`/`Handle` on any mux, with Go 1.22 patterns (`"POST /x/{id}"`,
+  a host prefix, `{rest...}`, `{$}`); gin, echo and chi verb methods plus `Handle`/`Add`/`Method`;
+  gorilla/mux `HandleFunc(…).Methods(…)`. Param syntax (`:id`, `*path`, `{id:[0-9]+}`, `{rest...}`) is
+  rendered `{name}` for the stitch's template matcher. A `&T{}` handler resolves to `T.ServeHTTP`;
+  `http.HandlerFunc`, `http.StripPrefix`, gin `WrapF`/`WrapH` and echo `WrapHandler` are seen through.
+- **Group prefixes (v1).** Joined when set up in the same function: gin/echo `Group`, gorilla
+  `PathPrefix(…).Subrouter()`, chi `Route`/`Group` closures and `With`. Not followed: a router passed in
+  as a parameter or kept in a field (its routes keep their written path), chi `Mount`, net/http
+  `StripPrefix` mounts. A handler built by a constructor call (`mux.Handle("/x", NewHandler(db))`) or
+  passed through a middleware call other than those above gets no endpoint rather than a guess.
+
 ## Consequences
 
 - **One join for the whole system**: monolith Kendo/JS→C#, React/TS→BFF, BFF→platform, service→service

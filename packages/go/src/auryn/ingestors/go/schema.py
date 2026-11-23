@@ -35,6 +35,8 @@ NODE_SCHEMAS = [
     NodeSchema(label="Field", indexed_properties=("name",)),
     NodeSchema(label="Parameter", indexed_properties=("name",)),
     NodeSchema(label="Const", indexed_properties=("name",)),
+    # The route-keyed HTTP placeholder an outbound request points at (ADR 0006, shared with TS/C#).
+    NodeSchema(label="APIEndpoint", indexed_properties=("route",)),
 ]
 
 EDGE_SCHEMAS = [
@@ -56,6 +58,7 @@ EDGE_SCHEMAS = [
     # (param/return/field refs, from resolution) AND a Module -> Module require (from go.mod, added
     # by the git_sync reconcile; carries {kind, resolution}).
     EdgeSchema(rel_type="DEPENDS_ON"),
+    EdgeSchema(rel_type="CALLS_API"),   # Function|Method -> APIEndpoint (ADR 0006; {resolution, provenance})
     # NOTE: no IMPLEMENTS -- structural interface satisfaction is deferred to the deep pass.
 ]
 

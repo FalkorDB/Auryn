@@ -45,6 +45,37 @@ class RawCall:
 
 
 @dataclass
+class RawHttpCall:
+    """An outbound HTTP request this callable sends (ADR 0006): `http.Get(url)`, `http.Post(...)`,
+    `http.NewRequest(verb, url, ...)`, or a verb call on an `*http.Client`. `url` is the URL as
+    written, with each dynamic part (a `fmt.Sprintf` verb, a non-literal `+` operand) rendered as
+    `{param}`; resolution keys it via core.http_seam."""
+
+    url: str
+    method: str = "ANY"  # GET/POST/... ; ANY when the verb is not a literal
+
+
+@dataclass
+class RawRoute:
+    """A route this callable registers (ADR 0006): `mux.HandleFunc("POST /x", h)`, gin
+    `r.POST("/x", h)`, echo, chi or gorilla/mux. `route` is normalized, with the in-function group
+    prefix joined in and path params rendered `{name}`. `handler` names the handler as the go-routes
+    enrichment resolves it (see goframework/synthesize.py): `inline` (a func literal, i.e. this
+    callable), `func:Name`, `func:<import path>.Name`, `method:Name` (receiver type unknown),
+    `method:Type.Name` or `method:<import path>.Type.Name`."""
+
+    method: str  # GET/POST/... ; ANY when the registration matches every verb
+    route: str
+    handler: str
+    framework: str  # "net/http" | "gin" | "echo" | "chi" | "gorilla"
+
+    def encode(self) -> str:
+        """The `http_routes` property entry: space-separated, since none of the parts can hold a
+        space (a Go route pattern's space only separates its verb, which is split off here)."""
+        return f"{self.method} {self.route} {self.handler} {self.framework}"
+
+
+@dataclass
 class RawField:
     name: str
     type: str  # type as written
@@ -73,6 +104,8 @@ class RawFunction:
     into DEPENDS_ON edges. Go has no constructor to CALL, so a construction site is modelled as a
     *type dependency*, the idiomatic analog of Java's `new X()` -> CALLS-a-constructor."""
     calls: list[RawCall] = field(default_factory=list)
+    http_calls: list[RawHttpCall] = field(default_factory=list)  # requests sent (-> CALLS_API)
+    http_routes: list[RawRoute] = field(default_factory=list)    # routes registered (-> go-routes)
     source: str = ""
     doc: str = ""  # shared `doc` property: the leading comment above the declaration, cleaned
     line_start: int = 0

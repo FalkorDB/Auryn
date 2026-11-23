@@ -28,6 +28,20 @@ def normalize_route(url: str) -> str:
     return route
 
 
+def strip_origin(url: str) -> str:
+    """The path of an absolute `http(s)://host[:port]/path` URL ("/" when it names only a host); any
+    other string unchanged. A service-to-service call names its peer by a deployment host (a k8s
+    Service, a compose name, an env-specific domain) that no handler declares, so only the path can
+    meet the handler's route: `http://catalog:8080/api/x?y=1` -> `/api/x?y=1`. Call it before
+    normalize_route. Used by the Go callers; TS and C# still key an absolute URL as written."""
+    u = url.strip()
+    scheme, sep, rest = u.partition("://")
+    if not sep or scheme.lower() not in ("http", "https"):
+        return url
+    slash = rest.find("/")
+    return rest[slash:] if slash >= 0 else "/"
+
+
 def endpoint_placeholder_key(http_method: str, route: str) -> str:
     """Language-neutral id for the shared route-keyed APIEndpoint placeholder. Matched by the
     stitch hook on route+verb, not by the per-language symbol linkage."""
