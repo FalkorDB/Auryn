@@ -61,7 +61,12 @@ def test_cli_group_invocation_calls_the_fix(monkeypatch):
     def _probe() -> None:
         click.echo("ok")
 
-    result = CliRunner().invoke(cli, ["stdio-probe"])
+    try:
+        result = CliRunner().invoke(cli, ["stdio-probe"])
+    finally:
+        # Remove the probe again: this group is shared with every other CLI test,
+        # and a leftover command would change their help text / shadow names.
+        cli.commands.pop("stdio-probe", None)
 
     assert result.exit_code == 0
     assert called == [True]
