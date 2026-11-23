@@ -121,7 +121,7 @@ def _parse_occurrence(data: bytes) -> Occurrence | None:
     for field_num, wire, value in _fields(data):
         if field_num == 1:  # deprecated range -- packed (proto3 default) or, legacy, repeated varints
             if wire == _WIRE_LEN:
-                packed = _packed_varints(value)
+                packed.extend(_packed_varints(value))  # EXTEND: a packed field may be split across segments
             elif wire == _WIRE_VARINT:  # non-packed: appended in declared order (line, startCol, ...)
                 packed.append(value)
         elif field_num in (8, 9) and wire == _WIRE_LEN:  # single_line_range / multi_line_range
