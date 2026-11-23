@@ -36,6 +36,23 @@ def test_syntax_warning_reports_source_path():
     assert caught[0].lineno == 1
 
 
+def test_leading_utf8_bom_is_parsed_not_skipped():
+    # Python accepts a leading BOM; ast.parse() on a str rejects it, so a BOM-prefixed file used to
+    # be skipped ("invalid non-printable character U+FEFF"). It must now parse normally.
+    module = parse_module("\ufeffdef foo():\n    return 1\n", "src/bom.py")
+    assert module.parse_ok is True
+    assert [f.name for f in module.functions] == ["foo"]
+
+
+def test_leading_utf8_bom_as_bytes_is_parsed():
+    # Real ingests hand parse_module the file's bytes; a UTF-8 BOM (EF BB BF) decodes to a leading
+    # U+FEFF and must be handled the same way.
+    data = b"\xef\xbb\xbfclass Widget:\n    pass\n"
+    module = parse_module(data, "src/bom_bytes.py")
+    assert module.parse_ok is True
+    assert [c.name for c in module.classes] == ["Widget"]
+
+
 def _resolve(oracle=None):
     files = sorted(_SAMPLE.rglob("*.py"))
     modules = [parse_module(f.read_bytes(), str(f.relative_to(_SAMPLE))) for f in files]
