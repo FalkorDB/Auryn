@@ -193,3 +193,26 @@ jobs:
         # -n0 overrides the default `-n auto` (pyproject addopts): these tests share session-scoped
         # Oracle/PostgreSQL/MySQL testcontainers that must NOT be spun up once per xdist worker.
         run: uv run pytest $HEAVY_TESTS -n0
+
+  # Windows coverage. The embedded FalkorDB (redislite/falkordblite) is POSIX-only and there is no
+  # native Windows redis/valkey server, so DB-backed tests cannot run here -- they skip on Windows
+  # (see tests/conftest.py). This job covers the backend-free layers where Windows-specific bugs
+  # actually surface: the CLI entrypoint (including the stdio UTF-8 fix) and the Python parser.
+  # Deliberately NOT a required check yet; broaden the selection as more backend-free tests are
+  # confirmed green on Windows. The dev group is excluded because it pulls falkordblite.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync workspace without the dev group (falkordblite is POSIX-only)
+        run: uv sync --frozen --no-group dev
+
+      - name: Run backend-free tests (CLI + stdio fix + Python parser)
+        run: uv run --no-sync --with pytest pytest tests/core/test_cli_stdio.py tests/ingestors/python/test_ast_engine.py -o addopts=""
