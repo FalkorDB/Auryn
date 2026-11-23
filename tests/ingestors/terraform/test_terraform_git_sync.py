@@ -83,3 +83,30 @@ def test_resync_removes_deleted_resource(graph, tmp_path):
     assert q("MATCH (:Resource)-[:DEPENDS_ON]->() RETURN count(*)") == [[0]]
     assert q("MATCH (d:Database) RETURN count(d)") == [[0]]
     assert q("MATCH (r:Registry) RETURN count(r)") == [[0]]  # the ecr Registry node was removed too
+
+
+def test_resync_after_an_interrupted_sync_removes_the_last_resource(graph, tmp_path):
+    _ingest(graph, tmp_path, {"main.tf": _TF})
+    graph.query("MATCH (p:Project) SET p.commit_sha = NULL")  # what a sync that died mid-apply leaves
+    (tmp_path / "main.tf").unlink()
+    q = _ingest(graph, tmp_path, {})
+    assert q("MATCH (r:Resource) RETURN count(r)") == [[0]]  # no stamp is not "never ingested"
+
+
+def test_tofu_overrides_tf_twin(graph, tmp_path):
+    # OpenTofu precedence: a `<name>.tofu` overrides its `<name>.tf` twin in the same dir -> only .tofu
+    q = _ingest(graph, tmp_path, {
+        "main.tf": 'resource "aws_s3_bucket" "b" { bucket = "from-tf" }\n',
+        "main.tofu": 'resource "aws_s3_bucket" "b" { bucket = "from-tofu" }\n',
+    })
+    assert q("MATCH (r:Resource {address:'aws_s3_bucket.b'}) RETURN count(r)") == [[1]]
+    assert q("MATCH (:Project)-[:HAS_FILE]->(f:File) RETURN f.path") == [["main.tofu"]]
+
+
+def test_tofu_and_tf_different_stems_both_parse(graph, tmp_path):
+    # different stems (main.tf + extra.tofu) are BOTH loaded -- precedence is per filename, not per dir
+    q = _ingest(graph, tmp_path, {
+        "main.tf": 'resource "aws_s3_bucket" "a" { bucket = "x" }\n',
+        "extra.tofu": 'resource "aws_s3_bucket" "b" { bucket = "y" }\n',
+    })
+    assert sorted(r[0] for r in q("MATCH (:Project)-[:HAS_FILE]->(f:File) RETURN f.path")) == ["extra.tofu", "main.tf"]

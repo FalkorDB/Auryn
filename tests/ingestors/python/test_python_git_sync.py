@@ -199,13 +199,18 @@ def test_deep_off_leaves_a_shallow_fast_graph(graph):
     assert not _has_inferred_receiver_call(graph)  # ast-only: no receiver-typed call
 
 
-def test_deep_inline_is_default_and_upgrades_in_place(graph):
-    # Default deep="inline": the fast (ast) pass runs, then the deep (jedi) pass upgrades the
-    # same nodes in place -- ending at the full jedi graph, same as a single jedi pass.
+def test_deep_async_default_downgrades_to_inline_on_embedded_backend(graph):
+    # The default is deep="async", but a detached daemon can't reach this in-process embedded DB, so
+    # it downgrades to inline: the fast (ast) pass runs, then the deep (jedi) pass upgrades the same
+    # nodes in place -- ending at the full jedi graph, synchronously, exactly as deep="inline" would.
+    from auryn.core.ingest import _daemon_can_reach
+
+    if _daemon_can_reach(GraphWriter(graph)):  # a server backend WOULD queue to the daemon; skip that path
+        pytest.skip("server backend: async queues to the deepen daemon, not the embedded-downgrade path")
     report = ingest.ingest_directory(GraphWriter(graph), str(_SAMPLE), project_name="demo")
 
     py = next(r for r in report.languages if r.language == "python")
-    assert py.deep_status == "inline"
+    assert py.deep_status == "inline"  # async -> inline (embedded backend unreachable by a daemon)
     assert py.deep_result is not None and py.deep_result.nodes_updated > 0  # upgraded, not re-added
     assert _depth(graph) == "deep"
     assert _has_inferred_receiver_call(graph)

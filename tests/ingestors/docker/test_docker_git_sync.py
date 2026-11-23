@@ -42,6 +42,17 @@ def test_stages_files_and_containment(graph, tmp_path):
     assert q("MATCH (:File)-[:HAS_STAGE]->(s:BuildStage) RETURN count(s)") == [[2]]
 
 
+def test_basename_variants_are_ingested(graph, tmp_path):
+    # the `Dockerfile.prod`/`.dev` family + `Containerfile` (basename globs, ADR 0007 §7) are ingested,
+    # not just the bare `Dockerfile` the old suffix caught
+    q = _ingest(graph, tmp_path, {
+        "Dockerfile.prod": "FROM python:3.12-slim\n",
+        "svc/Containerfile": "FROM alpine:3\n",
+    })
+    assert sorted(r[0] for r in q("MATCH (:Project)-[:HAS_FILE]->(f:File) RETURN f.path")) == \
+        ["Dockerfile.prod", "svc/Containerfile"]
+
+
 def test_based_on_external_image(graph, tmp_path):
     q = _ingest(graph, tmp_path, {"Dockerfile": _MULTISTAGE})
     # stage `base` is BASED_ON the external python image (a shared, resolved:false hub node)

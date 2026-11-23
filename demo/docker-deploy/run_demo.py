@@ -143,7 +143,7 @@ def main() -> None:
 
         section("8. CLUSTER  (k8s: workloads run the SAME hub image; Ingress exposes an external route)")
         for kind, name, img in rows(g,
-            "MATCH (s:Service)-[:RUNS_IMAGE]->(i:Image) WHERE s.namespace IS NOT NULL "  # k8s workloads only (Helm Services carry no namespace -> §10)
+            "MATCH (s:Service)-[:RUNS_IMAGE]->(i:Image) WHERE s.kind IS NOT NULL "
             "RETURN s.kind, s.name, i.ref ORDER BY s.name"):
             print(f"  {kind} {name:6}  RUNS  {img}")
         for host, route, svc in rows(g,
@@ -162,14 +162,30 @@ def main() -> None:
             "RETURN r.rtype, r.name, head([l IN labels(n) WHERE l <> 'Entity']) ORDER BY r.name"):
             print(f"  {rtype} {name:6}  PROVISIONS  a {kind}")
 
-        section("10. HELM  (render-free: the chart DEPLOYS a workload that runs the SAME hub image)")
+        section("10. HELM  (render-free: the chart release RUNS the SAME hub image, from values.yaml)")
         for chart, dep in rows(g,
-            "MATCH (c:Resource {kind:'chart'})-[:DEPENDS_ON]->(d:Resource) RETURN c.name, d.name ORDER BY d.name"):
+            "MATCH (c:Resource {kind:'release'})-[:DEPENDS_ON]->(d:Resource) RETURN c.name, d.name ORDER BY d.name"):
             print(f"  chart {chart:6}  DEPENDS_ON  {dep}")
-        for chart, svc, img in rows(g,
-            "MATCH (c:Resource {kind:'chart'})-[:DEPLOYS]->(s:Service)-[:RUNS_IMAGE]->(i:Image) "
-            "RETURN c.name, s.name, i.ref ORDER BY s.name"):
-            print(f"  chart {chart:6}  DEPLOYS  '{svc}'  which RUNS  {img}  (resolved from values.yaml)")
+        for chart, img in rows(g,
+            "MATCH (c:Resource {kind:'release'})-[:RUNS_IMAGE]->(i:Image) "
+            "RETURN c.name, i.ref ORDER BY i.ref"):
+            print(f"  chart {chart:6}  RUNS  {img}  (resolved from values.yaml)")
+
+        section("11. KUSTOMIZE  (render-free: an overlay DEPENDS_ON its base + RUNS the SAME hub image)")
+        for overlay, base in rows(g,
+            "MATCH (o:Resource {kind:'kustomization'})-[:DEPENDS_ON]->(b:Resource) RETURN o.name, b.name ORDER BY o.name"):
+            print(f"  overlay {overlay:14}  DEPENDS_ON  {base}")
+        for overlay, img in rows(g,
+            "MATCH (o:Resource {kind:'kustomization'})-[:RUNS_IMAGE]->(i:Image) RETURN o.name, i.ref ORDER BY i.ref"):
+            print(f"  overlay {overlay:14}  RUNS  {img}  (from the images: transformer)")
+
+        section("12. CI  (GitHub Actions: a workflow BUILDS the hub image -> it flips internal)")
+        for wf, img in rows(g,
+            "MATCH (w:Resource {kind:'ci-workflow'})-[:BUILDS_IMAGE]->(i:Image) RETURN w.name, i.ref ORDER BY i.ref"):
+            print(f"  workflow '{wf}'  BUILDS  {img}")
+        for ref, resolved, origin in rows(g,
+            "MATCH (:Resource {kind:'ci-workflow'})-[:BUILDS_IMAGE]->(i:Image) RETURN i.ref, i.resolved, i.origin"):
+            print(f"  -> {ref}  is now  resolved={resolved} origin={origin}  (built in-graph, loop closed)")
 
         # The most-shared hub image and how many producers reach it (1 builder + N runners) -- derived
         # from the graph, not a hard-coded ref.

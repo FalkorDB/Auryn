@@ -1,15 +1,19 @@
-"""The Helm parser -> ParsedChart, and the values->image resolver. Pure, no graph."""
+"""The Helm parser -> ParsedChart, and the values.yaml image/config extractors. Pure, no graph.
+
+v1 is STATIC and render-free: only `Chart.yaml` + `values.yaml` are parsed (never the Go-templated
+`templates/*.yaml`), so these tests cover chart metadata/dependencies and the values.yaml seams."""
 
 from __future__ import annotations
 
-from auryn.ingestors.helm.file_parser import parse_chart, parse_chart_yaml
-from auryn.ingestors.helm.values import lookup, resolve_image
+from auryn.ingestors.helm.file_parser import load_values, parse_chart, parse_chart_yaml
+from auryn.ingestors.helm.values import extract_config_values, extract_images
 
 _CHART = """
 apiVersion: v2
 name: shop-api
 version: 1.2.3
 appVersion: "1.0"
+type: application
 dependencies:
   - name: redis
     version: "17.x"
@@ -17,186 +21,158 @@ dependencies:
   - name: postgres
 """
 
-_VALUES = """
-image:
-  repository: shop/api
-  tag: "1.0"
-replicaCount: 2
-"""
-
-_DEPLOYMENT = """
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: shop-api
-spec:
-  replicas: {{ .Values.replicaCount }}
-  template:
-    spec:
-      containers:
-        - name: api
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-"""
-
-
-def _chart(templates):
-    return parse_chart("charts/shop", _CHART, _VALUES, templates)
-
 
 # ── Chart.yaml ────────────────────────────────────────────────────────────────
-def test_chart_yaml_metadata_and_deps():
+def test_chart_yaml_metadata():
     c = parse_chart_yaml(_CHART)
     assert c.name == "shop-api"
     assert c.version == "1.2.3"
     assert c.app_version == "1.0"
-    assert c.dependencies == ("redis", "postgres")
+    assert c.chart_type == "application"
+
+
+def test_chart_yaml_dependencies_with_version_and_repository():
+    c = parse_chart_yaml(_CHART)
+    assert [(d.name, d.version, d.repository) for d in c.dependencies] == [
+        ("redis", "17.x", "https://charts.bitnami.com/bitnami"),
+        ("postgres", "", ""),
+    ]
 
 
 def test_chart_yaml_without_name_is_none():
     assert parse_chart_yaml("apiVersion: v2\nversion: 1.0\n") is None
 
 
+def test_plain_k8s_manifest_is_not_a_chart():
+    # a k8s manifest has `metadata.name`, not a top-level `name:` -> not a Chart.yaml
+    manifest = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n"
+    assert parse_chart_yaml(manifest) is None
+
+
+def test_compose_file_is_not_a_chart():
+    compose = "services:\n  web:\n    image: nginx:1.25\n"
+    assert parse_chart_yaml(compose) is None
+
+
+# ── values.yaml -> images ───────────────────────────────────────────────────────
+def test_image_repository_and_tag():
+    vals = load_values("image:\n  repository: shop/api\n  tag: \"1.0\"\n")
+    assert extract_images(vals) == ("shop/api:1.0",)
+
+
+def test_image_with_registry():
+    vals = load_values("image:\n  registry: ghcr.io\n  repository: acme/api\n  tag: \"2\"\n")
+    assert extract_images(vals) == ("ghcr.io/acme/api:2",)
+
+
+def test_bare_image_string():
+    vals = load_values('image: "ghcr.io/acme/api:1.2"\n')
+    assert extract_images(vals) == ("ghcr.io/acme/api:1.2",)
+
+
+def test_nested_component_image():
+    vals = load_values(
+        "worker:\n  image:\n    repository: shop/worker\n    tag: \"3\"\n"
+        "primary:\n  image: redis:7\n"
+    )
+    assert set(extract_images(vals)) == {"shop/worker:3", "redis:7"}
+
+
+def test_image_repository_without_tag():
+    vals = load_values("image:\n  repository: shop/api\n")
+    assert extract_images(vals) == ("shop/api",)  # core.image_ref applies the :latest default
+
+
+def test_chart_with_no_images():
+    vals = load_values("replicaCount: 2\nservice:\n  port: 80\n")
+    assert extract_images(vals) == ()
+
+
+def test_numeric_tag_is_stringified():
+    vals = load_values("image:\n  repository: shop/api\n  tag: 1.0\n")  # unquoted -> YAML float
+    assert extract_images(vals) == ("shop/api:1.0",)
+
+
+# ── values.yaml -> config values ────────────────────────────────────────────────
+def test_config_values_top_level_and_one_nested_level():
+    vals = load_values(
+        "replicaCount: 2\n"
+        "service:\n  type: ClusterIP\n  port: 8080\n"
+        "image:\n  repository: shop/api\n  tag: \"1.0\"\n"
+    )
+    cvs = dict(extract_config_values(vals))
+    assert cvs["replicaCount"] == "2"
+    assert cvs["service.type"] == "ClusterIP"
+    assert cvs["service.port"] == "8080"
+    assert cvs["image.repository"] == "shop/api"  # image-related keys are config values too
+
+
+def test_config_values_are_bounded_in_depth():
+    # a depth-3 leaf (`resources.limits.cpu`) is NOT emitted -- kept sensible, not every leaf
+    vals = load_values("resources:\n  limits:\n    cpu: \"500m\"\n")
+    names = [n for n, _ in extract_config_values(vals)]
+    assert "resources.limits.cpu" not in names
+
+
+def test_bool_config_value_lowercased():
+    vals = load_values("ingress:\n  enabled: true\n")
+    assert dict(extract_config_values(vals))["ingress.enabled"] == "true"
+
+
+# ── malformed / empty ───────────────────────────────────────────────────────────
+def test_malformed_values_handled_gracefully():
+    assert load_values("this: : : not valid") == {}
+    assert extract_images(load_values("]{[ broken")) == ()
+    assert extract_config_values(load_values("]{[ broken")) == ()
+
+
+def test_parse_chart_assembles_images_and_config():
+    pc = parse_chart("charts/shop", _CHART, "image:\n  repository: shop/api\n  tag: \"1.0\"\nreplicaCount: 2\n")
+    assert pc.chart.name == "shop-api"
+    assert pc.images == ("shop/api:1.0",)
+    assert ("replicaCount", "2") in pc.config_values
+    assert pc.has_values is True
+
+
+def test_parse_chart_without_values():
+    pc = parse_chart("charts/shop", _CHART, None)
+    assert pc.images == ()
+    assert pc.config_values == ()
+    assert pc.has_values is False
+
+
+def test_implausible_image_values_are_skipped():
+    # prose, an empty tag, or a templated tag on an `image:` key must NOT become an Image ref
+    assert extract_images(load_values('image: "see the deployment docs"\n')) == ()
+    assert extract_images(load_values('image: "shop/api:"\n')) == ()
+    assert extract_images(load_values('image:\n  repository: shop/api\n  tag: "{{ .Chart.AppVersion }}"\n')) == ()
+    # ... but a real ref still passes (incl. a registry:port host, whose `:` is not a tag)
+    assert extract_images(load_values('image: "shop/api:1.0"\n')) == ("shop/api:1.0",)
+    assert extract_images(load_values('image: "localhost:5000/shop/api:1.0"\n')) == ("localhost:5000/shop/api:1.0",)
+
+
 def test_non_list_dependencies_is_ignored_not_fatal():
-    # a malformed `dependencies: true` must not raise -- the chart metadata is still parsed, deps empty
-    c = parse_chart_yaml("apiVersion: v2\nname: x\nversion: 1.0\ndependencies: true\n")
-    assert c is not None and c.name == "x" and c.dependencies == ()
+    # a malformed `dependencies: 42` must not raise (which would drop the whole chart) -- just no deps
+    c = parse_chart_yaml("apiVersion: v2\nname: shop\nversion: 1.0.0\ndependencies: 42\n")
+    assert c is not None and c.name == "shop" and c.dependencies == ()
 
 
-# ── values resolution ─────────────────────────────────────────────────────────
-def test_lookup_dotted_path():
-    assert lookup({"image": {"repository": "shop/api"}}, "image.repository") == "shop/api"
-    assert lookup({"image": {}}, "image.tag") is None
+def test_sensitive_key_detection():
+    from auryn.ingestors.helm.build import _is_sensitive
+    for s in ("database.password", "api.key", "tls.key", "auth.token", "signing_key", "auth.passphrase",
+              "auth.pwd", "apiKey", "my.secret", "aws.access_key", "db.credential", "keys"):
+        assert _is_sensitive(s), s
+    for s in ("replicaCount", "image.repository", "monkey", "keyboard", "service.port", "publicKey"):
+        assert not _is_sensitive(s), s
 
 
-def test_resolve_image_from_values():
-    vals = {"image": {"repository": "shop/api", "tag": "1.0"}}
-    assert resolve_image('"{{ .Values.image.repository }}:{{ .Values.image.tag }}"', vals) == "shop/api:1.0"
-
-
-def test_resolve_literal_image_passes_through():
-    assert resolve_image("nginx:1.25", {}) == "nginx:1.25"
-
-
-def test_resolve_unresolvable_template_is_none():
-    # a non-.Values action (`.Release.Name`) can't be resolved render-free -> not materialized
-    assert resolve_image('"{{ .Release.Name }}-api:{{ .Values.tag }}"', {"tag": "1.0"}) is None
-
-
-def test_resolve_missing_value_is_none():
-    assert resolve_image("{{ .Values.image.repository }}:{{ .Values.image.tag }}", {"image": {}}) is None
-
-
-# ── templates -> workloads ────────────────────────────────────────────────────
-def test_deployment_workload_with_resolved_image():
-    pc = _chart([("templates/deployment.yaml", _DEPLOYMENT)])
-    assert len(pc.workloads) == 1
-    w = pc.workloads[0]
-    assert w.kind == "Deployment"
-    assert w.name == "shop-api"             # from metadata.name
-    assert w.images == ("shop/api:1.0",)    # resolved from values
-
-
-def test_templated_name_falls_back_to_template_stem():
-    tmpl = (
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
-        '  name: {{ include "shop.fullname" . }}\nspec:\n  template:\n    spec:\n'
-        '      containers:\n        - image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"\n'
-    )
-    pc = _chart([("templates/worker.yaml", tmpl)])
-    assert pc.workloads[0].name == "worker"   # the template file stem
-
-
-def test_non_workload_kind_yields_no_workload():
-    svc = "apiVersion: v1\nkind: Service\nmetadata:\n  name: shop-api\n"
-    assert _chart([("templates/service.yaml", svc)]).workloads == ()
-
-
-def test_multi_doc_template_finds_the_workload():
-    multi = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n---\n" + _DEPLOYMENT
-    pc = _chart([("templates/all.yaml", multi)])
-    assert [w.kind for w in pc.workloads] == ["Deployment"]
-
-
-def test_unresolvable_image_is_not_materialized():
-    # the tag comes from `.Chart.AppVersion` (not resolvable render-free) -> no concrete ref, no image
-    tmpl = (
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: x\nspec:\n  template:\n    spec:\n"
-        '      containers:\n        - image: "{{ .Values.image.repository }}:{{ .Chart.AppVersion }}"\n'
-    )
-    pc = _chart([("templates/x.yaml", tmpl)])
-    assert pc.workloads[0].images == ()
-
-
-# ── image resolution hardening (render-free edge cases) ─────────────────────────
-def test_resolve_pipeline_is_not_evaluated():
-    # a pipeline/function on a .Values ref can't be evaluated render-free -> NOT materialized (taking the
-    # raw value would be wrong: `{{ .Values.tag | upper }}` is not `.Values.tag`)
-    assert resolve_image("{{ .Values.repo }}:{{ .Values.tag | upper }}", {"repo": "shop/api", "tag": "1.0"}) is None
-
-
-def test_resolve_shell_var_rejected():
-    assert resolve_image("$IMAGE", {}) is None
-    assert resolve_image("${IMAGE}:latest", {}) is None
-
-
-def test_resolve_empty_value_rejected():
-    # an empty tag renders `shop/api:`, which core.image_ref silently forces to `:latest` -> a false edge
-    assert resolve_image("{{ .Values.repo }}:{{ .Values.tag }}", {"repo": "shop/api", "tag": ""}) is None
-
-
-def test_resolve_malformed_trailing_colon_rejected():
-    assert resolve_image("shop/api:", {}) is None
-
-
-def test_resolve_prose_value_rejected():
-    assert resolve_image("see the deployment docs", {}) is None  # whitespace -> not an image ref
-
-
-# ── templates: inline comments, over-match, within-file disambiguation ───────────
-def test_inline_comment_stripped_from_image():
-    tmpl = (
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n"
-        "      containers:\n        - image: nginx:1.25  # pinned for prod\n"
-    )
-    assert _chart([("templates/d.yaml", tmpl)]).workloads[0].images == ("nginx:1.25",)
-
-
-def test_prose_image_key_not_materialized():
-    tmpl = (
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  template:\n    spec:\n"
-        "      containers:\n        - image: the base image to use\n"
-    )
-    assert _chart([("templates/d.yaml", tmpl)]).workloads[0].images == ()
-
-
-def test_two_templated_workloads_in_one_file_are_disambiguated():
-    doc = (
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
-        '  name: {{ include "x.fullname" . }}\nspec:\n  template:\n    spec:\n      containers:\n        - image: a:1\n'
-    )
-    pc = _chart([("templates/multi.yaml", doc + "---\n" + doc)])
-    assert [w.name for w in pc.workloads] == ["multi", "multi-2"]  # both fall back to the stem -> suffixed
-
-
-def test_template_path_is_chart_relative_from_repo_path():
-    # given a full repo path, Workload.template is the path RELATIVE to the chart dir (part of the id)
-    pc = parse_chart("charts/shop", _CHART, _VALUES, [("charts/shop/templates/nested/deploy.yaml", _DEPLOYMENT)])
-    assert pc.workloads[0].template == "templates/nested/deploy.yaml"
-
-
-def test_document_separator_with_trailing_comment_is_not_swallowed():
-    doc = (
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: a\nspec:\n  template:\n    spec:\n"
-        "      containers:\n        - image: a:1\n"
-    )
-    multi = doc + "--- # Source: shop/templates/b.yaml\n" + doc.replace("name: a", "name: b")
-    pc = _chart([("templates/all.yaml", multi)])
-    assert sorted(w.name for w in pc.workloads) == ["a", "b"]  # `--- # ...` still splits the documents
-
-
-def test_metadata_name_inline_comment_stripped():
-    tmpl = (
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api  # prod\nspec:\n  template:\n"
-        "    spec:\n      containers:\n        - image: a:1\n"
-    )
-    assert _chart([("templates/d.yaml", tmpl)]).workloads[0].name == "api"
+def test_url_credential_redaction():
+    from auryn.ingestors.helm.build import _redact_value
+    assert _redact_value("postgres://user:s3cr3t@host:5432/db") == "postgres://user:[redacted]@host:5432/db"
+    assert _redact_value("redis://:p4ss@cache") == "redis://:[redacted]@cache"
+    # no credentials -> untouched
+    assert _redact_value("https://example.com/path") == "https://example.com/path"
+    assert _redact_value("just a plain value") == "just a plain value"
+    # a `user:pass@` INSIDE a query string is not userinfo -> must not be redacted
+    assert _redact_value("https://example.com?contact=alice:bob@example.org") == \
+        "https://example.com?contact=alice:bob@example.org"

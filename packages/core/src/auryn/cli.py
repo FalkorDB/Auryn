@@ -20,11 +20,33 @@ the CLI twin of the MCP `ingest_repository`/`ingest_directory` tools.
 
 from __future__ import annotations
 
+import io
+import sys
+
 import click
 
 from auryn.core.graph_client import FalkorDBConfig, GraphWriter, connect, connect_client
 from auryn.core.logging_config import setup_logging
 from auryn.core.registry import discover_ingestors
+
+# A character the CLI prints in several messages (install summaries, progress output).
+_PROBE_CHAR = "\u2192"  # →
+
+
+def _ensure_utf8_stdio() -> None:
+    """Reconfigure stdout/stderr to UTF-8 when the active codec cannot represent the
+    Unicode the CLI prints. On Windows, both console streams and redirects default to a
+    locale codec (cp1252 in Western locales), which raises UnicodeEncodeError on arrows,
+    dots and box characters instead of writing them. Leave every other stream alone: a
+    wrapper that already speaks UTF-8 (the MCP server's JSON-RPC stdio) and capture
+    buffers used by tests must not be rewrapped."""
+    for stream in (sys.stdout, sys.stderr):
+        if not isinstance(stream, io.TextIOWrapper):
+            continue
+        try:
+            _PROBE_CHAR.encode(stream.encoding or "ascii")
+        except (LookupError, UnicodeEncodeError):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 @click.group()
@@ -36,6 +58,7 @@ def cli(verbose: bool) -> None:
     """Extracts structural metadata from various sources into a FalkorDB graph."""
     from auryn.core import progress
 
+    _ensure_utf8_stdio()
     setup_logging()
     # --verbose only ever forces per-file logging ON; absence leaves AURYN_VERBOSE as-is, so an
     # externally-set env var still enables it (e.g. for the MCP server or a wrapper script).
@@ -128,7 +151,7 @@ def view(
     from auryn.viewer.app import create_app
 
     config = _resolve_connection(falkordb_host, falkordb_port, falkordb_username, falkordb_password, falkordb_ssl)
-    app = create_app(connect_client(config))
+    app = create_app(connect_client(config), host)
     click.echo(f"Serving graph viewer on http://{host}:{port}")
     app.run(host=host, port=port)
 
@@ -227,6 +250,17 @@ def embed_daemon() -> None:
     run_embed_daemon()
 
 
+@cli.command("deepen-daemon", hidden=True)
+def deepen_daemon() -> None:
+    """Internal: the background deep-analysis worker. Normally spawned detached by an ingest whose
+    deep mode is `async` (see deepen.daemon); it drains the request queue, re-running each repo's
+    ingest with deep=inline (the fast phase short-circuits), and self-terminates once the queue goes
+    idle. Run directly to debug."""
+    from auryn.core.deepen.daemon import run_deepen_daemon
+
+    run_deepen_daemon()
+
+
 def _render_impact(report: dict) -> None:
     """Human-readable rendering of an impact_of_diff report."""
     syms = report.get("changed_symbols", [])
@@ -249,12 +283,21 @@ def _render_impact(report: dict) -> None:
         click.echo("  unmapped files: " + ", ".join(report["unmapped_files"]))
 
 
+def _graph_of(folder) -> str:
+    """The graph `sync` writes for `folder`: its registered name, else the default for it."""
+    from auryn.core.app_config import get_repo
+    from auryn.core.project import default_graph_name
+
+    reg = get_repo(str(folder))
+    return reg.graph_name if reg and reg.graph_name else default_graph_name(folder)
+
+
 @cli.command("impact")
 @click.option("--base", default=None, help="Base git ref (e.g. origin/main). With --head, diffs base..head; alone, base vs the working tree.")
 @click.option("--head", default=None, help="Head git ref (use with --base).")
 @click.option("--staged", is_flag=True, default=False, help="Use staged changes instead of all uncommitted changes.")
-@click.option("--path", default=".", help="Repository directory to diff (default: current directory).")
-@click.option("--graph-name", default=None, help="Graph to resolve against. Default: one per repo, from CLAUDE_PROJECT_DIR/cwd.")
+@click.option("--path", default=None, help="Repository directory to diff. Default: CLAUDE_PROJECT_DIR, else the current directory.")
+@click.option("--graph-name", default=None, help="Graph to resolve against. Default: the graph of that repository.")
 @click.option("--max-depth", default=4, type=int, show_default=True, help="Max reverse-dependency hops.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the raw JSON report (for a PR bot).")
 @click.option("--fail-on", type=click.Choice(["none", "any", "cross-service", "endpoint"]), default="none",
@@ -271,19 +314,45 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
     the reverse-dependency closure: callers, API endpoints, tests, and cross-service consumers.
     Use --fail-on to gate a PR in CI (exits non-zero). See auryn/core/impact.py."""
     import json as _json
+    import subprocess
+    from pathlib import Path
 
     from auryn.core import impact as impact_mod
-    from auryn.core.project import default_graph_name
+    from auryn.core.app_config import load_config
+    from auryn.core.project import resolve_project_root
 
-    root = Path(path).expanduser().resolve()
-    diff = impact_mod.git_diff(str(root), base, head, staged=staged)
+    target = resolve_project_root(path)
+    try:
+        top = Path(impact_mod.git_toplevel(str(target))).resolve()
+        if not impact_mod.parse_unified_diff(impact_mod.git_diff(str(top), base, head, staged=staged))[0]:
+            click.echo("No changes in the given range.")  # nothing to check: no graph needed
+            return
+        client = connect_client(_resolve_connection(host, port, username, password, ssl))
+        indexed = client.list_graphs()
+        # The indexed folder the target belongs to: the nearest registered directory with a graph
+        # from the target up to the top of ITS git repository, else that top -- so a run from a
+        # subfolder still means the repo. Never above it: a plain folder registered higher up, or
+        # an outer repository around a nested one, is a different source with a different diff.
+        # A registration alone is no index: `auryn hooks ... --repo` registers a folder it never indexed.
+        chain = [target, *target.parents]
+        registered = {r.local_dir for r in load_config().repos}
+        root = next((d for d in chain[:chain.index(top) + 1] if str(d) in registered and _graph_of(d) in indexed), top)
+        diff = impact_mod.git_diff(str(root), base, head, staged=staged, relative=True)
+    except subprocess.CalledProcessError as e:
+        reason = ((e.stderr or "").strip().splitlines() or [str(e)])[0]  # git's own first line
+        raise click.ClickException(f"couldn't compute git diff in {target}: {reason}") from e
     changed, _deleted = impact_mod.parse_unified_diff(diff)
     if not changed:
         click.echo("No changes in the given range.")
         return
 
-    config = _resolve_connection(host, port, username, password, ssl)
-    graph = connect_client(config).select_graph(graph_name or default_graph_name())
+    # The graph of the repo being diffed, resolved the way `sync` does -- not the CURRENT
+    # folder's, which is a different graph (or none) whenever `--path` points elsewhere.
+    graph_name = graph_name or _graph_of(root)
+    if graph_name not in indexed:  # querying a graph that isn't there is a server error
+        raise click.ClickException(
+            f"{root} isn't indexed (no graph {graph_name!r}). Index it first: auryn ingest dir {root}")
+    graph = client.select_graph(graph_name)
     report = impact_mod.impact_of_diff(graph, changed, max_depth=max_depth)
 
     if as_json:
@@ -796,19 +865,32 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
     import dataclasses
 
     from auryn.core.app_config import get_repo
-    from auryn.core.ingest import ingest_directory
+    from auryn.core.ingest import ingest_directory, join_deep_phase
     from auryn.core.project import default_graph_name, resolve_project_root
+    from auryn.core.sync_lock import sync_lock
 
     root = resolve_project_root(path)
-    reg = get_repo(str(root))
-    graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
-    project = reg.project_name if reg else None
-    config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
-    # An explicit --host is an ad-hoc connection the background daemon (which reconnects via the
-    # configured backend) might not match, so embed inline there; otherwise let it resolve to the
-    # default (background).
-    report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
-                              deep=deep, auto_install=False, embed=("inline" if host else None))
+    # One sync per repo at a time: the git hooks fire a burst of these (a rebase starts one per
+    # commit) and overlapping syncs of one project corrupt its subgraph. See core/sync_lock.py.
+    # Only the plain hook-shaped sync may step aside for a queued one -- a deep pass or another
+    # server is work the queued sync won't do, so that request waits for its own turn.
+    plain = deep == "off" and not any((host, port, username, password, ssl))
+    with sync_lock(root, queue_one=plain) as my_turn:
+        if not my_turn:
+            click.echo(f"A sync of {root} is already queued; it will pick up this change.")
+            return
+        reg = get_repo(str(root))
+        graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
+        project = reg.project_name if reg else None
+        config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
+        try:
+            # An explicit --host is an ad-hoc connection the background daemon (which reconnects via
+            # the configured backend) might not match, so embed inline there; otherwise let it
+            # resolve to the default (background).
+            report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
+                                      deep=deep, auto_install=False, embed=("inline" if host else None))
+        finally:
+            join_deep_phase()  # `--deep background` writers are still this sync: hold the lock for them
     _echo_ingest_report(report)
 
 
@@ -1093,12 +1175,21 @@ def _validate_hook_names(names) -> None:
 
 
 _DEEP_OPTION = click.option(
-    "--deep", type=click.Choice(["inline", "background", "off"]), default="inline",
-    help="Deep semantic pass for two-phase languages (Python via Jedi, C# via Roslyn): "
-         "inline=fast then deep, synchronous (default); off=fast structural only (much quicker on "
-         "large repos, no .NET SDK needed for C#); background=return on the fast graph, deepen in a "
-         "thread (long-lived processes only).",
+    "--deep", type=click.Choice(["inline", "background", "async", "off"]), default="async",
+    help="Deep semantic pass for two-phase languages (Python via Jedi, C# via Roslyn, Rust via "
+         "rust-analyzer): async=return on the fast graph, deepen in a detached daemon that survives "
+         "this process exiting (default -- the graph is queryable immediately; an explicit --host "
+         "connection the daemon can't reach falls back to inline); inline=fast then deep, synchronous; "
+         "off=fast structural only (much quicker on large repos); background=deepen in an in-process "
+         "thread (long-lived processes only -- a one-shot CLI would kill it; prefer async).",
 )
+
+
+def _effective_deep(deep: str, host: str | None) -> str:
+    """`deep="async"` hands the pass to a detached daemon that reconnects to the CONFIGURED backend;
+    an explicit `--host` is an ad-hoc connection the daemon may not match, so deepen inline instead
+    (mirrors the embed-mode fallback). Any other mode passes through unchanged."""
+    return "inline" if deep == "async" and host else deep
 
 
 @ingest_group.command("dir")
@@ -1119,19 +1210,27 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
     from auryn.core import ingest
     from auryn.core.app_config import load_config
     from auryn.core.project import default_graph_name, resolve_project_root
+    from auryn.core.sync_lock import sync_lock
 
     _validate_hook_names(only_hooks + skip_hooks)
     graph = ctx.obj["graph_name"] or default_graph_name(resolve_project_root(path))
     writer = _ingest_writer(ctx, graph)
     try:
-        report = ingest.ingest_directory(
-            writer, path, project_name=project_name, solution_name=solution_name, deep=deep,
-            # Explicit --host is an ad-hoc connection the background daemon may not match -> inline.
-            embed=("inline" if ctx.obj.get("host") else None),
-            include_dirs=include_dirs, exclude_dirs=exclude_dirs,
-            include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
-            enrichment_only=only_hooks, enrichment_skip=skip_hooks,
-        )
+        # Its turn among this repo's hook / watcher syncs, which write the same project subgraph
+        # (core/sync_lock.py) -- e.g. a deep re-ingest while a commit hook fires.
+        with sync_lock(resolve_project_root(path), queue_one=False):
+            try:
+                report = ingest.ingest_directory(
+                    writer, path, project_name=project_name, solution_name=solution_name,
+                    deep=_effective_deep(deep, ctx.obj.get("host")),
+                    # Explicit --host is an ad-hoc connection the background daemon may not match -> inline.
+                    embed=("inline" if ctx.obj.get("host") else None),
+                    include_dirs=include_dirs, exclude_dirs=exclude_dirs,
+                    include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
+                    enrichment_only=only_hooks, enrichment_skip=skip_hooks,
+                )
+            finally:
+                ingest.join_deep_phase()  # `--deep background` writers: hold the lock for them, as `sync` does
     except ValueError as e:  # missing path / not a directory -- a clean CLI error, not a traceback
         raise click.ClickException(str(e)) from e
     _echo_ingest_report(report)
@@ -1187,7 +1286,8 @@ def ingest_repo(
         graph = ctx.obj["graph_name"] or default_graph_name(dest)
         writer = _ingest_writer(ctx, graph)
         report = ingest.ingest_directory(writer, str(dest), project_name=project_name,
-                                         solution_name=solution_name, deep=deep,
+                                         solution_name=solution_name,
+                                         deep=_effective_deep(deep, ctx.obj.get("host")),
                                          embed=("inline" if ctx.obj.get("host") else None), **_filters)
         _echo_ingest_report(report)
         _wire_trigger(str(dest.resolve()), graph, project_name, trigger or load_config().resync_trigger)
@@ -1198,7 +1298,8 @@ def ingest_repo(
     writer = _ingest_writer(ctx, graph)
     try:
         report = ingest.ingest_repository(
-            writer, repo_uri, ref=ref, project_name=project_name, solution_name=solution_name, deep=deep,
+            writer, repo_uri, ref=ref, project_name=project_name, solution_name=solution_name,
+            deep=_effective_deep(deep, ctx.obj.get("host")),
             embed=("inline" if ctx.obj.get("host") else None), **_filters
         )
     except (ValueError, git.GitCommandError) as e:  # bad ref / unreachable repo -> clean CLI error
@@ -1278,9 +1379,11 @@ def quickstart(path: str | None, db_path: str | None, graph_name: str, project_n
     writer = GraphWriter(client.select_graph(graph_name))
     try:
         report = ingest.ingest_directory(
-            writer, str(root), project_name=project_name, deep=deep,
-            # Serverless/embedded DB lives in THIS process -- a detached daemon couldn't reach it,
-            # so embed inline here rather than enqueuing a background job that would find nothing.
+            writer, str(root), project_name=project_name,
+            # Serverless/embedded DB lives in THIS process -- a detached daemon (deep=async / background
+            # embed) couldn't reach it, so deepen AND embed inline here rather than enqueuing a job that
+            # would find nothing.
+            deep=("inline" if deep == "async" else deep),
             embed="inline",
             include_dirs=include_dirs, exclude_dirs=exclude_dirs,
             include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
@@ -1295,7 +1398,7 @@ def quickstart(path: str | None, db_path: str | None, graph_name: str, project_n
     # up (a fraction of a second later) -- a refresh covers the rare bind race.
     if not no_open:
         click.launch(url)
-    create_app(client).run(host=host, port=port)
+    create_app(client, host).run(host=host, port=port)
 
 
 @cli.command("enrich")

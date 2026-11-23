@@ -1,0 +1,10 @@
+# A prod overlay: layers on ../../base and pins the SAME shop/api:1.0 the Dockerfile builds and
+# compose/k8s/terraform/helm run -- its `images:` transformer makes the overlay RUNS_IMAGE the one hub.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: shop/api
+    newName: shop/api
+    newTag: "1.0"

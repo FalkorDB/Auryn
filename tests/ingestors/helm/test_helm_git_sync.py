@@ -1,5 +1,5 @@
-"""The Helm producer against the real `graph` fixture: a chart -> Resource (chart) + Service (workload)
-+ Image, with DEPENDS_ON/DEPLOYS/RUNS_IMAGE edges, and resync. Needs FalkorDB (the conftest fixture)."""
+"""The Helm producer against the real `graph` fixture: a chart -> Resource (release) + ConfigValue +
+Image, with DEPENDS_ON/RUNS_IMAGE/MOUNTS edges, resync, and idempotency. Needs FalkorDB (conftest)."""
 
 from __future__ import annotations
 
@@ -7,22 +7,19 @@ from auryn.core.graph_client import GraphWriter
 from auryn.core.local_source import LocalDirectorySource
 from auryn.ingestors.helm.git_sync import sync_at
 
-_CHART = "apiVersion: v2\nname: shop-api\nversion: 1.0.0\ndependencies:\n  - name: redis\n"
-_VALUES = "image:\n  repository: shop/api\n  tag: \"1.0\"\n"
-_DEPLOYMENT = (
-    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: shop-api\nspec:\n  template:\n    spec:\n"
-    '      containers:\n        - name: api\n          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"\n'
-)
+_CHART = "apiVersion: v2\nname: shop-api\nversion: 1.0.0\ntype: application\ndependencies:\n  - name: redis\n    version: \"17.x\"\n"
+_VALUES = "image:\n  repository: shop/api\n  tag: \"1.0\"\nreplicaCount: 2\n"
 
 _CHART_FILES = {
     "charts/shop/Chart.yaml": _CHART,
     "charts/shop/values.yaml": _VALUES,
-    "charts/shop/templates/deployment.yaml": _DEPLOYMENT,
+    # a Go-templated manifest: must be IGNORED by helm (not valid YAML, no render in v1)
+    "charts/shop/templates/deployment.yaml":
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ include \"x\" . }}\n",
 }
 
 
 def _ingest(graph, tmp_path, files, project="shop"):
-    # clear any files from a prior _ingest in the same tmp_path so resync sees a true deletion
     for rel, text in files.items():
         p = tmp_path / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -32,21 +29,39 @@ def _ingest(graph, tmp_path, files, project="shop"):
     return lambda c: graph.query(c).result_set
 
 
-def test_chart_resource_and_file(graph, tmp_path):
+def test_chart_resource_and_containment(graph, tmp_path):
     q = _ingest(graph, tmp_path, _CHART_FILES)
-    assert q("MATCH (r:Resource {kind:'chart', name:'shop-api'}) RETURN count(r)") == [[1]]
+    # the chart is a `release`-classified Resource
+    assert q("MATCH (r:Resource {kind:'release', name:'shop-api'}) RETURN r.resolved, r.chart_type") == [[True, "application"]]
     assert q("MATCH (:File {name:'Chart.yaml'})-[:HAS_RESOURCE]->(:Resource {name:'shop-api'}) RETURN count(*)") == [[1]]
+    # both the Chart.yaml and values.yaml files are in the graph (project -> file containment)
+    assert sorted(r[0] for r in q("MATCH (:Project)-[:HAS_FILE]->(f:File) RETURN f.name")) == ["Chart.yaml", "values.yaml"]
 
 
-def test_workload_deployed_and_runs_hub_image(graph, tmp_path):
+def test_no_service_in_v1(graph, tmp_path):
+    # the Go-templated template is not parsed -> no Service / DEPLOYS (render-free)
     q = _ingest(graph, tmp_path, _CHART_FILES)
-    assert q("MATCH (:Resource {name:'shop-api'})-[:DEPLOYS]->(s:Service) RETURN s.name, s.kind") == [["shop-api", "Deployment"]]
-    assert q("MATCH (:Service {name:'shop-api'})-[:RUNS_IMAGE]->(i:Image) RETURN i.ref") == [["docker.io/shop/api:1.0"]]
+    assert q("MATCH (s:Service) RETURN count(s)") == [[0]]
+    assert q("MATCH ()-[d:DEPLOYS]->() RETURN count(d)") == [[0]]
+
+
+def test_runs_image_joins_hub(graph, tmp_path):
+    q = _ingest(graph, tmp_path, _CHART_FILES)
+    assert q("MATCH (:Resource {name:'shop-api'})-[:RUNS_IMAGE]->(i:Image) RETURN i.ref, i.resolved") \
+        == [["docker.io/shop/api:1.0", False]]
+
+
+def test_config_values_mounted(graph, tmp_path):
+    q = _ingest(graph, tmp_path, _CHART_FILES)
+    cvs = {r[0]: r[1] for r in q("MATCH (:Resource {name:'shop-api'})-[:MOUNTS]->(c:ConfigValue) RETURN c.name, c.value")}
+    assert cvs["replicaCount"] == "2"
+    assert cvs["image.repository"] == "shop/api"
 
 
 def test_external_dependency_is_a_placeholder(graph, tmp_path):
     q = _ingest(graph, tmp_path, _CHART_FILES)
-    assert q("MATCH (:Resource {name:'shop-api'})-[:DEPENDS_ON]->(d:Resource) RETURN d.name, d.resolved") == [["redis", False]]
+    assert q("MATCH (:Resource {name:'shop-api'})-[:DEPENDS_ON]->(d:Resource) RETURN d.name, d.kind, d.resolved") \
+        == [["redis", "chart", False]]
 
 
 def test_in_repo_dependency_resolves_to_the_chart(graph, tmp_path):
@@ -54,82 +69,108 @@ def test_in_repo_dependency_resolves_to_the_chart(graph, tmp_path):
     files["charts/shop/Chart.yaml"] = "apiVersion: v2\nname: shop-api\nversion: 1.0.0\ndependencies:\n  - name: cache\n"
     files["charts/cache/Chart.yaml"] = "apiVersion: v2\nname: cache\nversion: 2.0.0\n"
     q = _ingest(graph, tmp_path, files)
-    # the dep resolves to the REAL in-repo chart (resolved:true), not a placeholder
-    assert q("MATCH (:Resource {name:'shop-api'})-[:DEPENDS_ON]->(d:Resource {name:'cache'}) RETURN d.resolved") == [[True]]
+    # the dep resolves to the REAL in-repo chart (kind release, resolved:true), not a placeholder
+    assert q("MATCH (:Resource {name:'shop-api'})-[:DEPENDS_ON]->(d:Resource {name:'cache'}) RETURN d.kind, d.resolved") == [["release", True]]
     assert q("MATCH (d:Resource {name:'cache', resolved:false}) RETURN count(d)") == [[0]]
 
 
 def test_resync_removes_deleted_chart(graph, tmp_path):
     q = _ingest(graph, tmp_path, _CHART_FILES)
-    assert q("MATCH (s:Service) RETURN count(s)") == [[1]]
-    # remove the deployment template -> the workload Service disappears; keep only the chart
+    assert q("MATCH (r:Resource) RETURN count(r)") == [[2]]  # shop-api + the redis placeholder
+    # remove the whole chart -> its Resource/ConfigValue/File + the dep placeholder disappear
     import shutil
-    shutil.rmtree(tmp_path / "charts" / "shop" / "templates")
-    q = _ingest(graph, tmp_path, {"charts/shop/Chart.yaml": "apiVersion: v2\nname: shop-api\nversion: 2.0.0\n"})
-    assert q("MATCH (s:Service) RETURN count(s)") == [[0]]
-    assert q("MATCH (:Resource)-[:DEPENDS_ON]->() RETURN count(*)") == [[0]]  # the redis dep is gone too
+    shutil.rmtree(tmp_path / "charts" / "shop")
+    q = _ingest(graph, tmp_path, {"charts/cache/Chart.yaml": "apiVersion: v2\nname: cache\nversion: 2.0.0\n"})
+    assert sorted(r[0] for r in q("MATCH (r:Resource) RETURN r.name")) == ["cache"]
+    assert q("MATCH (c:ConfigValue) RETURN count(c)") == [[0]]
+    assert q("MATCH ()-[d:DEPENDS_ON]->() RETURN count(d)") == [[0]]
 
 
-# ── id-collision hardening ──────────────────────────────────────────────────────
-_TEMPLATED_WORKLOAD = (
-    "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n"
-    '  name: {{ include "x.fullname" . }}\nspec:\n  template:\n    spec:\n      containers:\n        - image: a:1\n'
-)
+def test_resync_after_an_interrupted_sync_removes_the_last_chart(graph, tmp_path):
+    _ingest(graph, tmp_path, _CHART_FILES)
+    graph.query("MATCH (p:Project) SET p.commit_sha = NULL")  # what a sync that died mid-apply leaves
+    import shutil
+    shutil.rmtree(tmp_path / "charts")
+    q = _ingest(graph, tmp_path, {})
+    assert q("MATCH (r:Resource) RETURN count(r)") == [[0]]  # no stamp is not "never ingested"
 
 
-def test_nested_same_basename_templates_stay_distinct(graph, tmp_path):
-    # two templates with the SAME basename and a templated (fallback-to-stem) name -- the chart-relative
-    # template PATH (not just the basename) keeps their Service nodes distinct
-    files = {
+def test_idempotent_reingest(graph, tmp_path):
+    q = _ingest(graph, tmp_path, _CHART_FILES)
+    before = {
+        "resources": q("MATCH (r:Resource) RETURN count(r)"),
+        "config": q("MATCH (c:ConfigValue) RETURN count(c)"),
+        "runs": q("MATCH ()-[e:RUNS_IMAGE]->() RETURN count(e)"),
+        "mounts": q("MATCH ()-[e:MOUNTS]->() RETURN count(e)"),
+        "depends": q("MATCH ()-[e:DEPENDS_ON]->() RETURN count(e)"),
+    }
+    q = _ingest(graph, tmp_path, _CHART_FILES)  # same content again
+    after = {
+        "resources": q("MATCH (r:Resource) RETURN count(r)"),
+        "config": q("MATCH (c:ConfigValue) RETURN count(c)"),
+        "runs": q("MATCH ()-[e:RUNS_IMAGE]->() RETURN count(e)"),
+        "mounts": q("MATCH ()-[e:MOUNTS]->() RETURN count(e)"),
+        "depends": q("MATCH ()-[e:DEPENDS_ON]->() RETURN count(e)"),
+    }
+    assert before == after
+
+
+def test_repo_with_no_chart_is_not_ingested(graph, tmp_path):
+    # a plain k8s manifest + a compose file, NO Chart.yaml -> no phantom helm:// project
+    q = _ingest(graph, tmp_path, {
+        "k8s/deploy.yaml": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+        "docker-compose.yaml": "services:\n  web:\n    image: nginx:1.25\n",
+    })
+    assert q("MATCH (p:Project {name:'shop'}) RETURN count(p)") == [[0]]
+    assert q("MATCH (r:Resource) RETURN count(r)") == [[0]]
+
+
+def test_root_chart_uses_reserved_scope_not_its_name(graph, tmp_path):
+    # a ROOT chart named `shop` and a subdir chart at `shop/` must NOT merge into one Resource: the root
+    # keys on the reserved `_root` segment, NEVER its Chart.yaml name, so they stay distinct.
+    q = _ingest(graph, tmp_path, {
+        "Chart.yaml": "apiVersion: v2\nname: shop\nversion: 1.0.0\n",
+        "shop/Chart.yaml": "apiVersion: v2\nname: shop-sub\nversion: 2.0.0\n",
+    })
+    assert q("MATCH (r:Resource {kind:'release'}) RETURN count(r)") == [[2]]
+    assert sorted(r[0] for r in q("MATCH (r:Resource {kind:'release'}) RETURN r.chart_dir")) == ["", "shop"]
+    assert q("MATCH (r:Resource) WHERE r.id = 'helm://shop/_root' RETURN r.name") == [["shop"]]
+
+
+def test_chart_in_reserved_dir_is_skipped(graph, tmp_path):
+    # a chart whose directory is the reserved `_dep/` namespace is skipped (it could otherwise collide
+    # with a dependency placeholder); a normal sibling chart still ingests.
+    q = _ingest(graph, tmp_path, {
         "charts/shop/Chart.yaml": "apiVersion: v2\nname: shop\nversion: 1.0.0\n",
-        "charts/shop/templates/a/deploy.yaml": _TEMPLATED_WORKLOAD,
-        "charts/shop/templates/b/deploy.yaml": _TEMPLATED_WORKLOAD,
-    }
-    q = _ingest(graph, tmp_path, files)
-    assert q("MATCH (s:Service) RETURN count(s)") == [[2]]
+        "_dep/evil/Chart.yaml": "apiVersion: v2\nname: evil\nversion: 1.0.0\n",
+    })
+    assert q("MATCH (r:Resource {name:'shop'}) RETURN count(r)") == [[1]]
+    assert q("MATCH (r:Resource {name:'evil'}) RETURN count(r)") == [[0]]
 
 
-def test_same_name_different_kind_stay_distinct(graph, tmp_path):
-    # same name + same template file, different kind -> kind is part of the id, so two Services
-    multi = (
-        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: worker\nspec:\n  template:\n    spec:\n"
-        "      containers:\n        - image: a:1\n---\n"
-        "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: worker\n"
-    )
-    files = {
+def test_ambiguous_dependency_stays_a_placeholder(graph, tmp_path):
+    # two in-repo charts share the name `common`; a dependency on `common` can't pick one, so it stays
+    # an unresolved placeholder rather than resolving arbitrarily to one of them.
+    q = _ingest(graph, tmp_path, {
+        "charts/a/Chart.yaml": "apiVersion: v2\nname: common\nversion: 1.0.0\n",
+        "charts/b/Chart.yaml": "apiVersion: v2\nname: common\nversion: 2.0.0\n",
+        "charts/app/Chart.yaml": "apiVersion: v2\nname: app\nversion: 1.0.0\ndependencies:\n  - name: common\n",
+    })
+    assert q("MATCH (:Resource {name:'app'})-[:DEPENDS_ON]->(d) RETURN d.id") == [["helm://shop/_dep/common"]]
+    assert q("MATCH (:Resource {name:'app'})-[:DEPENDS_ON]->(d:Resource {resolved:false}) RETURN count(d)") == [[1]]
+
+
+def test_sensitive_config_value_is_redacted(graph, tmp_path):
+    # a credential in values.yaml must never be stored verbatim (graph/viewer/MCP surface the value)
+    q = _ingest(graph, tmp_path, {
         "charts/shop/Chart.yaml": "apiVersion: v2\nname: shop\nversion: 1.0.0\n",
-        "charts/shop/templates/w.yaml": multi,
-    }
-    q = _ingest(graph, tmp_path, files)
-    assert q("MATCH (s:Service {name:'worker'}) RETURN count(s)") == [[2]]
+        "charts/shop/values.yaml": "replicaCount: 2\ndatabase:\n  password: s3cr3t\n",
+    })
+    assert q("MATCH (c:ConfigValue {name:'database.password'}) RETURN c.value, c.sensitive") == [["[redacted]", True]]
+    assert q("MATCH (c:ConfigValue {name:'replicaCount'}) RETURN c.value, c.sensitive") == [["2", False]]
 
 
-def test_root_chart_and_sibling_dir_do_not_merge(graph, tmp_path):
-    # a ROOT chart whose Chart.yaml name equals a sibling subchart's DIRECTORY must not merge: the scope
-    # keys on the directory ('_root' for the root), never the Chart.yaml name
-    files = {
-        "Chart.yaml": "apiVersion: v2\nname: shop\nversion: 1.0.0\n",        # root chart, named 'shop'
-        "shop/Chart.yaml": "apiVersion: v2\nname: other\nversion: 1.0.0\n",  # a subchart in dir 'shop'
-    }
-    q = _ingest(graph, tmp_path, files)
-    assert q("MATCH (r:Resource {kind:'chart'}) RETURN count(r)") == [[2]]
-    assert q("MATCH (r:Resource {kind:'chart', name:'shop'}) RETURN count(r)") == [[1]]
-    assert q("MATCH (r:Resource {kind:'chart', name:'other'}) RETURN count(r)") == [[1]]
-
-
-def test_nameless_chart_resource_is_unresolved(graph, tmp_path):
-    # a Chart.yaml without a name isn't valid chart metadata -> its fallback Resource is resolved:false
-    q = _ingest(graph, tmp_path, {"charts/x/Chart.yaml": "apiVersion: v2\nversion: 1.0.0\n"})
-    assert q("MATCH (r:Resource {kind:'chart'}) RETURN r.resolved") == [[False]]
-
-
-def test_ambiguous_dependency_name_stays_a_placeholder(graph, tmp_path):
-    # two in-repo charts share the name 'dup'; a dependency on 'dup' is ambiguous, so it must NOT resolve
-    # arbitrarily to one of them -- it stays an unresolved placeholder
-    files = {
-        "charts/a/Chart.yaml": "apiVersion: v2\nname: dup\nversion: 1.0.0\n",
-        "charts/b/Chart.yaml": "apiVersion: v2\nname: dup\nversion: 2.0.0\n",
-        "charts/main/Chart.yaml": "apiVersion: v2\nname: main\nversion: 1.0.0\ndependencies:\n  - name: dup\n",
-    }
-    q = _ingest(graph, tmp_path, files)
-    assert q("MATCH (:Resource {name:'main'})-[:DEPENDS_ON]->(d:Resource {name:'dup'}) RETURN d.resolved") == [[False]]
+def test_nameless_chart_is_unresolved(graph, tmp_path):
+    # a Chart.yaml with no name still anchors a Resource, but marked resolved:false (not a valid chart)
+    q = _ingest(graph, tmp_path, {"charts/shop/Chart.yaml": "apiVersion: v2\nversion: 1.0.0\n"})
+    assert q("MATCH (r:Resource {kind:'release'}) RETURN r.resolved") == [[False]]

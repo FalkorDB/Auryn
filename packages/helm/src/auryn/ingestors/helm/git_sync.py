@@ -2,10 +2,16 @@
 `target_sha` and diff it onto the graph (graph_sync.stream_apply). v1 is full-recompute and
 render-free. Registered as the `helm` GitLanguage by the import-light plugin.py.
 
-A chart is anchored by its `Chart.yaml`; each chart pulls its sibling `values.yaml` and its
-`templates/*.yaml`. The GitLanguage suffix match is broad (`*.yaml`/`*.yml`, like k8s) -- the
-`Chart.yaml` basename is what actually identifies a chart here, and non-chart YAML yields nothing. (A
-tighter filename-aware detector is the `GitLanguage.filename_matches` follow-up in ADR 0007 §7.)"""
+A chart is anchored by its `Chart.yaml`; each chart pulls its sibling `values.yaml` and NOTHING else
+-- the Go-templated `templates/*.yaml` are not read (ADR 0007 line 225). The GitLanguage suffix match
+is broad (`*.yaml`/`*.yml`, like k8s) -- the `Chart.yaml` basename is what actually identifies a chart
+here, and non-chart YAML yields nothing, so a repo with no charts never gets a phantom `helm://`
+project. (A tighter filename-aware detector is the `GitLanguage.filename_matches` follow-up, ADR §7.)
+
+The k8s producer naturally skips these same files, so there is no double-ingest: `Chart.yaml`/
+`values.yaml` lack `apiVersion`+`kind` (k8s's byte pre-check drops them), and a chart's templates fail
+k8s's YAML parse (the `{{ }}` makes them invalid YAML). The two producers coexist on distinct
+`helm://`/`k8s://` id prefixes."""
 
 from __future__ import annotations
 
@@ -22,7 +28,7 @@ from auryn.ingestors.helm.build import build_graph
 from auryn.ingestors.helm.file_parser import parse_chart
 from auryn.ingestors.helm.ids import project_id
 from auryn.ingestors.helm.plugin import EXCLUDED_DIR_NAMES as _EXCLUDED_DIR_NAMES
-from auryn.ingestors.helm.plugin import FILE_SUFFIXES as _FILE_SUFFIXES
+from auryn.ingestors.helm.plugin import CHART_GLOBS as _CHART_GLOBS
 from auryn.ingestors.helm.schema import NODE_SCHEMAS, OWNED_LABELS
 
 logger = logging.getLogger(__name__)
@@ -42,26 +48,29 @@ class SyncStats:
     files_cached: int = 0
 
 
-def _templates_prefix(chart_dir: str) -> str:
-    return f"{chart_dir}/templates/" if chart_dir else "templates/"
+def _collect_charts(source, target_sha: str) -> dict[str, tuple]:
+    """Group the repo's YAML into charts: `{chart_dir: (chart_blob, values_blob)}` keyed off each
+    `Chart.yaml`. Only the chart's own `Chart.yaml` + sibling `values.yaml` are kept -- v1 reads no
+    templates. A repo YAML file that isn't a `Chart.yaml` (and isn't a chart's `values.yaml`) is
+    dropped, so a plain k8s manifest or a compose file never anchors a helm chart."""
+    yaml_files: dict[str, str] = {}  # only Chart.yaml + values.yaml, not every repo YAML
+    for path, blob_sha in source.list_files_glob(target_sha, _CHART_GLOBS, set(_EXCLUDED_DIR_NAMES)):
+        yaml_files.setdefault(path, blob_sha)
 
-
-def _collect_charts(source, target_sha: str):
-    """Group the repo's YAML into charts: `{chart_dir: (chart_blob, values_blob, [(tpl_path, blob)])}`
-    keyed off each `Chart.yaml`. Only files under a chart's own `templates/` are its templates (a nested
-    subchart keeps its own)."""
-    yaml_files: dict[str, str] = {}
-    for suffix in _FILE_SUFFIXES:
-        for path, blob_sha in source.list_files(target_sha, suffix, set(_EXCLUDED_DIR_NAMES)):
-            yaml_files.setdefault(path, blob_sha)
-
-    chart_dirs = {posixpath.dirname(p): yaml_files[p] for p in yaml_files if posixpath.basename(p) == "Chart.yaml"}
+    chart_dirs: dict[str, str] = {}
+    for p in yaml_files:
+        if posixpath.basename(p) != "Chart.yaml":
+            continue
+        cd = posixpath.dirname(p)
+        norm = cd.replace(chr(92), "/").strip("/")  # a non-root chart literally at `_root`/`_dep/...`
+        if norm == "_root" or norm == "_dep" or norm.startswith("_dep/"):
+            logger.warning("helm: chart dir %r collides with a reserved id namespace (_root/_dep) -- skipped", cd)
+            continue
+        chart_dirs[cd] = yaml_files[p]
     charts: dict[str, tuple] = {}
     for cd, chart_blob in sorted(chart_dirs.items()):
         values_blob = yaml_files.get(posixpath.join(cd, "values.yaml") if cd else "values.yaml")
-        tprefix = _templates_prefix(cd)
-        templates = sorted((p, sha) for p, sha in yaml_files.items() if p.startswith(tprefix))
-        charts[cd] = (chart_blob, values_blob, templates)
+        charts[cd] = (chart_blob, values_blob)
     return charts
 
 
@@ -78,19 +87,19 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
         return source.read_blob(blob_sha) if blob_sha else None
 
     parsed_charts = []
-    files_count = 0  # actual YAML files consumed (Chart.yaml + values.yaml + templates), not chart count
-    for cd, (chart_blob, values_blob, templates) in _collect_charts(source, target_sha).items():
+    for cd, (chart_blob, values_blob) in _collect_charts(source, target_sha).items():
         try:
-            tpls = [(p, source.read_blob(sha)) for p, sha in templates]
-            parsed_charts.append(parse_chart(cd, _read(chart_blob), _read(values_blob), tpls))
-            files_count += 1 + (1 if values_blob else 0) + len(templates)
+            parsed_charts.append(parse_chart(cd, _read(chart_blob), _read(values_blob)))
         except Exception:
             # KNOWN LIMITATION (tier-wide): a failed read drops the chart from the target, so the
-            # recompute REMOVES its prior nodes -- no keep-last-good.
+            # recompute REMOVES its prior nodes -- no keep-last-good like the tree-sitter ingestors.
             logger.warning("failed to read chart at %s (its nodes are removed this sync)", cd or "<root>", exc_info=True)
             continue
 
-    if not parsed_charts and prior_sha is None:
+    # Don't stamp a phantom `helm://<project>` on a repo that has no charts at all. Still proceed when a
+    # prior helm subgraph exists, so removing the last chart cleans it (recompute-to-empty) -- its
+    # Project node, not its stamp: a sync that died mid-apply leaves the node without one.
+    if not parsed_charts and prior_sha is None and not writer.node_exists("Project", proj_id):
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
     project_node = GraphNode(
@@ -99,7 +108,12 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
     )
 
     def make_target():
-        return itertools.chain(build_graph(parsed_charts, proj_id), [project_node])
+        # Project node LAST, so commit_sha isn't stamped on a partial graph (see k8s git_sync). When the
+        # LAST chart was removed (no charts, but a prior graph exists) the target is fully empty -- no
+        # Project either -- so the stale `helm://` subgraph is removed in its entirety, not left as a
+        # bare Project node.
+        tail = [project_node] if parsed_charts else []
+        return itertools.chain(build_graph(parsed_charts, proj_id), tail)
 
     stats, _r, _p = stream_apply(writer, proj_id, OWNED_LABELS, make_target)
     elapsed = time.monotonic() - started
@@ -107,7 +121,7 @@ def sync_at(writer, source, target_sha: str, *, project_name: str, repo_uri: str
     return SyncStats(
         nodes_added=stats.nodes_added, nodes_updated=stats.nodes_updated, nodes_removed=stats.nodes_removed,
         edges_added=stats.edges_added, edges_updated=stats.edges_updated, edges_removed=stats.edges_removed,
-        commit_sha=target_sha, elapsed_seconds=elapsed, files_parsed=files_count,
+        commit_sha=target_sha, elapsed_seconds=elapsed, files_parsed=len(parsed_charts),
     )
 
 
