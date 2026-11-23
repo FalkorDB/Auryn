@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import functools
 import hashlib
+import http.client
 import logging
 import re
 import shutil
@@ -253,21 +254,51 @@ def _auth_headers() -> dict:
     return headers
 
 
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+# Transport-level failures GitHub returns under load on large fetches (e.g. check runs for thousands
+# of commits): a dropped connection (RemoteDisconnected), a reset, or a read timeout. These surface
+# NOT as an HTTPError (which carries a status code) but as a bare transport exception, so the status
+# retry in `_graphql` never caught them. TimeoutError covers socket.timeout (its alias since 3.10).
+_TRANSPORT_ERRORS = (http.client.RemoteDisconnected, ConnectionError, TimeoutError)
+
+
+def _urlopen_retrying(request: urllib.request.Request, timeout: int, retries: int = 3):
+    """`urlopen` + read with retry on *transient* failures only -- HTTP 429/5xx and transport-level
+    drops (connection reset / RemoteDisconnected / timeout). Returns (body_bytes, headers). An HTTPError
+    on a non-retriable status, or exhausted retries, re-raises so the caller's own error handling runs."""
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read(), response.headers
+        except urllib.error.HTTPError as exc:  # has a status code; HTTPError IS-A URLError, so catch first
+            last_exc = exc
+            if exc.code not in _RETRY_STATUS or attempt == retries - 1:
+                raise
+        except (urllib.error.URLError, *_TRANSPORT_ERRORS) as exc:  # transport drop (wrapped or bare)
+            last_exc = exc
+            if attempt == retries - 1:
+                raise
+        time.sleep(1.5 * (attempt + 1))
+    raise last_exc  # unreachable (the loop re-raises on the last attempt), but satisfies the type checker
+
+
 def _api_pages(path: str) -> list[dict]:
     """Read a GitHub REST endpoint, following `Link` pagination. Returns the items; a single-object
     response (e.g. the repo-metadata endpoint) is returned as a one-element list. Uses the recycled gh
-    token when available (authenticated rate limit), otherwise the anonymous public API."""
+    token when available (authenticated rate limit), otherwise the anonymous public API. Each page is
+    fetched with transient-failure retry (5xx / connection drops)."""
     url = path if path.startswith("https://api.github.com/") else "https://api.github.com/" + path.lstrip("/")
     rows: list[dict] = []
     while url:
         request = urllib.request.Request(url, headers=_auth_headers())
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read())
-            if isinstance(payload, list):
-                rows.extend(item for item in payload if isinstance(item, dict))
-            elif isinstance(payload, dict):
-                rows.append(payload)
-            link = response.headers.get("Link", "")
+        body, response_headers = _urlopen_retrying(request, timeout=30)
+        payload = json.loads(body)
+        if isinstance(payload, list):
+            rows.extend(item for item in payload if isinstance(item, dict))
+        elif isinstance(payload, dict):
+            rows.append(payload)
+        link = response_headers.get("Link", "")
         next_url = None
         for part in link.split(","):
             if 'rel="next"' in part:
@@ -290,20 +321,13 @@ def _graphql(query: str, variables: dict) -> dict:
     body = json.dumps({"query": query, "variables": variables}).encode()
     headers = {**_auth_headers(), "Content-Type": "application/json"}
     request = urllib.request.Request("https://api.github.com/graphql", data=body, headers=headers, method="POST")
-    last_exc: Exception | None = None
-    for attempt in range(3):  # GraphQL can transiently 502/504 under load; retry with backoff
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                payload = json.loads(response.read())
-            if payload.get("errors"):
-                raise ValueError(f"GitHub GraphQL error: {payload['errors'][:1]}")
-            return payload.get("data") or {}
-        except urllib.error.HTTPError as exc:
-            last_exc = exc
-            if exc.code not in (429, 502, 503, 504) or attempt == 2:
-                raise
-            time.sleep(1.5 * (attempt + 1))
-    raise last_exc  # unreachable, but keeps the type checker happy
+    # Retries transient HTTP 5xx AND transport drops (GraphQL check-suite fetches for many commits are
+    # where GitHub most often resets the connection under load).
+    response_body, _ = _urlopen_retrying(request, timeout=60)
+    payload = json.loads(response_body)
+    if payload.get("errors"):
+        raise ValueError(f"GitHub GraphQL error: {payload['errors'][:1]}")
+    return payload.get("data") or {}
 
 
 def _verify_public_github(owner: str, name: str) -> str | None:

@@ -596,3 +596,50 @@ def test_watch_command_without_path_refreshes_every_registered_repo(graph, tmp_p
     assert isinstance(result.exception, _Break)
     assert set(calls) == {str(repo_a.resolve()), str(repo_b.resolve())}  # both repos in one tick
 
+
+def test_urlopen_retrying_recovers_from_transport_drop(monkeypatch):
+    import http.client
+
+    attempts = {"n": 0}
+
+    class _Resp:
+        headers = {"Link": ""}
+
+        def read(self):
+            return b'{"ok": true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(request, timeout):
+        attempts["n"] += 1
+        if attempts["n"] == 1:  # GitHub drops the connection mid-fetch, then recovers
+            raise http.client.RemoteDisconnected("Remote end closed connection without response")
+        return _Resp()
+
+    monkeypatch.setattr(git_info.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(git_info.time, "sleep", lambda *_: None)  # don't actually back off in the test
+
+    body, headers = git_info._urlopen_retrying(
+        git_info.urllib.request.Request("https://api.github.com/x"), timeout=5)
+    assert attempts["n"] == 2  # retried once after the drop
+    assert body == b'{"ok": true}'
+
+
+def test_urlopen_retrying_gives_up_after_exhausting_retries(monkeypatch):
+    import http.client
+    import pytest
+
+    def fake_urlopen(request, timeout):
+        raise http.client.RemoteDisconnected("down")
+
+    monkeypatch.setattr(git_info.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(git_info.time, "sleep", lambda *_: None)
+
+    with pytest.raises(http.client.RemoteDisconnected):
+        git_info._urlopen_retrying(
+            git_info.urllib.request.Request("https://api.github.com/x"), timeout=5, retries=2)
+
