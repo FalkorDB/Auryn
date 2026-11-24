@@ -125,7 +125,9 @@ def test_search_code_semantic_mode_reports_unavailable_model(falkordb_connection
 
 def test_run_cypher_strips_embedding_from_returned_entities(falkordb_connection, graph):
     """Even if an agent bypasses the curated tools and calls run_cypher with `RETURN n`, the raw
-    result is reshaped through the shared serializer, so the embedding vector never comes back."""
+    result is reshaped through the LEAN serializer, so the embedding vector never comes back and bulky
+    fields (source, >200-char text) are dropped -- `MATCH (n) RETURN n` over many nodes can't flood the
+    agent's context. The viewer's own cypher console keeps full nodes; get_context returns source."""
     graph.query(
         "CREATE (:Function {id:'f1', name:'connect', source:'def connect(): ...', "
         "embedding:[0.1, 0.2, 0.3], _fingerprint:'abc'})"
@@ -134,8 +136,8 @@ def test_run_cypher_strips_embedding_from_returned_entities(falkordb_connection,
 
     content = _call_tool(server, "run_cypher", {"query": "MATCH (n:Function) RETURN n"}).structured_content
     node = next(n for n in content["nodes"] if n["id"] == "f1")
-    assert node["properties"].get("name") == "connect"      # real props preserved
-    assert node["properties"].get("source")
+    assert node["properties"].get("name") == "connect"      # identifying props preserved
+    assert "source" not in node["properties"]               # lean: bulky source dropped (get_context has it)
     assert "embedding" not in node["properties"]            # vector stripped
     assert "_fingerprint" not in node["properties"]
 

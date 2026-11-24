@@ -194,12 +194,25 @@ jobs:
         # Oracle/PostgreSQL/MySQL testcontainers that must NOT be spun up once per xdist worker.
         run: uv run pytest $HEAVY_TESTS -n0
 
-  # Windows coverage. The embedded FalkorDB (redislite/falkordblite) is POSIX-only and there is no
-  # native Windows redis/valkey server, so DB-backed tests cannot run here -- they skip on Windows
-  # (see tests/conftest.py). This job covers the backend-free layers where Windows-specific bugs
-  # actually surface: the CLI entrypoint (including the stdio UTF-8 fix) and the Python parser.
-  # Deliberately NOT a required check yet; broaden the selection as more backend-free tests are
-  # confirmed green on Windows. The dev group is excluded because it pulls falkordblite.
+  # Windows coverage for the real surface Windows USERS exercise: the CLI, every language
+  # parser/file_parser, config/ids/schema/registry, the SCIP readers+resolvers, the cross-ingestor
+  # stitches, and the git-info pure functions -- the whole backend-free suite, run serially.
+  #
+  # The embedded FalkorDB (redislite/falkordblite) is POSIX-only and there is no native Windows
+  # redis/valkey server, so DB-backed tests can't run here: they SKIP automatically (the
+  # falkordb_connection fixture in tests/conftest.py pytest.skip()s on os.name == "nt", and the
+  # embedded-only modules guard with pytest.importorskip). Windows users point Auryn at a REMOTE
+  # FalkorDB (AURYN_TEST_BACKEND=server) -- that path shares the exact same code as embedded, which
+  # the Linux jobs above already exercise. The dev group is excluded because it pulls falkordblite;
+  # the language plugins still install (they're the umbrella's own dependencies).
+  #
+  # Excluded here, each kept running on Linux (the `test`/`integration` jobs):
+  #   - the HEAVY_TESTS trio -- Oracle/PostgreSQL/MySQL testcontainers + the .NET Roslyn extractor,
+  #     none of which GitHub's Windows runner provides (same rationale as the Linux split).
+  # Everything else that genuinely can't run on Windows self-skips at the test level with a reason
+  # (POSIX symlink privilege, a #!/bin/sh git hook, PATH lookup of an extensionless shell script).
+  #
+  # Deliberately NOT a required check while stabilizing; flip it to required once it's reliably green.
   windows:
     runs-on: windows-latest
     steps:
@@ -214,5 +227,18 @@ jobs:
       - name: Sync workspace without the dev group (falkordblite is POSIX-only)
         run: uv sync --frozen --no-group dev
 
-      - name: Run backend-free tests (CLI + stdio fix + Python parser)
-        run: uv run --no-sync --with pytest pytest tests/core/test_cli_stdio.py tests/ingestors/python/test_ast_engine.py -o addopts=""
+      - name: Run the backend-free suite (DB tests skip; container/SDK tests excluded)
+        # `--with pytest` adds just the runner (no xdist/cov/benchmark -- they're in the excluded dev
+        # group), `-o addopts=""` drops the pyproject `-n auto --dist loadgroup` default so it runs
+        # serially with no plugins needed. `--continue-on-collection-errors` keeps a single import
+        # failure from aborting the whole session (so one run surfaces every problem), and `-rs`
+        # lists skip reasons so the DB/POSIX skips are visible in the log.
+        run: >
+          uv run --no-sync --with pytest pytest tests
+          --ignore=tests/ingestors/plsql/test_plsql_ingestor.py
+          --ignore=tests/ingestors/sql/test_sql_live_engines.py
+          --ignore=tests/ingestors/csharp/test_roslyn.py
+          -o addopts=""
+          -p no:cacheprovider
+          --continue-on-collection-errors
+          -rs

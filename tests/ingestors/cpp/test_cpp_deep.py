@@ -28,7 +28,9 @@ _PROJ = project_id("cppprobe")
 
 
 def _fixture_files():
-    return [parse_source(Path(p).read_bytes(), os.path.relpath(p, _SRC))
+    # Forward slashes so the relative path matches scip-clang's (os.path.relpath yields backslashes
+    # on Windows), as the real ingest does via LocalSource.as_posix().
+    return [parse_source(Path(p).read_bytes(), os.path.relpath(p, _SRC).replace(os.sep, "/"))
             for p in sorted(glob.glob(str(_SRC / "src/*")))]
 
 
@@ -86,6 +88,10 @@ def test_resolve_calls_resolves_what_the_name_pass_cannot():
     assert ("compute", "area") in pairs
     # a cross-file free-function call and a constructor-construction (`Circle c(2.0)`).
     assert ("run", "compute") in pairs
+    # `Circle c(2.0)` is STACK construction -- a declaration, not a call_expression -- so the fast parser
+    # records no call site for it (`run().calls` carries only `compute`); the deep pass is this ctor edge's
+    # only source. This is exactly why C++ runs the resolver UN-gated: a line-precise `require_call_site` gate
+    # (as Go/TS/Java use, #802) would drop this and every other RAII construction edge. See git_sync.py.
     assert ("run", "Circle") in pairs
 
 

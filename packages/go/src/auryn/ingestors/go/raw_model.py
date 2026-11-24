@@ -73,6 +73,13 @@ class RawFunction:
     into DEPENDS_ON edges. Go has no constructor to CALL, so a construction site is modelled as a
     *type dependency*, the idiomatic analog of Java's `new X()` -> CALLS-a-constructor."""
     calls: list[RawCall] = field(default_factory=list)
+    call_sites: list[tuple[str, int]] = field(default_factory=list)
+    """(callee simple name, callee-identifier 1-based line) for EVERY syntactic call in this body -- the
+    deep (SCIP) pass's line-precise call-site gate (`CallableLocation.called_sites`). UNLIKE `calls`, this
+    records calls through an unnameable receiver too (`svc.store.Put()` -- a chained selector `calls` omits),
+    so scip-go's resolution of those method dispatches survives `require_call_site`; and it is NOT deduped
+    (the same name called on two lines keeps both). Kept separate from `calls` precisely so the fast
+    resolver never sees a chained-selector call as a bare `Put()` and mis-binds it to a package function."""
     source: str = ""
     doc: str = ""  # shared `doc` property: the leading comment above the declaration, cleaned
     line_start: int = 0

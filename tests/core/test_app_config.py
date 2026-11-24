@@ -53,7 +53,8 @@ def test_save_load_roundtrip_with_manifest_and_perms(tmp_path, monkeypatch):
     got = load_config()
     assert got.backend == cfg.backend
     assert got.agents == cfg.agents
-    assert stat.S_IMODE(os.stat(config_path()).st_mode) == 0o600  # may hold a password
+    if os.name == "posix":  # native Windows chmod honors only the read-only bit -> S_IMODE is 0o666, not 0o600
+        assert stat.S_IMODE(os.stat(config_path()).st_mode) == 0o600  # may hold a password
 
 
 # -- hook enable/disable persistence ---------------------------------------------------------

@@ -1,14 +1,18 @@
 """Unit tests for LocalDirectorySource -- the directory-backed stand-in that lets the
 git ingestion pipeline run over a plain folder. Pure filesystem, no graph/git needed.
 It must present the same list_files/read_blob/working_tree surface as GitRepoCache so
-core/ingest.py can treat the two interchangeably.
+core/ingest.py can treat the two interchangeably. (The one WorkingTreeSource test at the
+end does build a real git repo: its change detection is `git diff`.)
 """
 
 from __future__ import annotations
 
 import hashlib
 
-from auryn.core.local_source import LocalDirectorySource
+import git
+import pytest
+
+from auryn.core.local_source import LocalDirectorySource, WorkingTreeSource
 
 _SHA = "deadbeef"  # the `sha` arg is ignored by a directory source -- any value works
 
@@ -148,3 +152,26 @@ def test_tree_sha_changes_when_a_file_is_renamed(tmp_path):
     # Same bytes, different path -> the tree changed (path is part of the hash), even
     # though the individual blob key for that content is unchanged.
     assert before != after
+
+
+# -- WorkingTreeSource.changed_since (a real git working tree) ---------------------------------
+
+
+def test_changed_since_never_runs_the_base_commit_as_an_option(tmp_path):
+    """`base_commit` is the commit read back from the graph: a value there that starts with `-`
+    must fail as a bad revision (-> the caller's full-resync fallback), not run as a git option."""
+    root = tmp_path / "repo"
+    repo = git.Repo.init(str(root))
+    with repo.config_writer() as cw:
+        cw.set_value("user", "email", "test@example.com")
+        cw.set_value("user", "name", "Test")
+    _build(root, {"a.py": "x = 1\n"})
+    repo.index.add(["a.py"])
+    repo.index.commit("first commit")
+    (root / "a.py").write_text("x = 2\n")
+
+    victim = tmp_path / "victim.txt"
+    with pytest.raises(git.GitCommandError):
+        WorkingTreeSource(root).changed_since(f"--output={victim}", ".py")
+    assert not victim.exists()
+    assert WorkingTreeSource(root).changed_since(repo.head.commit.hexsha, ".py")["modified"] == ["a.py"]
