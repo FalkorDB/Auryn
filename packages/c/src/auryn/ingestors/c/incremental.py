@@ -87,7 +87,7 @@ def _c_defined_symbol_ids(raw, proj_id: str) -> list[tuple[str, str]]:
     for en in raw.enums:
         out.append((ids.enum_id(proj_id, en.name), "Enum"))
     for td in raw.typedefs:
-        out.append((ids.typedef_id(proj_id, td.name), "Typedef"))
+        out.append((ids.typedef_id(proj_id, td.name), "TypeAlias"))
     for g in raw.globals:
         if not g.is_static:
             out.append((ids.global_id(proj_id, g.name), "GlobalVariable"))
@@ -154,7 +154,7 @@ def read_c_index(writer: GraphWriter, proj_id: str, exclude_keys: set[str], name
     # Named types declared/defined by the surviving files (with C's tag/typedef precedence).
     for name, label, tid in writer.ro_query(
         f"MATCH (file:File)-[:DEFINES|DECLARES]->(t) WHERE file.id IN $fids "
-        f"AND (t:Struct OR t:Union OR t:Enum OR t:Typedef) RETURN t.name, {semantic_label('t')}, t.id",
+        f"AND (t:Struct OR t:Union OR t:Enum OR t:TypeAlias) RETURN t.name, {semantic_label('t')}, t.id",
         {"fids": seed_file_ids},
     ).result_set:
         cur = idx.type_index.get(str(name))
@@ -171,7 +171,7 @@ def read_c_index(writer: GraphWriter, proj_id: str, exclude_keys: set[str], name
         idx.defined_func_names.add(str(name))
     for (name,) in writer.ro_query(
         "MATCH (file:File)-[:DEFINES]->(t) WHERE file.id IN $fids "
-        "AND (t:Struct OR t:Union OR t:Enum OR t:Typedef) RETURN DISTINCT t.name", {"fids": seed_file_ids},
+        "AND (t:Struct OR t:Union OR t:Enum OR t:TypeAlias) RETURN DISTINCT t.name", {"fids": seed_file_ids},
     ).result_set:
         idx.defined_type_names.add(str(name))
     return idx
@@ -186,7 +186,7 @@ C_SPEC = ScopedSpec(
     symbol_ref_rels=_SYMBOL_REF_RELS,
     lateral_rels=_LATERAL_RELS,
     containment_rels=_CONTAINMENT_RELS,
-    targetable_labels=("Function", "Struct", "Union", "Enum", "Typedef", "GlobalVariable"),
+    targetable_labels=("Function", "Struct", "Union", "Enum", "TypeAlias", "GlobalVariable"),
     import_rel="INCLUDES",
     import_target_labels=("File",),
     project_id=ids.project_id,

@@ -42,7 +42,7 @@ NODE_SCHEMAS = [
 EDGE_SCHEMAS = [
     # Containment backbone -- pure structure, no properties (as in Rust/Java/Python).
     EdgeSchema(rel_type="HAS_MODULE"),     # Project|Module|Class -> Module
-    EdgeSchema(rel_type="HAS_CLASS"),      # Project|Module|Class -> Class (incl. nested classes)
+    EdgeSchema(rel_type="HAS_TYPE"),       # Project|Module|Class -> Class (incl. nested classes)
     EdgeSchema(rel_type="HAS_FILE"),       # Project -> File
     EdgeSchema(rel_type="HAS_FUNCTION"),   # Project|Module -> Function (top-level defs)
     EdgeSchema(rel_type="HAS_METHOD"),     # Class|Module -> Method
@@ -57,5 +57,5 @@ EDGE_SCHEMAS = [
     EdgeSchema(rel_type="IMPORTS"),   # File -> File (require/require_relative); {resolution, kind, target}
 ]
 
-# Every label that can be an EXTENDS/INCLUDES/HAS_CLASS/HAS_MODULE namespace endpoint.
+# Every label that can be an EXTENDS/INCLUDES/HAS_TYPE/HAS_MODULE namespace endpoint.
 TYPE_LABELS = ("Class", "Module")

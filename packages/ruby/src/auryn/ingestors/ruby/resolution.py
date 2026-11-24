@@ -237,10 +237,10 @@ def _emit_namespace(ns: _NS, project_id: str, by_qualified) -> Iterator[GraphNod
 
     parent = by_qualified.get(ns.parent_qualified) if ns.parent_qualified else None
     if parent is not None:
-        rel = "HAS_CLASS" if ns.label == "Class" else "HAS_MODULE"
+        rel = "HAS_TYPE" if ns.label == "Class" else "HAS_MODULE"
         yield GraphEdge(rel, parent.label, {"id": parent.ns_id}, ns.label, {"id": ns.ns_id})
     else:
-        rel = "HAS_CLASS" if ns.label == "Class" else "HAS_MODULE"
+        rel = "HAS_TYPE" if ns.label == "Class" else "HAS_MODULE"
         yield GraphEdge(rel, "Project", {"id": project_id}, ns.label, {"id": ns.ns_id})
     yield GraphEdge("DEFINED_IN", ns.label, {"id": ns.ns_id}, "File", {"id": ns.file_id})
 

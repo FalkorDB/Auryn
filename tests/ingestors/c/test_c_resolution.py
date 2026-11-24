@@ -65,5 +65,5 @@ def test_doc_property_reaches_nodes():
     })
     assert _by_name(nodes, "Function", "widget_new").properties["doc"] == "widget_new allocates a Widget."
     assert _by_name(nodes, "Struct", "Widget").properties["doc"] == "Widget is a drawable thing."
-    assert _by_name(nodes, "Typedef", "handle_t").properties["doc"] == "handle_t is an opaque handle."
+    assert _by_name(nodes, "TypeAlias", "handle_t").properties["doc"] == "handle_t is an opaque handle."
     assert _by_name(nodes, "Enum", "Color").properties["doc"] == "Color enumerates the palette."

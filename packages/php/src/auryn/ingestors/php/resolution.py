@@ -5,8 +5,8 @@ best-effort call resolution.
 
 Adapted from the Java ingestor's resolution (PHP is its structural sibling: explicit classes/
 interfaces with extends/implements), extended for PHP: the tier is `Namespace` (backslash-
-separated); there is a `Trait` type kind and a `USES_TRAIT` edge; class `Property`/`Constant`
-members and enum `EnumCase`s; and top-level free `Function`s (indexed so a bare `foo()` resolves,
+separated); there is a `Trait` type kind and a `USES_TRAIT` edge; class `Property`/`Const`
+members and enum `EnumMember`s; and top-level free `Function`s (indexed so a bare `foo()` resolves,
 Python/C-style) alongside methods.
 
 Name-based only -- this is the fast tree-sitter engine, so every CALLS edge is stamped
@@ -190,12 +190,12 @@ def _emit_type_and_members(e: _Entry) -> Iterator[GraphNode | GraphEdge]:
         yield from _emit_property(e.type_id, e.kind, p)
     for k in e.raw_type.constants:
         cid = ids.constant_id(e.type_id, k.name)
-        yield GraphNode("Constant", {"id": cid}, {"name": k.name, "value": k.value, "visibility": k.visibility})
-        yield GraphEdge("HAS_CONSTANT", e.kind, {"id": e.type_id}, "Constant", {"id": cid})
+        yield GraphNode("Const", {"id": cid}, {"name": k.name, "value": k.value, "visibility": k.visibility})
+        yield GraphEdge("HAS_CONST", e.kind, {"id": e.type_id}, "Const", {"id": cid})
     for case in e.raw_type.enum_cases:
         caseid = ids.enum_case_id(e.type_id, case.name)
-        yield GraphNode("EnumCase", {"id": caseid}, {"name": case.name, "value": case.value})
-        yield GraphEdge("HAS_ENUM_CASE", "Enum", {"id": e.type_id}, "EnumCase", {"id": caseid})
+        yield GraphNode("EnumMember", {"id": caseid}, {"name": case.name, "value": case.value})
+        yield GraphEdge("HAS_ENUM_MEMBER", "Enum", {"id": e.type_id}, "EnumMember", {"id": caseid})
 
 
 def _method_id(type_id: str, m: RawMethod) -> str:

@@ -51,9 +51,9 @@ def test_module_tier(graph):
 def test_type_kinds_and_members(graph):
     q = _ingest(graph)
     assert q("MATCH (s:Struct {name:'Circle'})-[:HAS_FIELD]->(f) RETURN count(f)")[0][0] == 2
-    assert q("MATCH (t:Trait {name:'Shape'}) RETURN 1") == [[1]]
+    assert q("MATCH (t:Interface {name:'Shape'}) RETURN 1") == [[1]]
     # enum with unit/tuple/struct variants
-    kinds = {r[0] for r in q("MATCH (:Enum {name:'Kind'})-[:HAS_VARIANT]->(v) RETURN v.kind")}
+    kinds = {r[0] for r in q("MATCH (:Enum {name:'Kind'})-[:HAS_ENUM_MEMBER]->(v) RETURN v.kind")}
     assert kinds == {"unit", "tuple", "struct"}
     # associated function (no self) vs method (has self)
     assert q("MATCH (:Struct {name:'Circle'})-[:HAS_METHOD]->(m:Method {name:'new'}) RETURN m.is_associated") == [[True]]
@@ -65,10 +65,10 @@ def test_type_kinds_and_members(graph):
 def test_hierarchy_resolution(graph):
     q = _ingest(graph)
     # impl Trait for Type -> IMPLEMENTS (both a bare and a supertrait'd trait)
-    assert q("MATCH (:Struct {name:'Circle'})-[:IMPLEMENTS]->(t:Trait {name:'Named'}) RETURN 1") == [[1]]
-    assert q("MATCH (:Struct {name:'Circle'})-[:IMPLEMENTS]->(t:Trait {name:'Shape'}) RETURN 1") == [[1]]
+    assert q("MATCH (:Struct {name:'Circle'})-[:IMPLEMENTS]->(t:Interface {name:'Named'}) RETURN 1") == [[1]]
+    assert q("MATCH (:Struct {name:'Circle'})-[:IMPLEMENTS]->(t:Interface {name:'Shape'}) RETURN 1") == [[1]]
     # supertrait bound -> EXTENDS
-    assert q("MATCH (:Trait {name:'Shape'})-[:EXTENDS]->(t:Trait {name:'Named'}) RETURN 1") == [[1]]
+    assert q("MATCH (:Interface {name:'Shape'})-[:EXTENDS]->(t:Interface {name:'Named'}) RETURN 1") == [[1]]
 
 
 def test_call_resolution(graph):
