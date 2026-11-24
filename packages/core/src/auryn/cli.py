@@ -463,6 +463,7 @@ def install(backend, host, port, username, password, ssl, trigger, git_info, yes
     never your repo. Re-runnable."""
     import tomllib
 
+    from auryn.core import watcher
     from auryn.core.app_config import load_config, set_git_info_enabled, set_resync_trigger
     from auryn.core.home import config_path
     from auryn.core.install import default_server_command, do_install
@@ -473,9 +474,11 @@ def install(backend, host, port, username, password, ssl, trigger, git_info, yes
         # install before any agent is registered against it.
         saved = load_config()
     except Exception as e:  # noqa: BLE001 -- invalid TOML, or a section / field of the wrong shape
-        # Only a TOML error's text: it gives a line and column. Others can quote the bad value --
-        # a URL typed as the port, password and all -- and the repr of any holds even more.
-        reason = f"{type(e).__name__}: {e}" if isinstance(e, tomllib.TOMLDecodeError) else type(e).__name__
+        # The type name, and of a TOML error only where it is. Their text can quote the file -- a
+        # URL typed as the port, password and all, or as a table name -- and the repr holds more.
+        reason = type(e).__name__
+        if isinstance(e, tomllib.TOMLDecodeError):  # "... (at line 2, column 23)"
+            reason += f" at {str(e).rpartition(' (at ')[2].removesuffix(')')}"
         raise click.ClickException(
             f"{config_path()} can't be read ({reason}). Fix or remove it, then re-run `auryn install`.") from e
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
@@ -491,6 +494,7 @@ def install(backend, host, port, username, password, ssl, trigger, git_info, yes
     was_git_info_enabled = load_config().git_info_enabled
     config = do_install(chosen)
     set_resync_trigger(trigger)
+    watcher.ensure_watcher()  # `uninstall` stopped it, and kept the save-triggered repos on record
     set_git_info_enabled(git_info == "on")
     if was_git_info_enabled and git_info == "off":
         _purge_git_info_backend()

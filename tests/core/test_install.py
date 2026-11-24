@@ -130,9 +130,11 @@ def test_install_stops_on_an_unreadable_config_before_touching_any_agent(tmp_pat
     with pytest.raises(tomllib.TOMLDecodeError):
         do_install(Backend(mode="local"), adapters=[agent], server_command=["x"])
     # not TOML; TOML, but not a section; not text -- an error whose repr holds the whole file; an
-    # agent name that isn't text (it failed only after registering); a URL in the port's place
+    # agent name that isn't text (it failed only after registering); a URL in the port's place;
+    # one typed as a table name, twice -- the TOML error repeats the name
     for unreadable in (b"[backend\n", b"backend = 1\n", b'[backend]\npassword = "hunter2"\n\xff',
                        b'[[install.agents]]\nname = ["cursor"]\n',
+                       b'["redis://u:hunter2@h"]\n["redis://u:hunter2@h"]\n',
                        b'[backend]\nmode = "remote"\nport = "redis://u:hunter2@h"\n'):
         (home / "config.toml").write_bytes(unreadable)
         result = CliRunner().invoke(cli, ["install", "-y"])
@@ -514,12 +516,30 @@ def test_yes_keeps_the_saved_trigger(tmp_path, monkeypatch):
     monkeypatch.setattr("auryn.cli._purge_git_info_backend", lambda: purged.append(1) or 0)
     save_config(Config(resync_trigger="save", git_info_enabled=True))
 
-    assert CliRunner().invoke(cli, ["install", "-y"]).exit_code == 0
+    # --backend remote: native Windows has no local backend for -y to pick
+    assert CliRunner().invoke(cli, ["install", "-y", "--backend", "remote"]).exit_code == 0
     assert load_config().resync_trigger == "save"
     assert load_config().git_info_enabled and purged == []
 
-    assert CliRunner().invoke(cli, ["install", "-y", "--trigger", "manual"]).exit_code == 0
+    assert CliRunner().invoke(cli, ["install", "-y", "--backend", "remote", "--trigger", "manual"]).exit_code == 0
     assert load_config().resync_trigger == "manual"
+
+
+def test_reinstall_starts_the_watcher_for_the_repos_kept_on_record(tmp_path, monkeypatch):
+    """A plain `uninstall` stops the save watcher but keeps the repos on record. A re-install said
+    "a watcher resyncs on save" and left it stopped: edits went unsynced until the next ingest."""
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    monkeypatch.setattr("auryn.core.install.default_adapters", lambda: [_FakeAgent()])
+    started = []
+    monkeypatch.setattr("auryn.core.watcher.ensure_watcher", lambda: started.append(1) or True)
+    save_config(Config(repos=(RepoRegistration(local_dir="/work/api", graph_name="api"),), resync_trigger="save"))
+
+    assert CliRunner().invoke(cli, ["install", "-y", "--backend", "remote"]).exit_code == 0
+    assert started == [1]
 
 
 # ── File-config agents (Antigravity / Copilot / Cursor / Windsurf) ────────────
