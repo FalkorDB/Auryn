@@ -24,7 +24,7 @@ Extends the C# `.kind.name` convention. Root is `python://{project}`.
 | Class | `{module_id}.class.{name_lower}` |
 | Function (module-level) | `{module_id}.func.{name_lower}({param_names})` |
 | Method (class member) | `{class_id}.method.{name_lower}({param_names})` |
-| Attribute | `{class_id}.attr.{name_lower}` |
+| Field | `{class_id}.attr.{name_lower}` |
 | Parameter | `{owner_id}.param.{position}.{name_lower}` |
 
 ### Id-stability rule
@@ -63,7 +63,7 @@ from lean list results by `serialize_node_lean`).
   `return_type_source`, `is_async`, `is_generator`, `decorators`, `unresolved_calls`,
   `source`. Method also: `kind` (`instance|static|class|property`), `is_abstract`,
   `overrides`.
-- **Attribute** — `name`, `type`, `type_source`, `defined_in` (`class_body` | method name),
+- **Field** — `name`, `type`, `type_source`, `defined_in` (`class_body` | method name),
   `is_classvar`.
 - **Parameter** — `name`, `type`, `type_source`, `kind`, `position`, `has_default`.
 
@@ -72,8 +72,8 @@ flag carries the signal until then.)*
 
 ## Edges
 
-Containment (`HAS_PACKAGE`/`HAS_SUBPACKAGE`/`HAS_MODULE`/`HAS_CLASS`/`HAS_FUNCTION`/
-`HAS_METHOD`/`HAS_ATTRIBUTE`/`HAS_PARAMETER`/`HAS_NESTED_CLASS`) carry no properties.
+Containment (`HAS_PACKAGE`/`HAS_SUBPACKAGE`/`HAS_MODULE`/`HAS_TYPE`/`HAS_FUNCTION`/
+`HAS_METHOD`/`HAS_FIELD`/`HAS_PARAMETER`/`HAS_NESTED_TYPE`) carry no properties.
 
 | Edge | properties |
 |---|---|
@@ -136,8 +136,8 @@ What the **Jedi engine** emits for the interesting slice (backbone elided):
 
 ```
 Class Widget         mro=[app.widget.Widget, app.models.Entity, object]
-Attribute Widget.name   type=str  type_source=inferred
-Attribute Widget.tags   type=list type_source=inferred
+Field Widget.name   type=str  type_source=inferred
+Field Widget.tags   type=list type_source=inferred
 Parameter Widget.__init__.id   type=Unknown type_source=unresolved   # unannotated + no call site in these 3 files
 Parameter render.self          type=Widget  type_source=inferred
 # (in the full sample, app/api.py's `Widget(widget_id, ...)` with `widget_id: int`

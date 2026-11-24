@@ -1,5 +1,5 @@
 """Unit tests for the project-wide Ruby resolution pass (no FalkorDB): RawFile list -> graph
-nodes/edges. Exercises the class/module tier (HAS_CLASS/HAS_MODULE, nested + reopened namespaces),
+nodes/edges. Exercises the class/module tier (HAS_TYPE/HAS_MODULE, nested + reopened namespaces),
 member attachment (HAS_METHOD/HAS_FUNCTION/HAS_FIELD/HAS_CONST/HAS_PARAMETER), the singleton flag,
 EXTENDS (superclass) and INCLUDES (mixin) to project namespaces only, the require graph (IMPORTS),
 name-based CALLS resolution (command/self/super/constant/`.new`, cross-ancestor dispatch, the
@@ -42,11 +42,11 @@ def test_class_module_tier_and_nesting():
     nodes, edges = _resolve({
         "app.rb": "module Outer\n class Inner\n end\n module Deep\n end\nend\nclass Top\nend",
     })
-    has_class = _edges(edges, "HAS_CLASS")
+    has_type = _edges(edges, "HAS_TYPE")
     has_module = _edges(edges, "HAS_MODULE")
-    assert ("~", "class/top") in has_class            # top-level class hangs off Project
+    assert ("~", "class/top") in has_type            # top-level class hangs off Project
     assert ("~", "module/outer") in has_module        # top-level module hangs off Project
-    assert ("module/outer", "class/outer.inner") in has_class    # nested class -> parent module
+    assert ("module/outer", "class/outer.inner") in has_type    # nested class -> parent module
     assert ("module/outer", "module/outer.deep") in has_module   # nested module -> parent module
     classes = _nodes(nodes, "Class")
     assert classes["Inner"].properties["qualified_name"] == "Outer::Inner"

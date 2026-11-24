@@ -49,7 +49,7 @@ _NON_TYPE_TOKENS = frozenset(
 @dataclass
 class _TypeEntry:
     type_id: str
-    kind: str  # "Struct" | "Enum" | "Trait"
+    kind: str  # "Struct" | "Enum" | "Interface"
     name: str
     scope_id: str
     scope_label: str  # "Module" | "Project"
@@ -192,8 +192,8 @@ def callable_locations(raw_files, project_id: str) -> list[CallableLocation]:
                                     raw.line_start, raw.line_end, raw.name,
                                     frozenset(c.name for c in raw.calls), raw.unresolved_macro_calls))
 
-    for e in c.types:  # trait-declared methods bind to the Trait itself (mirror of _resolve)
-        if e.kind != "Trait":
+    for e in c.types:  # trait-declared methods bind to the Interface itself (mirror of _resolve)
+        if e.kind != "Interface":
             continue
         for m in e.raw.trait_methods:
             add(ids.method_id(e.type_id, m.name, [p.type for p in m.parameters]), "Method", e.file_id, m)
@@ -323,9 +323,9 @@ def _resolve(raw_files, project_id: str, seed: "RustGraphIndex | None") -> Itera
     method_index: dict[str, list[tuple[str, str, str]]] = defaultdict(list)  # name -> (owner_id, mid, owner_name)
     function_index: dict[str, list[tuple[str, str]]] = defaultdict(list)  # name -> (func_id, scope_id)
 
-    # trait-declared methods bind to the Trait itself.
+    # trait-declared methods bind to the Interface itself.
     for e in c.types:
-        if e.kind != "Trait":
+        if e.kind != "Interface":
             continue
         for m in e.raw.trait_methods:
             mid = ids.method_id(e.type_id, m.name, [p.type for p in m.parameters])
@@ -389,20 +389,20 @@ def _resolve(raw_files, project_id: str, seed: "RustGraphIndex | None") -> Itera
     for owner, impl, impl_file_id in impl_methods:
         if impl.trait_name:
             trait = _resolve_target(impl.trait_name, type_index)
-            if trait is not None and trait.kind == "Trait" and trait.type_id != owner.type_id:
+            if trait is not None and trait.kind == "Interface" and trait.type_id != owner.type_id:
                 # Stamp the authoring file: `impl Trait for Type` can live in a file that defines NEITHER
                 # the type NOR the trait (Rust's orphan rule allows it anywhere in the crate), and a
                 # methodless impl leaves no method node to attribute it. The incremental read-back uses
                 # `_src_file` to tell whether the emit set re-authors this edge, so it never deletes an
                 # IMPLEMENTS edge whose (unchanged) impl file wasn't re-emitted (see incremental_scoped).
-                yield GraphEdge("IMPLEMENTS", owner.kind, {"id": owner.type_id}, "Trait", {"id": trait.type_id},
+                yield GraphEdge("IMPLEMENTS", owner.kind, {"id": owner.type_id}, "Interface", {"id": trait.type_id},
                                 {"_src_file": impl_file_id})
     for e in c.types:
-        if e.kind == "Trait":
+        if e.kind == "Interface":
             for st in e.raw.supertraits:
                 target = _resolve_target(st, type_index)
-                if target is not None and target.kind == "Trait" and target.type_id != e.type_id:
-                    yield GraphEdge("EXTENDS", "Trait", {"id": e.type_id}, "Trait", {"id": target.type_id})
+                if target is not None and target.kind == "Interface" and target.type_id != e.type_id:
+                    yield GraphEdge("EXTENDS", "Interface", {"id": e.type_id}, "Interface", {"id": target.type_id})
         # struct field type references.
         for f in e.raw.fields:
             fid = ids.field_id(e.type_id, f.name)
@@ -463,7 +463,7 @@ def _emit_type(e: _TypeEntry) -> Iterator[GraphNode | GraphEdge]:
         "line_start": rt.line_start,
         "line_end": rt.line_end,
     }
-    if e.kind == "Trait":
+    if e.kind == "Interface":
         props["supertraits"] = list(rt.supertraits)
     yield GraphNode(e.kind, {"id": e.type_id}, props)
     yield GraphEdge("HAS_TYPE", e.scope_label, {"id": e.scope_id}, e.kind, {"id": e.type_id})
@@ -483,8 +483,8 @@ def _emit_type(e: _TypeEntry) -> Iterator[GraphNode | GraphEdge]:
     elif e.kind == "Enum":
         for v in rt.variants:
             vid = ids.variant_id(e.type_id, v.name)
-            yield GraphNode("EnumVariant", {"id": vid}, {"name": v.name, "kind": v.kind})
-            yield GraphEdge("HAS_VARIANT", "Enum", {"id": e.type_id}, "EnumVariant", {"id": vid})
+            yield GraphNode("EnumMember", {"id": vid}, {"name": v.name, "kind": v.kind})
+            yield GraphEdge("HAS_ENUM_MEMBER", "Enum", {"id": e.type_id}, "EnumMember", {"id": vid})
 
 
 def _emit_callable_node(cal: _Callable, linkage_key: str | None, unresolved_calls: int = 0) -> Iterator[GraphNode | GraphEdge]:
@@ -716,7 +716,7 @@ def _resolve_calls(cal: _Callable, type_fields, type_index, function_index, meth
         owner = type_by_id.get(cal.self_type_id)
         if owner is not None:
             generics |= set(getattr(owner.raw, "type_parameters", ()))
-    in_trait = cal.owner_label == "Trait"  # a trait default method: self dispatches to an unknown impl
+    in_trait = cal.owner_label == "Interface"  # a trait default method: self dispatches to an unknown impl
 
     items: list[GraphNode | GraphEdge] = []
     emitted: set[str] = set()

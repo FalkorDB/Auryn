@@ -7,9 +7,9 @@ Rust is module-based, not class-based, so the model differs from Java/C#: a Carg
 (HAS_MODULE/HAS_SUBMODULE, like the Python ingestor's package tier) instead of a package/namespace.
 The **crate** (one build target) is the scope root -- so a workspace's distinct crates keep
 identically-named items apart -- and callables split into free `Function`s (owned by a Crate/Module
-via HAS_FUNCTION) and `Method`s (bound to a Struct/Enum/Trait via HAS_METHOD -- one per fn in an
+via HAS_FUNCTION) and `Method`s (bound to a Struct/Enum/Interface via HAS_METHOD -- one per fn in an
 `impl`/`trait` block, `is_associated` marking a no-`self` associated function). The key Rust
-semantic edge is IMPLEMENTS (`impl Trait for Type` -> Type IMPLEMENTS Trait); EXTENDS carries
+semantic edge is IMPLEMENTS (`impl Trait for Type` -> Type IMPLEMENTS Interface); EXTENDS carries
 supertrait bounds (`trait Foo: Bar` -> Foo EXTENDS Bar).
 
 Every cross-entity semantic edge carries a `resolution` provenance ("name" = the fast
@@ -38,13 +38,13 @@ NODE_SCHEMAS = [
     NodeSchema(label="File", indexed_properties=("path",)),
     NodeSchema(label="Struct", indexed_properties=("name",)),
     NodeSchema(label="Enum", indexed_properties=("name",)),
-    NodeSchema(label="Trait", indexed_properties=("name",)),
+    NodeSchema(label="Interface", indexed_properties=("name",)),
     NodeSchema(label="Function", indexed_properties=("name", "linkage_key")),  # linkage_key: ADR 0004 cross-repo
     NodeSchema(label="Method", indexed_properties=("name", "linkage_key")),  # linkage_key: ADR 0004 cross-repo
     NodeSchema(label="Field", indexed_properties=("name",)),
     NodeSchema(label="Parameter", indexed_properties=("name",)),
     NodeSchema(label="Const", indexed_properties=("name",)),
-    NodeSchema(label="EnumVariant", indexed_properties=("name",)),
+    NodeSchema(label="EnumMember", indexed_properties=("name",)),
 ]
 
 EDGE_SCHEMAS = [
@@ -55,17 +55,17 @@ EDGE_SCHEMAS = [
     EdgeSchema(rel_type="HAS_MODULE"),     # Crate -> Module (crate-root `mod`)
     EdgeSchema(rel_type="HAS_SUBMODULE"),  # Module -> Module (nested `mod`)
     EdgeSchema(rel_type="HAS_FILE"),       # Project -> File
-    EdgeSchema(rel_type="HAS_TYPE"),       # Module|Crate -> Struct|Enum|Trait
+    EdgeSchema(rel_type="HAS_TYPE"),       # Module|Crate -> Struct|Enum|Interface
     EdgeSchema(rel_type="HAS_FUNCTION"),   # Module|Crate -> Function (free functions)
-    EdgeSchema(rel_type="HAS_METHOD"),     # Struct|Enum|Trait -> Method (impl/trait-block fns)
+    EdgeSchema(rel_type="HAS_METHOD"),     # Struct|Enum|Interface -> Method (impl/trait-block fns)
     EdgeSchema(rel_type="HAS_FIELD"),      # Struct -> Field
-    EdgeSchema(rel_type="HAS_VARIANT"),    # Enum -> EnumVariant
+    EdgeSchema(rel_type="HAS_ENUM_MEMBER"),    # Enum -> EnumMember
     EdgeSchema(rel_type="HAS_PARAMETER"),  # Function|Method -> Parameter
     EdgeSchema(rel_type="HAS_CONST"),      # Module|Crate -> Const (module-level const/static)
-    EdgeSchema(rel_type="DEFINED_IN"),     # Struct|Enum|Trait -> File
+    EdgeSchema(rel_type="DEFINED_IN"),     # Struct|Enum|Interface -> File
     # Semantic layer.
-    EdgeSchema(rel_type="IMPLEMENTS"),  # Struct|Enum -> Trait (impl Trait for Type)
-    EdgeSchema(rel_type="EXTENDS"),     # Trait -> Trait (supertrait bounds)
+    EdgeSchema(rel_type="IMPLEMENTS"),  # Struct|Enum -> Interface (impl Trait for Type)
+    EdgeSchema(rel_type="EXTENDS"),     # Interface -> Interface (supertrait bounds)
     EdgeSchema(rel_type="CALLS"),       # Function|Method -> Function|Method; {resolution}
     # DEPENDS_ON spans two endpoint shapes (both are "A depends on B"): a callable/field -> a type
     # (param/return/field refs, emitted by resolution) AND a Package -> Package crate dependency
@@ -74,4 +74,4 @@ EDGE_SCHEMAS = [
 ]
 
 # Every label that can be an IMPLEMENTS/EXTENDS/HAS_TYPE/DEPENDS_ON type endpoint.
-TYPE_LABELS = ("Struct", "Enum", "Trait")
+TYPE_LABELS = ("Struct", "Enum", "Interface")

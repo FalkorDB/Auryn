@@ -12,7 +12,7 @@ trait-impl method can share a name)."""
 
 from __future__ import annotations
 
-_KIND_SLUG = {"Class": "class", "Struct": "struct", "Enum": "enum", "Protocol": "protocol"}
+_KIND_SLUG = {"Class": "class", "Struct": "struct", "Enum": "enum", "Interface": "protocol"}
 
 
 def project_id(project_name: str) -> str:

@@ -80,7 +80,7 @@ class RawEnumMember:
 
 @dataclass
 class RawType:
-    kind: str  # "Class" | "Struct" | "Enum" | "Protocol"
+    kind: str  # "Class" | "Struct" | "Enum" | "Interface"
     name: str
     accessibility: str = "internal"
     modifiers: list[str] = field(default_factory=list)
@@ -89,8 +89,8 @@ class RawType:
     inherits: list[str] = field(default_factory=list)
     """The comma-separated inheritance clause names, in source order (`class Dog: Animal, Named`
     -> ["Animal", "Named"]). resolution.py splits these into EXTENDS (a resolved project Class,
-    or -- for a protocol -- a resolved project Protocol) vs IMPLEMENTS (a resolved project
-    Protocol on a class/struct/enum), by the resolved target's kind; an enum's raw-value type
+    or -- for a protocol -- a resolved project Interface) vs IMPLEMENTS (a resolved project
+    Interface on a class/struct/enum), by the resolved target's kind; an enum's raw-value type
     (`enum E: String`) also lands here and simply resolves to nothing."""
     methods: list[RawFunction] = field(default_factory=list)  # incl. initializers (kind == "INITIALIZER")
     properties: list[RawProperty] = field(default_factory=list)

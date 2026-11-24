@@ -235,7 +235,7 @@ def test_doc_property_reaches_nodes():
     })
     assert _nodes(nodes, "Struct")["Store"].properties["doc"] == "Store persists widgets."
     assert _nodes(nodes, "Enum")["Status"].properties["doc"] == "Status of a thing."
-    assert _nodes(nodes, "Trait")["Shape"].properties["doc"] == "A drawable shape."
+    assert _nodes(nodes, "Interface")["Shape"].properties["doc"] == "A drawable shape."
     assert _nodes(nodes, "Function")["new_store"].properties["doc"] == "New builds a Store."
     assert _nodes(nodes, "Method")["put"].properties["doc"] == "Put stores a value."
 

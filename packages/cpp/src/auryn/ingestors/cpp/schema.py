@@ -3,7 +3,7 @@ setup_schema()/read_fingerprints() so the delta-sync pipeline (core/graph_sync.p
 and diff this project's C++ subgraph.
 
 C++ is the structural union of the C and Java ingestors, so the schema is too: from Java, a
-namespace tier (`Namespace`, chained by HAS_NAMESPACE/HAS_SUB_NAMESPACE) over types with
+namespace tier (`Namespace`, chained by HAS_NAMESPACE/HAS_SUBNAMESPACE) over types with
 methods/fields and a class hierarchy (EXTENDS); from C, free `Function`s, file-scoped `Macro`s,
 and File->File `INCLUDES`. Language-specific facts are kept as node/edge properties rather than
 new labels: `enum class` sets `is_scoped` on the Enum, a template sets `type_parameters`/
@@ -42,7 +42,7 @@ NODE_SCHEMAS = [
 EDGE_SCHEMAS = [
     # Containment backbone -- pure structure, no properties (as in C#/Java/Python).
     EdgeSchema(rel_type="HAS_NAMESPACE"),      # Project -> Namespace (first segment)
-    EdgeSchema(rel_type="HAS_SUB_NAMESPACE"),  # Namespace -> Namespace
+    EdgeSchema(rel_type="HAS_SUBNAMESPACE"),  # Namespace -> Namespace
     EdgeSchema(rel_type="HAS_FILE"),           # Project -> File
     EdgeSchema(rel_type="HAS_TYPE"),           # Namespace|Project -> Class|Struct|Union|Enum
     EdgeSchema(rel_type="HAS_NESTED_TYPE"),    # type -> type
