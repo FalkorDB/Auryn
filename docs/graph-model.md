@@ -71,8 +71,9 @@ subgraph. IDs start with `github://<owner>/<repo>` and do not depend on the chec
 The current collector writes `GitCheckout` (a local source mapping), `GitRepository`, `GitCommit`,
 `GitUser`, `GitBranch`, `GitTag`, `GitIssue`, `GitPullRequest`, `GitRelease`, `GitCheckSuite`,
 `GitCheckRun`, and `GitHubApp` nodes. A commit links directly to matching code `File` nodes (Python and
-TypeScript: the source file's `Module`) through `CHANGED`; paths without a code `File` do not get a
-synthetic node, while the commit's `changed_files`
+TypeScript: the source file's `Module`) through `CHANGED`; paths without a matching code node (such as
+a Python `__init__.py`, which is a `Package` with no file path) do not get a synthetic node, while the
+commit's `changed_files`
 JSON property preserves their paths and change types (`A`, `M`, or `D`). Renames appear as a deletion
 at the old path and an addition at the new path. Diffs compare against the first parent (root
 commits compare against an empty tree). Check suites and runs come from GitHub's provider-neutral
