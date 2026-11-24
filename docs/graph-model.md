@@ -30,7 +30,7 @@ language-specific labels/edges where its concepts genuinely don't map.
 | **`Method`** | A callable bound to a type (has a receiver/owner). |
 | **`Parameter`** | A parameter of a function/method; carries a **`type`** property. |
 | `Class` / `Interface` / `Struct` / `Enum` / `Union` / `Record` / `TypeAlias` … | Named types (which exist depends on the language). |
-| `Field` / `Property` | Members of a type (`Field` = plain data member; `Property` only where the language has accessor-backed properties — C#/Swift/TS). |
+| `Field` / `Property` | Data members of a type. Languages with a first-class *property* construct (C#/Swift/TS/PHP) label theirs `Property`; the rest use `Field`. A consumer wanting every data member should match both. |
 | `EnumMember` | A member of an enum (every language — never `EnumCase`/`EnumVariant`). |
 | `Const` | A named constant (every language — never `Constant`). |
 
@@ -42,7 +42,8 @@ shared labels/edges and only introduces its own when the concept *genuinely diff
 enforced: enum members are `EnumMember` (not `EnumCase`/`EnumVariant`), a constant is `Const`, a type alias
 is `TypeAlias` (not `Typedef`), a Swift protocol / Rust trait is an `Interface` (those languages have no
 separate interface), a class data member is a `Field` (not `Attribute`), and the container→type edge is
-always `HAS_TYPE` (not `HAS_CLASS`/`HAS_INTERFACE`/`HAS_ENUM`/`HAS_TYPE_ALIAS`). The few distinctions that
+always `HAS_TYPE` (not `HAS_CLASS`/`HAS_INTERFACE`/`HAS_ENUM`/`HAS_TYPE_ALIAS`); a type nested **inside another
+type** uses `HAS_NESTED_TYPE`. The few distinctions that
 *earn* a separate name: **PHP `Trait`/`USES_TRAIT`** (PHP has both traits and interfaces — a `use`d mixin is
 not an `implements`ed contract), and C/C++ **`DEFINES` vs `DECLARES`** (a definition vs a forward
 declaration, load-bearing for incremental resync). A future step folds the remaining type labels
