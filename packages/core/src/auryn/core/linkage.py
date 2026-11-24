@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 
 from auryn.core.graph_client import SHARED_NODE_LABEL, GraphWriter
@@ -49,8 +50,10 @@ class ReconcileStats:
     ambiguous: list[str] = None  # linkages with >1 real definer (surfaced, not merged)
     unresolved: list[str] = None  # placeholder linkages left unresolved that expect a definition
     #                               (origin `external`/unknown, not a terminal builtin/libc)
-    near_misses: list[tuple[str, str]] = None  # (placeholder, nearest_def) differing ONLY by a
-    #                               module prefix -- the package-root / layout-mismatch smoking gun
+    near_misses: list[tuple[str, str]] = None  # (placeholder, a near def) differing ONLY by a module
+    #                               prefix but with 2+ candidate defs -- AMBIGUOUS, left unmerged
+    resolved_near_misses: list[tuple[str, str]] = None  # (placeholder, def) auto-resolved by the
+    #                               suffix match -- a UNIQUE layout-mismatch def, folded in
 
     def __post_init__(self) -> None:
         if self.ambiguous is None:
@@ -59,6 +62,8 @@ class ReconcileStats:
             self.unresolved = []
         if self.near_misses is None:
             self.near_misses = []
+        if self.resolved_near_misses is None:
+            self.resolved_near_misses = []
 
 
 def _present(graph, labels) -> list[str]:
@@ -94,10 +99,13 @@ _TERMINAL_ORIGINS = frozenset({"builtin", "stdlib", "libc", "system"})
 
 
 def _parse_linkage(link: str) -> tuple[str, tuple[str, ...], str] | None:
-    """Best-effort split of an ``extern://<lang>/<qualifier><sep><name>`` linkage key into
-    ``(lang, qualifier_components, name)``. `sep` is ``::`` (python/c++/go/rust/…), ``#`` (java
-    member), or absent (C: a program-global name). Qualifier components are split on ``.``/``/``/
-    ``::`` so the prefix comparison below is language-agnostic. Returns None if it doesn't parse."""
+    """Best-effort split of an ``extern://<lang>/…`` linkage key into ``(lang, qualifier_components, name)``.
+    A *symbol* key separates the qualifier from the name with ``::`` (python/c++/go/rust/…) or ``#`` (java
+    member). A *module/package* key (and a bare C program-global name) has NO separator -- the whole tail is
+    a dotted path; we take its LAST component as the name and the rest as the qualifier, so a module import
+    (`backend.llm_client`) is suffix-comparable to its longer file-path spelling
+    (`plugins.…backend.backend.llm_client`). Qualifier components split on ``.``/``/``/``::`` so the prefix
+    comparison is language-agnostic. Returns None if it doesn't parse."""
     if not link.startswith("extern://"):
         return None
     lang, _, tail = link[len("extern://"):].partition("/")
@@ -106,10 +114,25 @@ def _parse_linkage(link: str) -> tuple[str, tuple[str, ...], str] | None:
     for sep in ("::", "#"):
         if sep in tail:
             qualifier, name = tail.rsplit(sep, 1)
-            break
-    else:
-        qualifier, name = "", tail
-    return lang, tuple(p for p in re.split(r"::|[./]", qualifier) if p), name
+            return lang, tuple(p for p in re.split(r"::|[./]", qualifier) if p), name
+    parts = [p for p in re.split(r"::|[./]", tail) if p]  # no separator: a module/package key or bare name
+    if not parts:
+        return None
+    return lang, tuple(parts[:-1]), parts[-1]
+
+
+# Languages whose module/qualifier linkage key is DERIVED FROM THE FILE PATH, so a wrapper directory or an
+# on-sys.path package root can leak an extra leading component in -- the only place a suffix mismatch is a
+# layout artifact rather than a genuinely different symbol. Java/C#/C++/Go/Rust key on DECLARED package /
+# namespace names (not the path), where `acme.billing.Charger` vs `com.acme.billing.Charger` are different
+# types, so suffix auto-resolution is NOT applied to them. (JS/TS are candidates once validated.)
+_FILE_PATH_KEYED_LANGS = frozenset({"python"})
+
+
+def _is_module_key(link: str) -> bool:
+    """A module/package linkage key (no `::`/`#` separator) rather than a member/symbol key -- so a module
+    IMPORT can only bind to a module definition, never to a same-named function/member (and vice versa)."""
+    return "::" not in link and "#" not in link
 
 
 def _prefix_mismatch(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
@@ -147,7 +170,8 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
     # All candidate nodes per linkage: (id, resolved, defined, origin). Per-label (index seek) and
     # only for labels present in this graph, so a label another language owns costs nothing here.
     by_link: dict[str, list[tuple[str, object, object, object]]] = {}
-    for label in _present(writer, LINKABLE_LABELS):
+    present = _present(writer, LINKABLE_LABELS)
+    for label in present:
         rows = writer.ro_query(
             f"MATCH (n:{label}) WHERE n.linkage_key IN $ls "
             "RETURN n.linkage_key, n.id, n.resolved, n.defined, n.origin",
@@ -177,35 +201,76 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
                 _absorb(writer, absorbable_id=src, canonical_id=target)
                 stats.absorbed += 1
 
-    # Silent-miss diagnostic (the Gap-2 fix): an unresolved reference whose symbol name matches a
-    # real definition emitted in THIS ingest, where the two linkage keys differ ONLY by a leading
-    # module prefix, is almost always a package-root / project-layout bug -- a `src/` or wrapper dir
-    # leaking into the definer's dotted path (see ADR 0004; `ids.dotted_module_path`). The reference
-    # SHOULD have resolved; the exact-string match just missed by a prefix. Surface it, don't merge
-    # (per ADR 0004 decision 6, a loosened match risks false joins -- the fix belongs in the key).
-    # NB: catches a mismatch only when both sides are touched in one ingest (e.g. a whole tree
-    # indexed as one project -- the exact footgun that stalled the audit). A definer ingested in a
-    # *separate* pass from its consumer is a documented follow-up (needs a name-indexed placeholder
-    # seek to stay scan-free), tracked with Gap 1.
+    # Package-root / project-layout resolution: an unresolved reference whose symbol name matches a real
+    # definition whose linkage key differs ONLY by a leading module prefix is a package-root leak -- the
+    # SAME file under two dotted identities (a package root nested under, or on sys.path beside, its longer
+    # file-path spelling, e.g. `backend.llm_client` vs `plugins.com.esl.feltfixinator.backend.backend.
+    # llm_client`). The reference SHOULD have resolved; the exact-string match just missed by the prefix.
+    #
+    # Candidates come from a GRAPH-WIDE, name-indexed seek (not just this ingest's touched linkage keys):
+    # `name` is indexed on every linkable label, so this is scan-free, and it is the only way the uniqueness
+    # gate below is honest -- a definition under an AMBIGUOUS linkage key, or one from a PRIOR ingest, still
+    # counts. Of the same-language, suffix-compatible definitions found:
+    #   - exactly ONE distinct definition -> AUTO-RESOLVE (absorb the placeholder into it). Uniqueness is the
+    #     safety ADR 0004 decision 6 called for -- the false-join risk exists only with 2+ candidates.
+    #   - TWO+ distinct definitions -> a genuine clash; left unresolved + warned, never merged.
     if stats.unresolved:
-        parsed_canon = [(cl, _parse_linkage(cl)) for cl in canonical_links]
-        for ph in stats.unresolved:
-            p = _parse_linkage(ph)
-            if p is None:
+        ph_parsed = [(ph, _parse_linkage(ph)) for ph in stats.unresolved]
+        # Only file-path-keyed languages can have a package-root prefix leak, so seek candidate names for
+        # THOSE placeholders only -- a Java/Go unresolved ref never triggers a (wasted) graph-wide name query.
+        wanted = sorted({p[2] for _, p in ph_parsed if p is not None and p[0] in _FILE_PATH_KEYED_LANGS})
+        cands_by_name: dict[str, list[tuple[str, str]]] = defaultdict(list)  # name -> [(linkage_key, node id)]
+        for label in present if wanted else ():
+            rows = writer.ro_query(
+                f"MATCH (n:{label}) WHERE n.name IN $names AND n.linkage_key IS NOT NULL "
+                "AND coalesce(n.resolved, true) <> false AND coalesce(n.defined, true) <> false "
+                "RETURN n.name, n.linkage_key, n.id",
+                {"names": wanted},
+            ).result_set
+            for nm, link, nid in rows:
+                cands_by_name[str(nm)].append((str(link), str(nid)))
+        still_unresolved: list[str] = []
+        for ph, p in ph_parsed:
+            if p is None or p[0] not in _FILE_PATH_KEYED_LANGS:
+                # Only file-path-derived keys (Python) can suffer a package-root prefix leak; for declared-
+                # name languages (Java/C++/Go/…) a suffix mismatch is a genuinely different symbol -> leave it.
+                still_unresolved.append(ph)
                 continue
-            for cl, c in parsed_canon:
-                if c is not None and p[0] == c[0] and p[2] == c[2] and _prefix_mismatch(p[1], c[1]):
-                    stats.near_misses.append((ph, cl))
-                    break
+            lang, qual, name = p
+            ph_is_module = _is_module_key(ph)
+            matches = [(link, nid) for link, nid in cands_by_name.get(name, [])
+                       if (c := _parse_linkage(link)) is not None and c[0] == lang
+                       and _is_module_key(link) == ph_is_module  # module<->module / symbol<->symbol only
+                       and _prefix_mismatch(qual, c[1])]
+            targets = {nid for _, nid in matches}  # distinct definition NODES (an ambiguous key yields 2+)
+            if len(targets) == 1:
+                target = next(iter(targets))
+                for src, resolved, defined, _ in by_link.get(ph, []):
+                    if (resolved is False or defined is False) and src != target:
+                        _absorb(writer, absorbable_id=src, canonical_id=target)
+                        stats.absorbed += 1
+                stats.resolved_near_misses.append((ph, matches[0][0]))
+            elif targets:
+                stats.near_misses.append((ph, matches[0][0]))  # 2+ distinct defs -> ambiguous, don't merge
+                still_unresolved.append(ph)
+            else:
+                still_unresolved.append(ph)
+        stats.unresolved = still_unresolved
 
     if stats.ambiguous:
         logger.warning("cross-repo linkage(s) with >1 definition, left unmerged: %s", sorted(set(stats.ambiguous)))
+    if stats.resolved_near_misses:
+        logger.info(
+            "cross-repo: auto-resolved %d reference(s) to a definition that differed only by a module "
+            "prefix (package-root / project-layout mismatch, unique match): %s",
+            len(stats.resolved_near_misses),
+            [f"{ph}  ->  {cl}" for ph, cl in stats.resolved_near_misses],
+        )
     if stats.near_misses:
         logger.warning(
-            "cross-repo resolution MISS: %d reference(s) matched a definition that differs ONLY by a "
-            "module prefix -- likely a package-root / project-layout mismatch (the defining repo's "
-            "dotted path has an extra leading dir, e.g. a `src/`- or hyphen-wrapped root). These did "
-            "NOT resolve and left a dangling `resolved:false` placeholder: %s",
+            "cross-repo resolution MISS: %d reference(s) matched MORE THAN ONE definition differing only "
+            "by a module prefix -- an ambiguous package-root / project-layout mismatch, left unmerged to "
+            "avoid a false join (a `resolved:false` placeholder remains): %s",
             len(stats.near_misses),
             [f"{ph}  ~  {cl}" for ph, cl in stats.near_misses],
         )
@@ -214,7 +279,7 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
             "cross-repo: %d external reference(s) unresolved after reconciliation (no definition in "
             "graph yet)%s",
             len(stats.unresolved),
-            f"; {len(stats.near_misses)} look like a layout mismatch (see warning above)"
+            f"; {len(stats.near_misses)} look like an ambiguous layout mismatch (see warning above)"
             if stats.near_misses else "",
         )
     return stats
