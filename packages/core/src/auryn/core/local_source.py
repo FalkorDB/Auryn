@@ -227,9 +227,10 @@ class WorkingTreeSource(LocalDirectorySource):
         """{modified, added, deleted, renamed} of `suffix` files that differ between
         `base_commit` and the working tree right now. Raises git.GitCommandError if
         `base_commit` is unreachable -- the caller treats that as "fall back to full resync"."""
-        from auryn.core.git_source import parse_name_status
+        from auryn.core.git_source import parse_name_status, refuse_option_like
 
         repo = self._repo()
+        refuse_option_like(base_commit)  # read back from the graph: never let it run as an option
         changes = parse_name_status(repo.git.diff("-M", "--name-status", base_commit), suffix)
         for rel in repo.git.ls_files("--others", "--exclude-standard").splitlines():
             if rel.endswith(suffix):

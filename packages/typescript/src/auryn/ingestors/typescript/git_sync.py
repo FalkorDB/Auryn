@@ -32,11 +32,13 @@ from auryn.ingestors.typescript.plugin import FILE_SUFFIXES as _FILE_SUFFIXES
 from auryn.ingestors.typescript.raw_model import RawFile
 from auryn.ingestors.typescript.schema import NODE_SCHEMAS
 
-_PARSE_CACHE_VERSION = 3
+_PARSE_CACHE_VERSION = 4
 """Bump if RawFile's shape (or what parse_source extracts) changes. Part of the cache dir
 name, so a bump starts a fresh cache rather than unpickling a stale shape. v2: callable/type
 dataclasses gained the shared `doc` property (leading comment). v3: RawCall gained `line` (the
-callee-identifier line) for the deep pass's line-precise call-site gate."""
+callee-identifier line) for the deep pass's line-precise call-site gate. v4: RawCall gained `col`
+(UTF-16 callee column) for the COLUMN-precise gate -- a v3 pickle would deserialize `col` absent
+and silently gate out every nonzero-column call, so reparse is mandatory."""
 
 logger = logging.getLogger(__name__)
 

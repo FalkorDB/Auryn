@@ -26,6 +26,7 @@ Every node type / field name below was confirmed empirically against tree-sitter
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from pathlib import Path
 
 from auryn.core.docstrings import leading_comment
@@ -87,6 +88,8 @@ def parse_file(path: str) -> RawFile:
 
 def parse_source(source: bytes, path_label: str) -> RawFile:
     tree = new_parser(path_label).parse(source)
+    source_is_ascii = source.isascii()  # when True, a byte column == its UTF-16 column (callee-column fast path)
+    u16_cache: dict[int, tuple[list[int], list[int]]] = {}  # line-start byte -> (non-ASCII boundaries, deltas)
     rf = RawFile(
         path=path_label,
         dialect=dialect_for(path_label),
@@ -234,17 +237,57 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             return (txt(prop) if prop is not None else None), recv
         return None, None
 
-    def _callee_line(fn) -> int:
-        """1-based line of the callee *identifier* -- what SCIP anchors a call occurrence to. For
-        `obj.method()` that's the `method` property's line (which can differ from the call expression's
-        first line in a multi-line `obj\n  .method()`), so the deep pass's line-precise gate matches."""
+    def _callee_node(fn):
+        """The callee IDENTIFIER node SCIP anchors a call occurrence to: the `method` property of an
+        `obj.method()`, else the callee itself (a bare `foo()` / `alias()`)."""
         if fn is not None and fn.type == "member_expression":
             prop = field(fn, "property")
             if prop is not None:
-                return prop.start_point[0] + 1
-        if fn is not None:
-            return fn.start_point[0] + 1
-        return 0
+                return prop
+        return fn
+
+    def _callee_line(fn) -> int:
+        """1-based line of the callee identifier -- for a multi-line `obj\n  .method()` that's the `method`
+        line, so the deep pass's line-precise gate matches SCIP's occurrence line."""
+        node = _callee_node(fn)
+        return node.start_point[0] + 1 if node is not None else 0
+
+    def _callee_col(fn) -> int:
+        """0-based UTF-16 column of the callee identifier. scip-typescript emits occurrence columns in UTF-16
+        code units (the TS/JS string unit), so the deep pass records call-site columns in the SAME encoding to
+        compare directly against `Occurrence.start_char` (no conversion in the resolver). tree-sitter reports a
+        BYTE column; for an all-ASCII file (the common case, incl. minified JS) that already IS the UTF-16
+        column. Only a file containing non-ASCII pays a conversion, and that is cached PER LINE (storing just
+        the non-ASCII boundaries), so many calls on one long minified line stay linear instead of each
+        rescanning its prefix."""
+        node = _callee_node(fn)
+        if node is None:
+            return 0
+        byte_col = node.start_point[1]
+        if byte_col == 0 or source_is_ascii:
+            return byte_col  # all-ASCII file: byte column == UTF-16 column
+        line_start = node.start_byte - byte_col
+        entry = u16_cache.get(line_start)
+        if entry is None:
+            # Build once per line: (byte offset after each non-ASCII char, cumulative utf8-bytes-minus-utf16-
+            # units delta). Then utf16_col(b) = b - delta_before(b) via bisect -- O(log k), k = non-ASCII chars.
+            line_end = source.find(b"\n", line_start)
+            line = source[line_start : len(source) if line_end == -1 else line_end].decode("utf-8", "replace")
+            bounds: list[int] = []
+            cum: list[int] = []
+            b = delta = 0
+            for ch in line:
+                blen = len(ch.encode("utf-8"))
+                if blen > 1:  # non-ASCII: 1 UTF-16 unit (BMP) or 2 (astral); ASCII (blen 1) adds no delta
+                    delta += blen - (2 if ord(ch) > 0xFFFF else 1)
+                    bounds.append(b + blen)
+                    cum.append(delta)
+                b += blen
+            entry = (bounds, cum)
+            u16_cache[line_start] = entry
+        bounds, cum = entry
+        i = bisect_right(bounds, byte_col)
+        return byte_col - (cum[i - 1] if i else 0)
 
     def _route_text(node) -> str:
         """URL text of a string / template-string arg, with `${...}` interpolations rendered as
@@ -331,17 +374,18 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                 nm, recv = _callee(callee)
                 if nm:
                     line = _callee_line(callee)
-                    # Dedup by line too: the deep pass's line-precise gate needs EVERY call site's line, so
-                    # `x.run()` on two lines must keep both (a name-only key would drop the second). Same
-                    # (name, receiver, kind) on the SAME line is still one call.
-                    key = (nm, recv, is_new, line)
+                    col = _callee_col(callee)
+                    # Dedup by (line, col) too: the deep pass's call-site gate needs EVERY site's position, so
+                    # `x.run()` on two lines -- or two same-name calls on ONE line (`a.run(); b.run()`) -- must
+                    # each be kept (a name-only key would drop the second). Same position is still one call.
+                    key = (nm, recv, is_new, line, col)
                     if key not in seen:
                         seen.add(key)
                         http_url = http_method = None
                         if not is_new and _is_http_idiom(nm, recv, http_client_vars):  # gate the arg walk (perf)
                             http_url, http_method = _http_request(n, nm)
                         out.append(RawCall(name=nm, receiver=recv, is_new=is_new, http_url=http_url,
-                                           http_method=http_method, line=line))
+                                           http_method=http_method, line=line, col=col))
             stack.extend(n.children)
         return out
 
