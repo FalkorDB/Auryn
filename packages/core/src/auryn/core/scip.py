@@ -51,6 +51,8 @@ class Occurrence:
 class Document:
     relative_path: str
     occurrences: tuple[Occurrence, ...]
+    language: str = ""  # Document.language(4): the indexer's language name ("TypeScript", "go", "CPP", ...),
+    # casing varies by indexer; "" when the index omits it. Used by the generic importer to tag File nodes.
 
 
 def _read_varint(data: bytes, i: int) -> tuple[int, int]:
@@ -144,6 +146,7 @@ def _parse_occurrence(data: bytes) -> Occurrence | None:
 
 def _parse_document(data: bytes) -> Document:
     relative_path = ""
+    language = ""
     occurrences: list[Occurrence] = []
     for field_num, wire, value in _fields(data):
         if field_num == 1 and wire == _WIRE_LEN:  # relative_path
@@ -152,7 +155,9 @@ def _parse_document(data: bytes) -> Document:
             occ = _parse_occurrence(value)
             if occ is not None:
                 occurrences.append(occ)
-    return Document(relative_path=relative_path, occurrences=tuple(occurrences))
+        elif field_num == 4 and wire == _WIRE_LEN:  # language
+            language = value.decode("utf-8", "replace")
+    return Document(relative_path=relative_path, occurrences=tuple(occurrences), language=language)
 
 
 def parse_index(data: bytes) -> list[Document]:
