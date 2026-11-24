@@ -233,6 +233,21 @@ def test_install_takes_an_older_versions_block_out_of_a_hook_it_now_skips(tmp_pa
     assert not (husky / "post-merge").exists()
 
 
+def test_uninstall_keeps_a_symlinked_hook_and_cleans_its_target(tmp_path):
+    """An earlier version wrote the block through `.git/hooks/post-commit -> ../../scripts/post-commit`.
+    With only a shebang left once the block is out, uninstall deleted the user's link and left the
+    block in the tracked script. The link stays, and the script gets its shebang back."""
+    repo = _init_repo(tmp_path / "r")
+    tracked = repo / "scripts" / "post-commit"
+    tracked.parent.mkdir()
+    tracked.write_text("#!/bin/sh\n# >>> auryn resync >>>\n(true >/dev/null 2>&1 &)\n# <<< auryn resync <<<\n")
+    (hooks.hooks_dir(repo) / "post-commit").symlink_to(tracked)
+
+    hooks.uninstall(repo)
+    assert (hooks.hooks_dir(repo) / "post-commit").is_symlink()
+    assert tracked.read_text() == "#!/bin/sh\n"
+
+
 def test_install_never_writes_through_a_symlinked_hook(tmp_path):
     """`.git/hooks/post-commit -> ../../scripts/post-commit` (a tracked script linked into place):
     writing the block there edits the tracked file through the link. A symlinked hook is left

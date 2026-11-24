@@ -204,7 +204,7 @@ def uninstall(local_dir) -> None:
             if stripped == text:  # no whole block to take out
                 continue
             try:
-                if stripped.strip() in _BARE:
+                if stripped.strip() in _BARE and not path.is_symlink():  # a link: clean its target, keep it
                     path.unlink()
                 else:
                     path.write_text(stripped, newline="")
