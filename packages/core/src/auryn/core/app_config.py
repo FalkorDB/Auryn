@@ -121,7 +121,7 @@ def load_config() -> Config:
             disabled_hooks=tuple(r.get("disabled_hooks", [])),
         )
         for r in data.get("repo", [])
-        if r.get("local_dir")
+        if r.get("local_dir") and isinstance(r["local_dir"], str)  # a folder: `local_dir = 123` names none
     )
     disabled_hooks = tuple(data.get("hooks", {}).get("disabled", []))
     embed_mode = str(data.get("embeddings", {}).get("mode", "background")).strip().lower()

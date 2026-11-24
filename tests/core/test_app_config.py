@@ -166,3 +166,16 @@ def test_git_info_enabled_requires_a_real_toml_boolean(tmp_path, monkeypatch):
     # Only a real TOML boolean `true` enables the feature.
     (home / "config.toml").write_text("[git_info]\nenabled = true\n")
     assert load_config().git_info_enabled is True
+
+
+def test_a_repo_whose_local_dir_is_not_text_is_left_out(tmp_path, monkeypatch):
+    """`local_dir = 123` names no folder: `Path()` raised TypeError in the save watcher (and in
+    `install`, which starts it). It is left out, like a repo with no `local_dir` at all."""
+    from auryn.core.app_config import load_config
+    home = tmp_path / "cg"
+    home.mkdir()
+    monkeypatch.setenv("AURYN_HOME", str(home))
+
+    (home / "config.toml").write_text('[[repo]]\nlocal_dir = 123\ntrigger = "save"\n\n'
+                                      '[[repo]]\nlocal_dir = "/work/api"\n')
+    assert [r.local_dir for r in load_config().repos] == ["/work/api"]
