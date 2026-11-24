@@ -1,0 +1,4 @@
+# A base kustomization the prod overlay layers on (DEPENDS_ON).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: shop

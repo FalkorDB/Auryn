@@ -1,0 +1,150 @@
+"""Container image-reference normalization -- the single most important consistency point of the
+deployment tier (ADR 0007 §2). A Dockerfile `FROM python:3.12-slim`, a Compose `image:
+python:3.12-slim`, and a k8s `image: python:3.12-slim` must all produce the SAME `Image` id, so the
+image is the one hub node a build (`BUILDS_IMAGE`) and a run (`RUNS_IMAGE`) converge on across repos.
+This is the ONE place normalization lives -- every IaC producer imports it (ADR 0007 §7), never
+re-implements it, so their `image://` ids are guaranteed identical.
+
+Docker reference grammar (the subset we normalize):
+
+    [registry[:port]/]repository[:tag][@digest]
+
+Rules (Docker's own defaults):
+- default registry `docker.io`; a single-component official repo gets the `library/` namespace
+  (`nginx` -> `docker.io/library/nginx`); Docker Hub's legacy hosts (`index.docker.io`, ...) fold
+  onto `docker.io`;
+- default tag `latest` when neither a tag nor a digest is given;
+- registry host + repository are lowercased (case-insensitive); the TAG is case-sensitive;
+- a digest, when present, is the stronger identity and wins over any tag in the id;
+- an UNRESOLVED ref (an unexpanded `${VAR}`/`$VAR`) is keyed by its RAW text -- normalizing it would
+  false-merge distinct refs that expand to different repos.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from auryn.core.graph_model import GraphNode
+
+__all__ = [
+    "DEFAULT_REGISTRY", "DEFAULT_TAG", "OFFICIAL_NAMESPACE", "SCRATCH",
+    "ImageRef", "parse_image_ref", "normalize_image_ref", "image_id", "image_node",
+]
+
+DEFAULT_REGISTRY = "docker.io"
+DEFAULT_TAG = "latest"
+OFFICIAL_NAMESPACE = "library"
+
+# Docker Hub answers under several host spellings; all fold onto DEFAULT_REGISTRY so the same image
+# written as `index.docker.io/x` or `docker.io/x` keys ONE Image node.
+_DOCKER_HUB_HOSTS = frozenset({"docker.io", "index.docker.io", "registry-1.docker.io"})
+
+# `FROM scratch` is the explicit empty base -- not a real image, so it never becomes an Image node.
+SCRATCH = "scratch"
+
+
+@dataclass(frozen=True)
+class ImageRef:
+    registry: str
+    repository: str
+    tag: str | None
+    digest: str | None
+    raw: str
+    # True when the ref contained an unexpanded build-arg/variable (`${BASE}`/`$TAG`) we couldn't
+    # statically resolve -- the Image is emitted `resolved:false` with `raw` kept so a later pass
+    # (a Compose/CI var substitution) can heal it. (ADR 0007 §2.)
+    unresolved: bool
+
+    @property
+    def normalized(self) -> str:
+        # An unexpanded `${VAR}`/`$VAR` ref: its RAW text is its identity. Applying registry/`library`/
+        # tag defaults would collapse distinct refs (`$BASE` vs `docker.io/library/$BASE`, which expand
+        # to different repos) onto one id. Keep it verbatim so nothing false-merges and the placeholder
+        # round-trips to the text a later substitution expands.
+        if self.unresolved:
+            return self.raw
+        base = f"{self.registry}/{self.repository}"
+        if self.digest:
+            return f"{base}@{self.digest}"
+        return f"{base}:{self.tag or DEFAULT_TAG}"
+
+
+def _looks_like_registry(component: str) -> bool:
+    """The first slash-separated component is a registry host (not a repo namespace) iff it carries a
+    `.`/`:` or is `localhost` -- Docker's own heuristic (`docker.io`, `ghcr.io`, `localhost:5000`)."""
+    return "." in component or ":" in component or component == "localhost"
+
+
+def parse_image_ref(ref: str) -> ImageRef:
+    raw = ref.strip()
+    unresolved = "$" in raw  # an unexpanded ${VAR}/$VAR -- best-effort normalize, flag for healing
+
+    body, _, digest = raw.partition("@")
+    digest = digest or None
+
+    first, slash, rest = body.partition("/")
+    if slash and _looks_like_registry(first):
+        # Lowercase the host (registries are case-insensitive) so the DEFAULT_REGISTRY comparison below
+        # is reliable -- `DOCKER.IO/nginx` must key the same node as `docker.io/nginx` (and get the
+        # `library/` namespace) -- and fold Docker Hub's legacy hosts onto docker.io. But an UNRESOLVED
+        # ref keeps the host verbatim so a variable in it (`${REG:-ghcr.io}/...`) isn't mangled.
+        host = first if unresolved else first.lower()
+        registry = DEFAULT_REGISTRY if host in _DOCKER_HUB_HOSTS else host
+        remainder = rest
+    else:
+        registry, remainder = DEFAULT_REGISTRY, body
+
+    # The tag is a `:` in the LAST path segment only (so a `registry:port/...` host is never mistaken
+    # for a tag, and a `@digest` already stripped above can't interfere).
+    tag: str | None = None
+    last_sep = remainder.rfind("/")
+    seg = remainder[last_sep + 1 :]
+    if ":" in seg:
+        repo_tail, tag = seg.rsplit(":", 1)
+        remainder = remainder[: last_sep + 1] + repo_tail
+
+    repository = remainder
+    if registry == DEFAULT_REGISTRY and "/" not in repository:
+        repository = f"{OFFICIAL_NAMESPACE}/{repository}"
+
+    if digest is None and tag is None:
+        tag = DEFAULT_TAG
+
+    return ImageRef(
+        # Case-folded when resolved (registries are case-insensitive); kept verbatim when unresolved so
+        # a `${REG:-ghcr.io}` host / `${BASE_IMAGE}` repo variable isn't mangled.
+        registry=registry if unresolved else registry.lower(),
+        repository=repository if unresolved else repository.lower(),
+        tag=tag,  # case-sensitive -- NOT lowered
+        digest=digest,
+        raw=raw,
+        unresolved=unresolved,
+    )
+
+
+def normalize_image_ref(ref: str) -> str:
+    """`nginx` -> `docker.io/library/nginx:latest`; `ghcr.io/acme/api:1.2` -> unchanged (lowered)."""
+    return parse_image_ref(ref).normalized
+
+
+def image_id(ref: str) -> str:
+    """The graph id of an Image node: `image://<normalized-ref>` (ADR 0007 §2). Project-independent
+    on purpose -- it is the key two repos / two ingestors agree on without coordination."""
+    return f"image://{normalize_image_ref(ref)}"
+
+
+def image_node(ref: str) -> GraphNode:
+    """The shared `Image` hub node every deployment-tier producer (docker/compose/k8s/terraform)
+    emits for a base/run/published image reference -- so the node SHAPE is identical and can't drift.
+    Emitted `resolved:false`/`origin:registry`; a deploy arm flips it once a `BUILDS_IMAGE` proves it
+    internal. An unresolved `${VAR}` ref keeps its raw text (see `normalized`)."""
+    r = parse_image_ref(ref)
+    return GraphNode(
+        "Image",
+        {"id": image_id(ref)},
+        {
+            "ref": r.normalized, "registry": r.registry, "repository": r.repository,
+            "tag": r.tag, "digest": r.digest, "resolved": False, "origin": "registry",
+            **({"raw": r.raw} if r.unresolved else {}),
+        },
+    )

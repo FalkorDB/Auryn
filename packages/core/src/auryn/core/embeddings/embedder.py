@@ -27,38 +27,61 @@ DEFAULT_LOCAL_DIM = 768
 
 
 def embeddings_enabled(explicit: bool | None = None) -> bool:
-    """Whether the ingest pipeline should build embeddings automatically after a sync. **Opt-in**
-    (default off) -- unlike auto-install, because embeddings are a heavier, deliberately-enabled
-    feature (a model, real compute). Resolved in precedence order:
+    """Whether the ingest pipeline builds embeddings after a sync. **On by default.** Embeddings are
+    built by a detached background daemon, off the ingest critical path (see embeddings.daemon), so
+    they no longer slow a sync down -- there's no reason to make it an opt-in choice, and no install
+    prompt for it. Resolved in precedence order:
 
     1. `explicit` -- an in-code override (wins over everything).
-    2. `AURYN_EMBED` env var, when set to a non-empty value -- a per-run override
-       (1/true/yes/on -> on; anything else, e.g. 0 -> off).
-    3. the durable install setting in ~/.auryn/config.toml (`[embeddings] auto`), set by
-       `auryn install --embed` / `auryn embed --auto`. This is the non-fragile path: it survives
-       shells, venvs, and MCP-server restarts, so "flip it on once and every future ingest keeps
-       the vector index fresh" doesn't depend on an exported env var being present.
-    4. default: off (embeddings build only when you run `auryn embed` by hand).
+    2. `AURYN_EMBED` env var, when set to a non-empty value -- a low-level escape hatch
+       (1/true/yes/on -> on; anything else, e.g. 0 -> off). Set `AURYN_EMBED=0` to turn the
+       post-ingest embed off offline, in CI, or on a minimal install that can't fetch the model.
+    3. default: on.
     """
     if explicit is not None:
         return explicit
     raw = os.environ.get("AURYN_EMBED")
     if raw is not None and raw.strip() != "":
         return raw.strip().lower() in ("1", "true", "yes", "on")
-    # No env override -> the persistent install setting. Lazy import keeps the hot path clean and
-    # avoids any import cycle (app_config -> home only); a missing/unreadable config -> off.
-    try:
-        from auryn.core.app_config import load_config
-
-        return bool(load_config().auto_embed)
-    except Exception:
-        return False
+    return True
 
 
 def configured_model() -> str | None:
     """An embedding-model override from the environment (AURYN_EMBED_MODEL), or None for the
     default local model. Kept here so the CLI and the auto-embed hook agree on the source."""
     return os.environ.get("AURYN_EMBED_MODEL", "").strip() or None
+
+
+EMBED_MODES = ("inline", "background", "off")
+
+DEFAULT_EMBED_MODE = "background"
+"""How the post-ingest embed pass runs when auto-embed is on. **background** by default: the
+heavy ONNX compute is handed to a detached, single-flight daemon so the graph is returned (and is
+queryable) the moment it's built, instead of the ingest call blocking on every vector. ``inline``
+restores the old synchronous behaviour (used by the serverless/quickstart and explicit-``--host``
+paths, whose ad-hoc connection a separate daemon couldn't reach); ``off`` skips embedding."""
+
+
+def embed_mode(explicit: str | None = None) -> str:
+    """Resolve how auto-embed runs, in the same precedence shape as `embeddings_enabled`:
+    an in-code `explicit` override, then `AURYN_EMBED_MODE`, then the durable `[embeddings] mode`
+    install setting, then `DEFAULT_EMBED_MODE`. An unrecognised value falls back to the default
+    rather than raising -- a stray env/config typo must never break an ingest."""
+    for candidate in (explicit, os.environ.get("AURYN_EMBED_MODE")):
+        if candidate and candidate.strip().lower() in EMBED_MODES:
+            return candidate.strip().lower()
+        if candidate and candidate.strip():
+            # A set-but-invalid value: ignore it (fall through to the next source), but don't crash.
+            continue
+    try:
+        from auryn.core.app_config import load_config
+
+        configured = (load_config().embed_mode or "").strip().lower()
+        if configured in EMBED_MODES:
+            return configured
+    except Exception:
+        pass
+    return DEFAULT_EMBED_MODE
 
 # Embedding dimension for the models we support out of the box, so callers can size the vector
 # index without importing (and downloading) the model just to ask. fastembed reports the true dim

@@ -1,0 +1,28 @@
+[project]
+name = "auryn-terraform"
+version = "0.1.0"
+description = "Terraform/OpenTofu plugin for Auryn and the cloud-topology producer of the deployment & infrastructure tier (ADR 0007). Parses HCL (.tf) into Resource nodes (resource/module/data) and DEPENDS_ON edges from interpolation refs, plus the seams: a container image RUNS_IMAGE the shared Image hub, rds -> Database, aws_ecr_repository -> Registry (PROVISIONS). A deploy-terraform enrichment runs the shared image lifecycle. Composes with docker/compose/k8s onto the same hub. Depends on auryn-core + python-hcl2."
+readme = "README.md"
+authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "auryn-core",
+    "python-hcl2>=4.3",
+]
+
+[project.entry-points."auryn.languages"]
+terraform = "auryn.ingestors.terraform.plugin"
+
+[project.entry-points."auryn.enrichments"]
+deploy-terraform = "auryn.ingestors.terraform.enrichment"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auryn"]
+
+[tool.uv.sources]
+auryn-core = { workspace = true }

@@ -27,6 +27,9 @@ subgraph never aborts the whole source.
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterable
@@ -54,17 +57,20 @@ logger = logging.getLogger("auryn.ingest")
 # consumes, so the shared core below is duck-typed over the two.
 Source = GitRepoCache | LocalDirectorySource
 
-# How the *deep* phase of a two-phase (dynamic) language runs, once the fast phase has made
-# the graph queryable. A language declares it's two-phase by registering a GitLanguage with a
-# `deep_sync` (see core/registry.py); today only Python does (fast=stdlib-ast, deep=Jedi).
-#   "inline"     -- run the deep upgrade synchronously before returning (default: the graph
-#                   is fully deep when the call completes; preserves pre-two-phase behavior).
-#   "background" -- return as soon as the fast graph is written and upgrade it in a daemon
-#                   thread on a sibling writer. For a long-lived process (the MCP server) an
-#                   agent can start querying the shallow graph immediately. A one-shot CLI
-#                   would exit before it finishes, so CLI stays on "inline".
+# How the *deep* phase of a two-phase (dynamic) language runs, once the fast phase has made the
+# graph queryable. A language declares it's two-phase by registering a GitLanguage with a `deep_sync`
+# (see core/registry.py): Python (ast->Jedi), C# (tree-sitter->Roslyn), Rust (tree-sitter->SCIP).
+#   "async"      -- DEFAULT. Return as soon as the fast graph is written and deepen it in a DETACHED
+#                   daemon (core/deepen) that survives this process exiting -- so the graph is
+#                   queryable at fast-pass speed and deepens in the background even from a one-shot
+#                   CLI. Falls back to "inline" when there's no re-ingestable local dir (remote-URI
+#                   ingest) or the backend is an in-process embedded DB a daemon can't reach.
+#   "inline"     -- run the deep upgrade synchronously before returning (the graph is fully deep when
+#                   the call completes; for CI/batch that must not query until resolution is done).
+#   "background" -- deepen in a daemon THREAD on a sibling writer -- long-lived processes only (a
+#                   one-shot CLI would kill the thread; prefer "async").
 #   "off"        -- fast phase only; leave the graph shallow.
-DEEP_MODES = ("inline", "background", "off")
+DEEP_MODES = ("inline", "background", "async", "off")
 
 # Background deep passes started by this process (daemon threads). join_deep_phase() awaits
 # them -- optional for a server, used by tests and any caller that must not exit early.
@@ -209,7 +215,8 @@ def ingest_repository(
     solution_name: str | None = None,
     cache_root: Path | None = None,
     auto_install: bool | None = None,
-    deep: str = "inline",
+    deep: str = "async",
+    embed: str | None = None,
     include_dirs: tuple[str, ...] = (),
     exclude_dirs: tuple[str, ...] = (),
     include_suffixes: tuple[str, ...] = (),
@@ -221,9 +228,12 @@ def ingest_repository(
     or any URI git understands) into `writer`'s graph, moving each language's
     subgraph to `ref` (default: the repo's default branch). `project_name` defaults
     to the repo's own name. `deep` controls two-phase languages' deep upgrade
-    ("inline"|"background"|"off"; see DEEP_MODES). The include_/exclude_ dir and suffix
-    lists are an optional allow/deny filter (see core/source_filter.SourceFilter). See the
-    module docstring for logging/error behavior."""
+    ("inline"|"background"|"off"; see DEEP_MODES). `embed` overrides how the post-ingest
+    embedding pass runs ("inline"|"background"|"off"; None -> resolve from env/config, default
+    background -- see embeddings.embedder.embed_mode); callers on an ad-hoc connection a separate
+    process couldn't reach (serverless/quickstart, explicit --host) must pass "inline". The
+    include_/exclude_ dir and suffix lists are an optional allow/deny filter (see
+    core/source_filter.SourceFilter). See the module docstring for logging/error behavior."""
     started = time.monotonic()
     project_name = project_name or _derive_project_name(repo_uri)
     logger.info("Ingesting repository %s (ref=%s) as project %r", repo_uri, ref or "<default>", project_name)
@@ -246,6 +256,10 @@ def ingest_repository(
         started=started,
         auto_install=auto_install,
         deep=deep,
+        # A git repo is pinned to `ref` (a bare-clone cache, not the working tree); the daemon's
+        # working-tree replay would index HEAD + uncommitted changes instead, so never async here.
+        async_eligible=False,
+        embed=embed,
         enrichment_only=enrichment_only,
         enrichment_skip=enrichment_skip,
     )
@@ -259,7 +273,8 @@ def ingest_directory(
     solution_name: str | None = None,
     cache_root: Path | None = None,
     auto_install: bool | None = None,
-    deep: str = "inline",
+    deep: str = "async",
+    embed: str | None = None,
     include_dirs: tuple[str, ...] = (),
     exclude_dirs: tuple[str, ...] = (),
     include_suffixes: tuple[str, ...] = (),
@@ -312,6 +327,10 @@ def ingest_directory(
         started=started,
         auto_install=auto_install,
         deep=deep,
+        # async's daemon replays `ingest_directory(local_dir, deep="inline")` with DEFAULT filters and
+        # no solution wrapper -- so it faithfully reproduces this ingest only when those are default.
+        async_eligible=file_filter.is_empty() and not solution_name,
+        embed=embed,
         enrichment_only=enrichment_only,
         enrichment_skip=enrichment_skip,
     )
@@ -368,7 +387,9 @@ def _ingest_from_source(
     cache_root: Path | None,
     started: float,
     auto_install: bool | None = None,
-    deep: str = "inline",
+    deep: str = "async",
+    async_eligible: bool = True,
+    embed: str | None = None,
     enrichment_only: tuple[str, ...] = (),
     enrichment_skip: tuple[str, ...] = (),
 ) -> RepoIngestReport:
@@ -418,14 +439,13 @@ def _ingest_from_source(
         elif lang.language == "cpp":
             files_detected += cpp_header_n      # ...and the C++ ingestor claims them
         if files_detected <= 0:
-            # A header that flips C<->C++ can drop its old language to zero files. Skipping it would
-            # strand that language's prior nodes next to the new owner's graph (incremental != full). So
-            # if the C/C++ pair has NO files now but DOES have nodes already in the graph, still run its
-            # sync -- it re-walks (0 owned files) / diffs the flipped header away and deletes the stale
-            # subgraph. A fresh or genuinely-absent language has no such nodes, so it still skips (no
-            # wasted engine import). Scheme check is scoped to the ambiguous pair the orchestrator already
-            # special-cases above.
-            scheme = {"c": "c://", "cpp": "cpp://"}.get(lang.language)
+            # A header that flips C<->C++ can drop its old language to zero files; removing the last
+            # `Chart.yaml`/`values.yaml` drops helm to zero. Skipping would strand that language's prior
+            # nodes (incremental != full). So if it has NO files now but DOES have nodes already in the
+            # graph, still run its sync -- it recomputes to empty and deletes the stale subgraph. A fresh
+            # or genuinely-absent language has no such nodes, so it still skips (no wasted engine import).
+            scheme = {"c": "c://", "cpp": "cpp://", "helm": "helm://",
+                      "kustomize": "kustomize://", "ci": "ci://"}.get(lang.language)
             has_stale = bool(scheme) and _graph_has_prefix(writer, scheme)
             if not has_stale:
                 logger.info("No %s files in this source -- skipping", lang.language)
@@ -445,7 +465,8 @@ def _ingest_from_source(
 
     # PHASE 2 (deep): upgrade two-phase languages whose fast pass succeeded, per `deep`.
     to_deepen = [lang for lang, _ in present if lang.is_two_phase() and fast[lang.language][1] is None]
-    deep_results, deep_status = _run_deep_phase(writer, source, target_sha, to_deepen, deep, *ctx)
+    deep_results, deep_status = _run_deep_phase(writer, source, target_sha, to_deepen, deep, *ctx,
+                                                async_eligible=async_eligible, embed=embed)
 
     # A C/C++ cleanup sync (above) deletes a now-fileless language's symbols but leaves its Project node,
     # which a full recompute of the same state never creates. Sweep a c:// / cpp:// Project that has NO
@@ -504,12 +525,41 @@ def _ingest_from_source(
         skip=enrichment_skip,
     )
 
+    # Provenance is opt-in and kept in its own labels/IDs so the code delta engine never
+    # owns or removes it. Run the potentially large history/API pass off the ingest path, just
+    # like deep analysis: callers can query the code graph immediately while provenance fills in.
+    from auryn.core.app_config import load_config
+    if load_config().git_info_enabled:
+        if isinstance(source, GitRepoCache):
+            git_repo_path = source._path
+        elif isinstance(source, WorkingTreeSource):
+            git_repo_path = source._root
+        else:
+            git_repo_path = None
+        sib = writer.sibling()
+        # Detach to a subprocess only when a config-based reconnect will reach THIS backend: a
+        # network FalkorDB (client has select_graph), not an ad-hoc --host (embed forced "inline")
+        # or an embedded in-process DB. Otherwise run inline so it still completes.
+        detachable = (embed != "inline" and os.name == "posix"
+                      and hasattr(getattr(getattr(sib, "_graph", None), "client", None), "select_graph"))
+        _spawn_git_info(sib, git_repo_path, source_uri, detachable=detachable)
+    else:
+        # The setting describes graph contents as well as future collection. This also
+        # reconciles a direct config.toml edit on the next ingest.
+        try:
+            from auryn.core.git_info import purge_git_info
+            removed = purge_git_info(writer)
+            if removed:
+                logger.info("Git information disabled; removed %d provenance nodes", removed)
+        except Exception:
+            logger.exception("Git information cleanup failed; code ingestion succeeded")
+
     # Opt-in semantic layer: once every language's graph is settled, build/refresh embeddings so
     # the MCP `search_code` tool works. Off by default; enable with AURYN_EMBED=1 (see
-    # embeddings.embedder.embeddings_enabled). Skipped when a deep pass is still running in the
-    # background, so it doesn't embed nodes the deep pass is about to update (which would just
-    # invalidate them); a deep=background caller runs `auryn embed` when ready instead.
-    _maybe_embed(writer, deep)
+    # embeddings.embedder.embeddings_enabled). By default the heavy compute is handed to the
+    # detached embed daemon ("background"), so this returns -- and the graph is queryable -- the
+    # moment it's built, rather than blocking on every vector.
+    _maybe_embed(writer, deep, embed)
 
     elapsed = time.monotonic() - started
     ingested = sum(1 for r in reports if r.result is not None)
@@ -528,23 +578,76 @@ def _ingest_from_source(
     )
 
 
-def _maybe_embed(writer: GraphWriter, deep: str) -> None:
-    """Build/refresh embeddings after ingest when opted in (AURYN_EMBED=1). Inline, so it
-    completes within this (typically already-backgrounded, e.g. watcher-spawned `sync`) process --
-    no daemon that would die on exit. Contained: an embedding failure (e.g. the model can't be
-    fetched offline) is logged and never fails the ingest, which has already succeeded."""
-    from auryn.core.embeddings import configured_model, embeddings_enabled
+def _maybe_embed(writer: GraphWriter, deep: str, embed: str | None = None) -> None:
+    """Build/refresh embeddings after ingest when opted in (AURYN_EMBED=1), the way `embed`/config
+    says to (see embeddings.embedder.embed_mode):
 
-    if not embeddings_enabled() or deep == "background":
+    - **background** (default): enqueue the graph for the detached embed daemon and return at once,
+      so the ingest call -- and the already-built, queryable graph -- isn't held up by the heavy
+      vector compute. The daemon reconnects to the configured backend on its own.
+    - **inline**: embed synchronously here. Used by callers whose connection a separate process
+      couldn't reach (serverless/quickstart, explicit --host), and available as an override.
+    - **off**: skip.
+
+    Contained: any failure (e.g. the model can't be fetched offline) is logged and never fails the
+    ingest, which has already succeeded."""
+    from auryn.core.embeddings import embeddings_enabled
+    from auryn.core.embeddings.embedder import embed_mode
+
+    if not embeddings_enabled():
+        return
+    mode = embed_mode(embed)
+    if mode == "off":
+        return
+
+    graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
+    from auryn.core.embeddings import configured_model, get_embedder
+    from auryn.core.embeddings.daemon import daemon_supported
+
+    # Background needs (a) a graph name the daemon can reconnect to and (b) a platform that can run
+    # the daemon (POSIX fcntl). Without either, fall back to inline rather than queueing a request
+    # nothing will ever drain -- native Windows has no daemon, so a background request would sit
+    # forever and semantic search would never come up (cubic review).
+    if mode == "background" and graph_name and daemon_supported():
+        _embed_in_background(graph_name, deep, configured_model())
+        return
+
+    # Inline. A background deep pass is still mutating nodes, so embedding now would race it (and
+    # leave stale vectors the worker won't re-scan); defer to a manual `auryn embed` in that case.
+    if deep == "background":
+        logger.info("Embedding deferred: deep pass still running (run `auryn embed` once it settles)")
         return
     try:
         from auryn.core.embeddings.worker import embed_graph
-        from auryn.core.embeddings import get_embedder
 
         stats = embed_graph(writer, get_embedder(configured_model()))
         logger.info("Embeddings: %d embedded, %d scanned (%s)", stats.embedded, stats.scanned, stats.model_id)
     except Exception:
         logger.exception("Embedding pass failed (ingest itself succeeded; run `auryn embed` to retry)")
+
+
+def _embed_in_background(graph_name: str, deep: str, model: str | None = None) -> None:
+    """Hand `graph_name` to the detached embed daemon. When a background deep pass is still in
+    flight, wait for it first (on a daemon thread, so the caller still returns now) so the daemon
+    embeds settled nodes rather than racing deep's updates -- which also means an auto-embed finally
+    happens for deep=background ingests (previously they embedded nothing until a manual run)."""
+    from auryn.core.embeddings.daemon import request_embed
+
+    try:
+        if deep == "background":
+            def _after_deep() -> None:
+                try:
+                    join_deep_phase()
+                    request_embed(graph_name, model)
+                except Exception:
+                    logger.exception("Background embed (after deep) failed to enqueue for %r", graph_name)
+
+            threading.Thread(target=_after_deep, name="embed-after-deep", daemon=True).start()
+        else:
+            request_embed(graph_name, model)
+        logger.info("Embedding %r in the background (graph is already queryable)", graph_name)
+    except Exception:
+        logger.exception("Failed to enqueue background embed for %r (run `auryn embed` to build it)", graph_name)
 
 
 def _run_phase(
@@ -595,6 +698,16 @@ def _run_phase(
     return result, None
 
 
+def _daemon_can_reach(writer: GraphWriter) -> bool:
+    """Whether a detached deepen daemon could reach this writer's graph. The daemon reconnects to the
+    CONFIGURED backend, so it can only reach a graph on a real server -- never an in-process embedded
+    (falkordblite) DB (serverless quickstart, tests). The embedded client's `g.client` is raw Redis
+    with no `select_graph`, while a server client's has it (see GraphWriter.sibling) -- that tells them
+    apart without threading a config flag down. So an embedded ingest deepens inline instead."""
+    client = getattr(getattr(writer, "_graph", None), "client", None)
+    return client is not None and hasattr(client, "select_graph")
+
+
 def _run_deep_phase(
     writer: GraphWriter,
     source: Source,
@@ -606,9 +719,16 @@ def _run_deep_phase(
     solution_name: str | None,
     ref: str | None,
     cache_root: Path | None,
+    async_eligible: bool = True,
+    embed: str | None = None,
 ) -> tuple[dict[str, LanguageIngestResult], dict[str, str]]:
     """Second, deeper pass over the two-phase languages whose fast pass succeeded. Returns
-    (deep_results, deep_status) keyed by language. See DEEP_MODES for the `deep` values."""
+    (deep_results, deep_status) keyed by language. See DEEP_MODES for the `deep` values.
+
+    `async_eligible` is False when the daemon's replay (`ingest_directory(local_dir, deep="inline")`)
+    couldn't faithfully reproduce THIS ingest -- a git ref-pinned source (replay would index the
+    working tree's HEAD), non-default source filters, or a solution_name (both change the file set /
+    node ids). Then async downgrades to inline rather than deepen a different graph."""
     deep_results: dict[str, LanguageIngestResult] = {}
     deep_status: dict[str, str] = {}
     if not to_deepen:
@@ -629,6 +749,24 @@ def _run_deep_phase(
             deep_status[lang.language] = "background"
         logger.info("Deep phase upgrading in the background for: %s", names)
         return deep_results, deep_status
+
+    if deep == "async":
+        # Hand the deep pass to the detached deepen daemon so it SURVIVES this (possibly one-shot CLI)
+        # process exiting -- unlike "background"'s in-process thread. The daemon re-runs the ingest with
+        # deep="inline" (the fast phase short-circuits), upgrading the graph in place. Falls back to
+        # inline when there's no re-ingestable local dir (a remote-URI ingest with no checkout), no
+        # graph name, or the platform can't host the daemon (needs the configured backend + fcntl).
+        from auryn.core.deepen.daemon import daemon_supported, request_deepen
+
+        local_dir = _source_local_dir(source, source_uri)
+        graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
+        if async_eligible and local_dir and graph_name and daemon_supported() and _daemon_can_reach(writer):
+            request_deepen(graph_name, local_dir, project_name, embed)
+            logger.info("Deep phase queued to the background deepen daemon for: %s", names)
+            return deep_results, {lang.language: "async" for lang in to_deepen}
+        logger.info("Deep async unavailable (ref-pinned/filtered/solution source, no local dir / graph / "
+                    "daemon, or embedded backend); running inline for: %s", names)
+        # fall through to the inline path below
 
     # "inline" (default): run each deep upgrade now, synchronously.
     for lang in to_deepen:
@@ -654,6 +792,57 @@ def _spawn_deep(writer, source, target_sha, lang, *ctx) -> None:
     _deep_threads.append(thread)
 
 
+def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
+                    *, detachable: bool = False, force_remote: bool = False) -> None:
+    """Collect repository provenance OFF the code-ingest critical path.
+
+    On a network-reachable configured backend (`detachable`), spawn a DETACHED `auryn git-info sync`
+    subprocess that OUTLIVES this process -- so a one-shot `auryn ingest` doesn't kill the collection
+    mid-flight (a plain daemon thread dies on interpreter exit). The worker is single-flight per graph,
+    so overlapping triggers never collect twice. Otherwise -- an embedded in-process DB, an ad-hoc
+    `--host`, or a platform without detach -- run it inline (blocking) so it still completes."""
+    if repo_path is None:
+        try:
+            from auryn.core.git_info import remove_git_info_for_source
+            remove_git_info_for_source(writer, source_uri)
+            logger.info("Git information skipped: source is not a Git repository")
+        except Exception:
+            logger.exception("Git information unlink failed; code ingestion succeeded")
+        return
+
+    graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
+    if detachable and graph_name:
+        try:
+            from auryn.core.home import run_dir
+            run_dir().mkdir(parents=True, exist_ok=True)
+            argv = [sys.executable, "-m", "auryn", "git-info", "sync", "--graph", graph_name,
+                    "--force-remote" if force_remote else "--no-force-remote",
+                    "--source-uri", source_uri, str(repo_path)]
+            # `with` closes the PARENT's fd right after Popen returns (the child already dup'd it) --
+            # avoids leaking a descriptor on every detached ingest. The whole spawn is guarded so an
+            # unwritable run dir logs and returns instead of failing the already-written code graph.
+            with open(run_dir() / "git-info.log", "ab") as log:
+                subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                 start_new_session=True, close_fds=True)
+            logger.info("Git information sync spawned (detached) for graph %r", graph_name)
+        except Exception:
+            logger.exception("Git information spawn failed; code ingestion succeeded")
+        return
+
+    try:  # inline (blocking) -- the only way an embedded / ad-hoc-host backend completes reliably
+        from auryn.core.git_info import sync_git_info
+        summary = sync_git_info(writer, repo_path, source_uri=source_uri, force_remote=force_remote)
+        logger.info("Git information synced (inline): %s", summary)
+    except Exception:
+        logger.exception("Git information sync failed; code ingestion succeeded")
+
+
+def deep_threads() -> list[threading.Thread]:
+    """The background deep passes this process has started and not yet joined -- so a caller can
+    tell the ones its own ingest started from another repo's (see mcp/server.py)."""
+    return list(_deep_threads)
+
+
 def join_deep_phase(timeout: float | None = None) -> None:
     """Block until the background deep passes started by this process finish. Optional for a
     long-lived server (the daemon threads upgrade the graph on their own); used by tests and
@@ -676,11 +865,11 @@ def _graph_has_prefix(writer: GraphWriter, id_prefix: str) -> bool:
 
 
 def _detect(source: Source, target_sha: str, lang: GitLanguage) -> int:
-    """How many of this language's files are present at `target_sha`. Each suffix
-    identifies a disjoint set of files (a path ends with exactly one), so summing is
-    correct."""
+    """How many of this language's files are present at `target_sha`, by basename glob
+    (`match_patterns` unions the suffixes and `file_globs`). One glob pass, so a file
+    matching several patterns is counted once (globs, unlike disjoint suffixes, can overlap)."""
     excluded = set(lang.excluded_dir_names)
-    return sum(len(source.list_files(target_sha, suffix, excluded)) for suffix in lang.file_suffixes)
+    return len(source.list_files_glob(target_sha, lang.match_patterns(), excluded))
 
 
 def _autoinstall_missing(

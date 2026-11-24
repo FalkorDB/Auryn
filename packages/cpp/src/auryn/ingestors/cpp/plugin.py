@@ -1,12 +1,13 @@
 """Import-light C++ language registration -- the `auryn.languages` entry-point target.
 
 Importing this module registers the C++ GitLanguage without importing tree-sitter: the
-GitLanguage's `sync` is a lazy thunk that imports auryn.ingestors.cpp.git_sync only when a
-source actually contains C++ files. Single-phase today (fast tree-sitter-cpp); a deep libclang
-pass -- template instantiation, overload resolution, ADL, precise header<->source linking,
-cross-TU calls (needing a compile_commands.json) -- would slot in here as `deep_sync` (making
-C++ two-phase like Python). Suffix/exclude constants live here (single source of truth);
-git_sync imports them back.
+GitLanguage's `sync`/`deep_sync` are lazy thunks that import auryn.ingestors.cpp.git_sync only
+when a source actually contains C++ files. Two-phase (like Python/C#/Rust/TS/Go/Java): the fast
+`sync` is tree-sitter-cpp (CALLS by name); the deep `deep_sync` resolves CALLS precisely via
+scip-clang's SCIP index (overload resolution, virtual dispatch, cross-TU/header<->source calls),
+degrading to the fast pass when scip-clang or a compile_commands.json is absent. It is an explicit
+opt-in (AURYN_SCIP_CLANG) because scip-clang runs Clang with the repo's compile_commands.json
+flags. Suffix/exclude constants live here (single source of truth); git_sync imports them back.
 
 SUFFIX SPLIT WITH THE C INGESTOR: the C plugin already claims `.c` and `.h`, so this plugin
 claims ONLY unambiguous C++ suffixes and leaves `.c`/`.h` to C. Known limitation: a C++ project
@@ -27,10 +28,17 @@ EXCLUDED_DIR_NAMES = frozenset(
 
 
 def _sync(*args, **kwargs):
-    """Deferred until a source has C++ files -- imports the tree-sitter-cpp engine."""
-    from auryn.ingestors.cpp.git_sync import _git_language_sync
+    """Fast phase, deferred until a source has C++ files -- imports the tree-sitter-cpp engine."""
+    from auryn.ingestors.cpp.git_sync import treesitter_language_sync
 
-    return _git_language_sync(*args, **kwargs)
+    return treesitter_language_sync(*args, **kwargs)
+
+
+def _deep_sync(*args, **kwargs):
+    """Deep phase (scip-clang / SCIP), deferred likewise -- degrades to the fast pass if unavailable."""
+    from auryn.ingestors.cpp.git_sync import scip_clang_language_sync
+
+    return scip_clang_language_sync(*args, **kwargs)
 
 
 register_git_language(
@@ -39,5 +47,6 @@ register_git_language(
         file_suffixes=FILE_SUFFIXES,
         excluded_dir_names=EXCLUDED_DIR_NAMES,
         sync=_sync,
+        deep_sync=_deep_sync,
     )
 )

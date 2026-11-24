@@ -22,15 +22,20 @@ without the real agent installed or its real config touched.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from auryn.core.app_config import AgentRegistration
+
+logger = logging.getLogger("auryn.agents")
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess]
 
@@ -48,15 +53,40 @@ def _skill_source() -> Path:
     return Path(__file__).resolve().parent.parent / "assets" / "skills" / _SKILL_NAME
 
 
+def _remove_skill(dest: Path) -> None:
+    """Delete the files install copied into `dest` -- the bundled skill's own -- and then `dest`
+    itself if that leaves it empty. A file the user put in that folder is theirs, and stays.
+    Best-effort, like the rmtree it replaces: a file that can't be removed is left behind rather
+    than aborting the rest of uninstall."""
+    try:
+        if dest.is_symlink():  # the user pointed the skill at a folder of their own: none of it is ours
+            return
+    except OSError:  # a folder we cannot even look into is left as it is
+        return
+    src = _skill_source()
+    for item in sorted(src.rglob("*"), reverse=True):  # children before their directory
+        target = dest / item.relative_to(src)
+        with contextlib.suppress(OSError):  # gone already, not removable, or a dir holding the user's files
+            if target.is_dir() and not target.is_symlink():
+                target.rmdir()
+            else:
+                target.unlink()  # a file -- or a link the user put in its place: the link, never its target
+    with contextlib.suppress(OSError):
+        dest.rmdir()
+
+
 # ── Claude Code (CLI-based) ───────────────────────────────────────────────────
 class ClaudeCode:
     """Claude Code integration via its `claude mcp` CLI."""
 
     name = "claude-code"
 
-    def __init__(self, run: Runner = _default_run, skills_dir: Path | None = None) -> None:
+    def __init__(
+        self, run: Runner = _default_run, skills_dir: Path | None = None, config_path: Path | None = None
+    ) -> None:
         self._run = run
         self._skills_dir = skills_dir
+        self._config_path = config_path
 
     def detect(self) -> bool:
         """Present iff the `claude` CLI is on PATH."""
@@ -68,6 +98,56 @@ class ClaudeCode:
         env = os.environ.get("AURYN_CLAUDE_SKILLS")  # test/override hook
         return Path(env).expanduser() if env else Path.home() / ".claude" / "skills"
 
+    def _claude_config(self) -> Path:
+        if self._config_path is not None:
+            return self._config_path
+        env = os.environ.get("AURYN_CLAUDE_CONFIG")  # test/override hook
+        if env:
+            return Path(env).expanduser()
+        # Patch the file `claude mcp add` actually wrote: Claude Code honors CLAUDE_CONFIG_DIR and
+        # puts the user-scope config at $CLAUDE_CONFIG_DIR/.claude.json when set, else ~/.claude.json.
+        cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        base = Path(cfg_dir).expanduser() if cfg_dir else Path.home()
+        return base / ".claude.json"
+
+    def _enable_always_load(self) -> None:
+        """Mark our server so Claude Code loads its tools into the agent's INITIAL tool list,
+        instead of deferring them behind tool search. `claude mcp add` has no flag for this, so we
+        patch the config it just wrote (user scope -> ~/.claude.json, a `mcpServers` map). Without
+        it, in a tool-heavy setup the code-graph tools are invisible until the agent happens to
+        search for them -- so it often just greps instead (measured). Best-effort and never fatal:
+        a missing / unparseable / unwritable config is left as-is (the server still works, only
+        deferred). `alwaysLoad` is understood by Claude Code >= 2.1.121; older versions ignore the
+        unknown field, so writing it is harmless either way."""
+        path = self._claude_config()
+        try:
+            raw = path.read_text(encoding="utf-8") if path.exists() else None
+        except OSError:
+            return  # unreadable -> leave it; don't clobber what we can't round-trip
+        if raw is None:
+            return  # missing -> nothing to patch
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return  # unparseable -> leave it; don't clobber what we can't round-trip
+        if not isinstance(data, dict):
+            return
+        servers = data.get(_MCP_SERVERS_KEY)
+        entry = servers.get(_SERVER_NAME) if isinstance(servers, dict) else None
+        if isinstance(entry, dict) and entry.get("alwaysLoad") is not True:
+            entry["alwaysLoad"] = True
+            try:
+                # Re-read immediately before the whole-file replace: Claude Code also writes
+                # ~/.claude.json during sessions, and _write_config rewrites the ENTIRE file. If it
+                # changed since the snapshot above, a concurrent writer (e.g. `claude mcp add`)
+                # committed in between -- skip rather than clobber it (the server just stays deferred,
+                # which the best-effort design accepts). Narrows the race to the re-read..replace
+                # window; it does not eliminate it.
+                if path.read_text(encoding="utf-8") == raw:
+                    _write_config(path, data)
+            except OSError:
+                pass  # best-effort: a failed patch must never abort registration
+
     def register(self, server_command: list[str]) -> AgentRegistration:
         """Register the MCP server (user scope) and install the skill. Idempotent: any prior
         registration under the same name is removed first, so re-running install is safe."""
@@ -75,8 +155,14 @@ class ClaudeCode:
         added = self._run(["claude", "mcp", "add", "-s", "user", _SERVER_NAME, "--", *server_command])
         if added.returncode != 0:
             raise RuntimeError(f"`claude mcp add` failed: {(added.stderr or added.stdout).strip()}")
+        self._enable_always_load()  # surface the tools upfront, don't let them hide behind tool-search
 
         dest = self._skills_root() / _SKILL_NAME
+        if dest.is_symlink():
+            # The user pointed the skill at a folder of their own (see _remove_skill): a copy would
+            # go through the link and replace their files. The MCP server is registered regardless.
+            logger.warning("Kept your own skill at %s (a symlink); the bundled one was not copied", dest)
+            return AgentRegistration(name=self.name, scope="user", server_name=_SERVER_NAME)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(_skill_source(), dest, dirs_exist_ok=True)
         return AgentRegistration(name=self.name, scope="user", server_name=_SERVER_NAME, skill_path=str(dest))
@@ -86,7 +172,7 @@ class ClaudeCode:
         and idempotent -- a no-op if the user already removed either."""
         self._run(["claude", "mcp", "remove", "-s", reg.scope, reg.server_name])
         if reg.skill_path:
-            shutil.rmtree(reg.skill_path, ignore_errors=True)
+            _remove_skill(Path(reg.skill_path))
 
 
 # ── OpenAI Codex (CLI-based) ──────────────────────────────────────────────────
@@ -122,23 +208,48 @@ class CodexCli:
 # ── File-config agents (Antigravity / Copilot / Cursor / Windsurf / Gemini CLI) ─
 def _read_config(path: Path) -> dict:
     """Parse an agent's MCP config, or {} if it doesn't exist yet. Raises if the file exists but
-    isn't valid JSON -- so we refuse to clobber a config we can't safely round-trip (e.g. a JSONC
-    file with comments) rather than silently wiping the user's other servers."""
+    isn't valid JSON, or isn't a JSON object -- so we refuse to clobber a config we can't safely
+    round-trip (e.g. a JSONC file with comments) rather than silently wiping the user's other
+    servers."""
     if not path.exists():
         return {}
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if not text.strip():
         return {}
     try:
         data = json.loads(text)
     except ValueError as e:
         raise RuntimeError(f"{path} is not valid JSON (comments not supported); refusing to overwrite it") from e
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path} is not a JSON object; refusing to overwrite it")
+    return data
 
 
 def _write_config(path: Path, data: dict) -> None:
+    """Write JSON as UTF-8 and atomically (a UNIQUE temp file in the same dir + os.replace), so a
+    failed / raced / concurrent write can never leave a half-written config -- these are the user's
+    real agent configs, which also hold settings (and MCP env/secrets) we don't own. The temp file
+    inherits the existing config's permissions (or 0600 for a new file) so os.replace never widens
+    the mode and exposes secrets to other local users."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    # Follow a symlink to its target so we update the real file (e.g. a managed dotfiles config)
+    # rather than replacing the link with a regular file, as a plain write_text would.
+    target = Path(os.path.realpath(path))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = target.stat().st_mode & 0o777  # preserve the existing file's perms
+    except OSError:
+        mode = 0o600  # new file: owner-only, since configs may hold secrets
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # don't leave a stray temp file behind on failure
+        raise
 
 
 @dataclass
@@ -167,8 +278,10 @@ class McpConfigAgent:
     def register(self, server_command: list[str]) -> AgentRegistration:
         data = _read_config(self.config_path)
         servers = data.get(self.servers_key)
-        if not isinstance(servers, dict):
+        if servers is None:  # absent, or an explicit `null`: nothing there to preserve
             servers = data[self.servers_key] = {}
+        if not isinstance(servers, dict):  # some other shape: not ours to replace with an empty map
+            raise RuntimeError(f"{self.config_path}: `{self.servers_key}` is not an object; refusing to overwrite it")
         entry = {"command": server_command[0], "args": list(server_command[1:])}
         if self.entry_extra:
             entry = {**self.entry_extra, **entry}
@@ -272,15 +385,17 @@ structural view over ad-hoc file spelunking when reasoning about the code."""
     return f"{_AGENTS_MD_BEGIN}\n{body}\n{_AGENTS_MD_END}"
 
 
-def _merge_md_section(text: str, block: str) -> str:
+def _merge_md_section(text: str | None, block: str) -> str:
     """Insert or replace our delimited block, preserving all surrounding text. Idempotent: a second
-    call replaces the previous block in place rather than appending a duplicate."""
+    call replaces the previous block in place rather than appending a duplicate. `text` is None
+    for a file that doesn't exist yet: only then does the result START with our block, which is
+    how deregister later tells a file we created from an (even empty) one that predated us."""
+    if text is None:
+        return block + "\n"
     if _AGENTS_MD_BEGIN in text and _AGENTS_MD_END in text:
         start = text.index(_AGENTS_MD_BEGIN)
         end = text.index(_AGENTS_MD_END) + len(_AGENTS_MD_END)
         return text[:start] + block + text[end:]
-    if not text.strip():
-        return block + "\n"
     return text.rstrip("\n") + "\n\n" + block + "\n"
 
 
@@ -318,9 +433,9 @@ class AgentsMdAgent:
         return self.detector() if self.detector is not None else True
 
     def register(self, server_command: list[str]) -> AgentRegistration:
-        text = self.path.read_text() if self.path.exists() else ""
+        text = self.path.read_text(encoding="utf-8") if self.path.exists() else None
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(_merge_md_section(text, _agents_md_block(server_command)))
+        self.path.write_text(_merge_md_section(text, _agents_md_block(server_command)), encoding="utf-8")
         return AgentRegistration(
             name=self.name, scope="user", server_name=self.server_name, config_path=str(self.path)
         )
@@ -329,11 +444,19 @@ class AgentsMdAgent:
         path = Path(reg.config_path) if reg.config_path else self.path
         if not path.exists():
             return
-        stripped = _strip_md_section(path.read_text())
-        if stripped.strip():
-            path.write_text(stripped.rstrip("\n") + "\n")
+        text = path.read_text(encoding="utf-8")
+        stripped = _strip_md_section(text)
+        # A byte-order mark an editor added since is not content: without this a file we created
+        # would be kept, holding nothing but the mark.
+        if stripped.lstrip("\ufeff").strip():
+            path.write_text(stripped.rstrip("\n") + "\n", encoding="utf-8")
+        elif text.lstrip("\ufeff").startswith(_AGENTS_MD_BEGIN):
+            # The file held only our section, from its first byte (we created it) -> remove it.
+            # An EMPTY file that an older version merged into looks the same -- that version kept
+            # nothing to tell the two apart -- and is removed too.
+            path.unlink()
         else:
-            path.unlink()  # file held only our section (we created it) -> remove it
+            path.write_text("", encoding="utf-8")  # an empty file that predated us (see _merge_md_section): still the user's
 
 
 def agents_md_adapter() -> AgentsMdAgent:

@@ -45,13 +45,13 @@ def test_stream_apply_clears_only_changed_node_embedding(writer):
         return gen
 
     writer.setup_schema([NodeSchema("Function")])  # create the graph + id index, as a real sync does
-    stream_apply(writer, "p/", ["Function"], make("version-one"))
+    stream_apply(writer, "p", ["Function"], make("version-one"))
     embed_graph(writer, FakeEmbedder())
     assert _embedding(writer, "p/f1") is not None
     assert _embedding(writer, "p/f2") is not None
 
     # Resync: only f1's source changes.
-    stats, _, _ = stream_apply(writer, "p/", ["Function"], make("version-two-different"))
+    stats, _, _ = stream_apply(writer, "p", ["Function"], make("version-two-different"))
     assert stats.nodes_updated == 1
     assert _embedding(writer, "p/f1") is None  # stale embedding cleared -> re-queued
     assert _embedding(writer, "p/f2") is not None  # unchanged -> embedding kept
@@ -67,7 +67,7 @@ def test_apply_delta_clears_changed_node_embedding(writer):
     embed_graph(writer, FakeEmbedder())
     assert _embedding(writer, "p/f1") is not None
 
-    cur_nodes, cur_edges = writer.read_fingerprints("p/", ["Function"])
+    cur_nodes, cur_edges = writer.read_fingerprints("p", ["Function"])
     target = [GraphNode("Function", {"id": "p/f1"}, {"name": "f", "source": "v2-changed", "doc": ""})]
     delta = compute_delta(cur_nodes, cur_edges, target)
     assert len(delta.nodes_to_upsert) == 1  # content changed -> upsert
@@ -80,7 +80,7 @@ def test_apply_delta_noop_on_unchanged_node_keeps_embedding(writer):
     writer.merge_nodes([GraphNode("Function", {"id": "p/f1"}, {"name": "f", "source": "v1", "doc": ""})])
     embed_graph(writer, FakeEmbedder())
 
-    cur_nodes, cur_edges = writer.read_fingerprints("p/", ["Function"])
+    cur_nodes, cur_edges = writer.read_fingerprints("p", ["Function"])
     # Same content -> compute_delta yields no upserts -> apply_delta clears nothing.
     target = [GraphNode("Function", {"id": "p/f1"}, {"name": "f", "source": "v1", "doc": ""})]
     delta = compute_delta(cur_nodes, cur_edges, target)
