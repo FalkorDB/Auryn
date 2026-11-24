@@ -173,6 +173,22 @@ def test_a_stray_begin_marker_above_a_whole_block_keeps_the_lines_between(tmp_pa
     assert hook.read_text() == "#!/bin/sh\n# >>> auryn resync >>>\necho user1\necho user2\n"
 
 
+def test_a_user_line_that_only_contains_the_begin_marker_is_not_one(tmp_path):
+    """`echo "# >>> auryn resync >>>"` in a user's hook read as a begin marker without its end: every
+    uninstall raised, so `forget` stopped and `uninstall` said "remove it by hand". A marker is a
+    whole line, as the block is stripped."""
+    repo = _init_repo(tmp_path / "r")
+    hook = hooks.hooks_dir(repo) / "post-commit"
+    mine = '#!/bin/sh\necho "# >>> auryn resync >>>"\n'
+    hook.write_text(mine)
+    hook.chmod(0o755)
+
+    hooks.install(repo, ["true"])
+    hooks.uninstall(repo)
+    assert hook.read_text() == mine
+    assert not hooks.is_installed(repo)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="native Windows has no exec bit: chmod 644 can't switch a hook off there")
 def test_install_leaves_a_non_shell_hook_and_a_disabled_hook_as_they_are(tmp_path):
     """A shell line appended to a Python hook is a SyntaxError that also stops the USER's hook;
@@ -374,6 +390,31 @@ def test_a_crlf_hook_keeps_its_line_endings(tmp_path):
     assert path.read_bytes() == b"#!/bin/sh\r\necho mine\r\n"
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="git runs the #!/bin/sh hook through git-for-windows' bundled sh, where the Windows "
+                           "backslash path in it doesn't round-trip (as for test_hook_fires_on_commit)")
+def test_one_crlf_line_in_an_lf_hook_leaves_the_block_lf(tmp_path):
+    """One CRLF line in an LF hook turned the whole block CRLF: sh reads `(... &)\\r` as a syntax
+    error, so neither the block nor the user's own line ran. The block's lines end like the shebang's."""
+    repo = _init_repo(tmp_path / "r")
+    path = hooks.hooks_dir(repo) / "post-commit"
+    path.write_bytes(b"#!/bin/sh\necho USER-HOOK-RAN\r\n")
+    path.chmod(0o755)
+    sentinel = tmp_path / "fired"
+    hooks.install(repo, ["touch", str(sentinel)])
+
+    (repo / "b.txt").write_text("y")
+    _git(repo, "add", "-A")
+    commit = subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "second"],
+                            check=True, capture_output=True, text=True)
+    assert "USER-HOOK-RAN" in commit.stdout + commit.stderr, commit.stderr
+    for _ in range(60):
+        if sentinel.exists():
+            break
+        time.sleep(0.05)
+    assert sentinel.exists(), "the resync block did not run"
+
+
 def test_install_refuses_a_hooks_dir_that_is_a_symlink(tmp_path):
     """`.git/hooks -> ../githooks`: the older way to share tracked hooks, before `core.hooksPath`.
     It is refused like a redirected hooks path -- the block would land in the tracked directory."""
@@ -443,7 +484,8 @@ def test_uninstall_removes_the_hooks_of_every_registered_repo(monkeypatch, tmp_p
 
 def test_uninstall_says_which_repo_still_carries_our_block(monkeypatch, tmp_path):
     """`uninstall --purge` removed ~/.auryn although a repo's hook kept our block -- its next commit
-    recreates the home dir -- and only a log warning named the repo. The output says so too."""
+    recreates the home dir -- and only a log warning named the repo. The output says so too, and
+    the exit code, for a script."""
     from click.testing import CliRunner
 
     from auryn.cli import cli
@@ -457,7 +499,7 @@ def test_uninstall_says_which_repo_still_carries_our_block(monkeypatch, tmp_path
     hook.chmod(0o755)
 
     res = CliRunner().invoke(cli, ["uninstall", "--purge", "--yes"])
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 1, res.output
     assert f"git hooks of {repo}" in res.output and "by hand" in res.output
     assert not home.exists()
 
@@ -534,6 +576,34 @@ def test_forget_cleans_the_hooks_before_its_delete_so_it_can_be_run_again(monkey
     second = CliRunner().invoke(cli, ["forget", str(repo), "--yes"])
     assert second.exit_code == 0, second.output
     assert len(deleted) == 1 and not app_config.get_repo(str(repo)) and not hooks.is_installed(repo)
+
+
+def test_a_forget_whose_delete_fails_says_the_hooks_are_already_gone(monkeypatch, tmp_path):
+    """The hooks come out ahead of `forget`'s delete: a delete that then failed left the repo
+    registered but no longer resyncing on commit, and nothing said so."""
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+    from auryn.core import lifecycle
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    repo = _init_repo(tmp_path / "r")
+    app_config.register_repo(app_config.RepoRegistration(local_dir=str(repo)))
+    hooks.install(repo, ["true"])
+    monkeypatch.setattr("auryn.cli._resolve_connection", lambda *a, **k: None)
+    monkeypatch.setattr("auryn.cli.connect_client", lambda config: None)
+    monkeypatch.setattr(lifecycle, "plan_forget", lambda client, graph, project: lifecycle.ForgetPlan(
+        graph_name=graph, mode="drop_graph", project_name=None, languages=["python"], nodes=3))
+
+    def fails(client, plan):
+        raise RuntimeError("connection lost")
+
+    monkeypatch.setattr(lifecycle, "execute_forget", fails)
+
+    res = CliRunner().invoke(cli, ["forget", str(repo), "--yes"])
+    assert res.exit_code != 0
+    assert f"hooks of {repo}" in res.output and "run `auryn forget` again" in res.output
+    assert app_config.get_repo(str(repo)) and not hooks.is_installed(repo)
 
 
 @pytest.mark.skipif(os.name == "nt",

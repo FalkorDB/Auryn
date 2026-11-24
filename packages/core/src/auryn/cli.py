@@ -530,7 +530,7 @@ def install(backend, host, port, username, password, ssl, trigger, git_info, yes
 def uninstall(purge, force, yes) -> None:
     """Reverse `install`: stop the local server and deregister Auryn from every agent it was
     registered with. Keeps ~/.auryn (your graphs) unless --purge. In your repos, only Auryn's
-    resync block comes out of their git hooks."""
+    resync block comes out of their git hooks; a repo where it can't is named, and the exit code is 1."""
     from auryn.core import hooks, watcher
     from auryn.core.app_config import load_config
     from auryn.core.install import do_uninstall
@@ -547,10 +547,10 @@ def uninstall(purge, force, yes) -> None:
     failed = ", ".join(a.name for a in recorded.agents if a not in removed)
     if removed or not failed:
         click.echo(f"Deregistered from: {', '.join(a.name for a in removed) or '(no agents were registered)'}")
-    for repo in recorded.repos:  # a hook we couldn't clean: its next commit runs `auryn sync` again
-        if hooks.is_installed(repo.local_dir):
-            click.echo(f"Could not take Auryn's resync block out of the git hooks of {repo.local_dir} -- "
-                       "remove it by hand.", err=True)
+    stuck = [repo.local_dir for repo in recorded.repos if hooks.is_installed(repo.local_dir)]
+    for local_dir in stuck:  # a hook we couldn't clean: its next commit runs `auryn sync` again
+        click.echo(f"Could not take Auryn's resync block out of the git hooks of {local_dir} -- "
+                   "remove it by hand.", err=True)
     if failed and not force:  # they stay on record, so the next run can retry
         raise click.ClickException(
             f"Could not deregister from: {failed} (see the warning above). Kept on record"
@@ -562,6 +562,8 @@ def uninstall(purge, force, yes) -> None:
     if purge:
         click.echo("Removed ~/.auryn.")
     click.echo("Remove the CLI itself with:  uv tool uninstall auryn")
+    if stuck:  # named above; a script sees it too
+        raise SystemExit(1)
 
 
 @cli.group("git-info")
@@ -884,7 +886,13 @@ def forget(path, graph_opt, project, host, port, username, password, ssl, yes, d
         click.echo("Aborted.")
         return
     local_dir = _unhook_repo(path, graph_opt, project, plan.graph_name)
-    lifecycle.execute_forget(client, plan)
+    try:
+        lifecycle.execute_forget(client, plan)
+    except Exception:
+        if local_dir:  # still registered, but no longer resynced on commit
+            click.echo(f"The resync hooks of {local_dir} are already removed -- run `auryn forget` again "
+                       "to finish.", err=True)
+        raise
     if local_dir:
         unregister_repo(local_dir)
     click.echo(f"Forgot {target}.")

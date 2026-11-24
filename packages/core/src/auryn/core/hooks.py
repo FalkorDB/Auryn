@@ -80,6 +80,12 @@ def _strip_block(text: str) -> str:
     return "".join(out + (block or []))
 
 
+def _has_begin(text: str) -> bool:
+    """Whether a line of `text` is our begin marker -- a whole line, as `_strip_block` reads it: a
+    user's `echo "# >>> auryn resync >>>"` only contains one."""
+    return any(ln.strip() == _BEGIN for ln in text.splitlines())
+
+
 def _own_hooks_dir(local_dir) -> Path:
     """`<git common dir>/hooks`: where git looks for hooks unless `core.hooksPath` says otherwise."""
     out = subprocess.run(
@@ -166,7 +172,7 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
             # Right after the shebang -- ahead of the user's body, whose `exit` / `exec` would
             # otherwise end the hook before our (backgrounded) line. The file keeps its mode.
             head, _, body = base.partition("\n") if base.startswith("#!") else ("", "", base)
-            eol = "\r\n" if "\r\n" in base else "\n"  # the block's lines end like the hook's own
+            eol = "\r\n" if head.endswith("\r") else "\n"  # like the shebang's: sh can't run `(... &)\r`
             path.write_text((head + "\n" if head else "") + block.replace("\n", eol) + body, newline="")
         elif path.is_symlink():  # a dangling link: its target isn't ours to create
             continue
@@ -202,10 +208,10 @@ def uninstall(local_dir) -> None:
             if not path.exists() or _alias_of(path, d):
                 continue
             text = _read(path)
-            if text is None or _BEGIN not in text:
+            if text is None or not _has_begin(text):
                 continue
             stripped = _strip_block(text)
-            if _BEGIN in stripped:  # a begin marker without its end: the user's lines stay, and it is said
+            if _has_begin(stripped):  # a begin marker without its end: the user's lines stay, and it is said
                 failed = failed or ValueError(f"{path}: an auryn begin marker without its end marker -- "
                                               "remove it by hand")
             if stripped == text:  # no whole block to take out
@@ -226,4 +232,4 @@ def is_installed(local_dir) -> bool:
         dirs = _swept_dirs(local_dir)
     except Exception:
         return False
-    return any((d / n).exists() and _BEGIN in (_read(d / n) or "") for d in dirs for n in HOOKS)
+    return any((d / n).exists() and _has_begin(_read(d / n) or "") for d in dirs for n in HOOKS)

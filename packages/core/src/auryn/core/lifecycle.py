@@ -206,8 +206,8 @@ def wire_trigger(
                                   "symlinked .git/hooks: tracked or shared hooks); hook skipped -- use "
                                   "`--trigger save` or `auryn sync`")
             elif "post-commit" not in wired:
-                status["note"] = ("this repo's own post-commit hook isn't an enabled shell script, so it was "
-                                  "left alone; commits won't resync -- use `--trigger save` or `auryn sync`")
+                status["note"] = ("this repo's own post-commit hook isn't an enabled shell script, so "
+                                  "commits won't resync -- use `--trigger save` or `auryn sync`")
         else:
             status["hooks_installed"] = False
             status["note"] = "commit trigger needs a git repo; hook skipped -- use `auryn sync`"
