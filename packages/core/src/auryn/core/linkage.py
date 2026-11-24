@@ -216,7 +216,9 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
     #   - TWO+ distinct definitions -> a genuine clash; left unresolved + warned, never merged.
     if stats.unresolved:
         ph_parsed = [(ph, _parse_linkage(ph)) for ph in stats.unresolved]
-        wanted = sorted({p[2] for _, p in ph_parsed if p is not None})
+        # Only file-path-keyed languages can have a package-root prefix leak, so seek candidate names for
+        # THOSE placeholders only -- a Java/Go unresolved ref never triggers a (wasted) graph-wide name query.
+        wanted = sorted({p[2] for _, p in ph_parsed if p is not None and p[0] in _FILE_PATH_KEYED_LANGS})
         cands_by_name: dict[str, list[tuple[str, str]]] = defaultdict(list)  # name -> [(linkage_key, node id)]
         for label in present if wanted else ():
             rows = writer.ro_query(
