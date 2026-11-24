@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 
 from auryn.core.graph_client import SHARED_NODE_LABEL, GraphWriter
@@ -98,10 +99,13 @@ _TERMINAL_ORIGINS = frozenset({"builtin", "stdlib", "libc", "system"})
 
 
 def _parse_linkage(link: str) -> tuple[str, tuple[str, ...], str] | None:
-    """Best-effort split of an ``extern://<lang>/<qualifier><sep><name>`` linkage key into
-    ``(lang, qualifier_components, name)``. `sep` is ``::`` (python/c++/go/rust/…), ``#`` (java
-    member), or absent (C: a program-global name). Qualifier components are split on ``.``/``/``/
-    ``::`` so the prefix comparison below is language-agnostic. Returns None if it doesn't parse."""
+    """Best-effort split of an ``extern://<lang>/…`` linkage key into ``(lang, qualifier_components, name)``.
+    A *symbol* key separates the qualifier from the name with ``::`` (python/c++/go/rust/…) or ``#`` (java
+    member). A *module/package* key (and a bare C program-global name) has NO separator -- the whole tail is
+    a dotted path; we take its LAST component as the name and the rest as the qualifier, so a module import
+    (`backend.llm_client`) is suffix-comparable to its longer file-path spelling
+    (`plugins.…backend.backend.llm_client`). Qualifier components split on ``.``/``/``/``::`` so the prefix
+    comparison is language-agnostic. Returns None if it doesn't parse."""
     if not link.startswith("extern://"):
         return None
     lang, _, tail = link[len("extern://"):].partition("/")
@@ -110,10 +114,11 @@ def _parse_linkage(link: str) -> tuple[str, tuple[str, ...], str] | None:
     for sep in ("::", "#"):
         if sep in tail:
             qualifier, name = tail.rsplit(sep, 1)
-            break
-    else:
-        qualifier, name = "", tail
-    return lang, tuple(p for p in re.split(r"::|[./]", qualifier) if p), name
+            return lang, tuple(p for p in re.split(r"::|[./]", qualifier) if p), name
+    parts = [p for p in re.split(r"::|[./]", tail) if p]  # no separator: a module/package key or bare name
+    if not parts:
+        return None
+    return lang, tuple(parts[:-1]), parts[-1]
 
 
 def _prefix_mismatch(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
@@ -151,7 +156,8 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
     # All candidate nodes per linkage: (id, resolved, defined, origin). Per-label (index seek) and
     # only for labels present in this graph, so a label another language owns costs nothing here.
     by_link: dict[str, list[tuple[str, object, object, object]]] = {}
-    for label in _present(writer, LINKABLE_LABELS):
+    present = _present(writer, LINKABLE_LABELS)
+    for label in present:
         rows = writer.ro_query(
             f"MATCH (n:{label}) WHERE n.linkage_key IN $ls "
             "RETURN n.linkage_key, n.id, n.resolved, n.defined, n.origin",
@@ -181,40 +187,50 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
                 _absorb(writer, absorbable_id=src, canonical_id=target)
                 stats.absorbed += 1
 
-    # Package-root / project-layout resolution: an unresolved reference whose symbol name matches a
-    # real definition emitted in THIS ingest, where the two linkage keys differ ONLY by a leading
-    # module prefix, is a package-root leak -- the SAME file resolves under two dotted identities (a
-    # package root nested under, or put on sys.path beside, its longer file-path spelling, e.g.
-    # `backend.llm_client` vs `plugins.com.esl.feltfixinator.backend.backend.llm_client`). The
-    # reference SHOULD have resolved; the exact-string match just missed by the prefix.
-    #   - EXACTLY ONE canonical def is suffix-compatible -> AUTO-RESOLVE (absorb). The uniqueness gate
-    #     is what makes this safe: it's precisely the false-join risk ADR 0004 decision 6 worried about,
-    #     so a loosened match is admitted ONLY when there is no ambiguity about which def is meant.
-    #   - TWO+ candidates -> a genuine clash; left unresolved + warned, never merged.
-    # NB: resolves only when both sides are touched in one ingest (a whole tree indexed as one project
-    # -- the reported footgun). A definer ingested in a *separate* pass is a follow-up (Gap 1: needs a
-    # name-indexed placeholder seek to stay scan-free).
+    # Package-root / project-layout resolution: an unresolved reference whose symbol name matches a real
+    # definition whose linkage key differs ONLY by a leading module prefix is a package-root leak -- the
+    # SAME file under two dotted identities (a package root nested under, or on sys.path beside, its longer
+    # file-path spelling, e.g. `backend.llm_client` vs `plugins.com.esl.feltfixinator.backend.backend.
+    # llm_client`). The reference SHOULD have resolved; the exact-string match just missed by the prefix.
+    #
+    # Candidates come from a GRAPH-WIDE, name-indexed seek (not just this ingest's touched linkage keys):
+    # `name` is indexed on every linkable label, so this is scan-free, and it is the only way the uniqueness
+    # gate below is honest -- a definition under an AMBIGUOUS linkage key, or one from a PRIOR ingest, still
+    # counts. Of the same-language, suffix-compatible definitions found:
+    #   - exactly ONE distinct definition -> AUTO-RESOLVE (absorb the placeholder into it). Uniqueness is the
+    #     safety ADR 0004 decision 6 called for -- the false-join risk exists only with 2+ candidates.
+    #   - TWO+ distinct definitions -> a genuine clash; left unresolved + warned, never merged.
     if stats.unresolved:
-        parsed_canon = [(cl, _parse_linkage(cl)) for cl in canonical_links]
+        ph_parsed = [(ph, _parse_linkage(ph)) for ph in stats.unresolved]
+        wanted = sorted({p[2] for _, p in ph_parsed if p is not None})
+        cands_by_name: dict[str, list[tuple[str, str]]] = defaultdict(list)  # name -> [(linkage_key, node id)]
+        for label in present if wanted else ():
+            rows = writer.ro_query(
+                f"MATCH (n:{label}) WHERE n.name IN $names AND n.linkage_key IS NOT NULL "
+                "AND coalesce(n.resolved, true) <> false AND coalesce(n.defined, true) <> false "
+                "RETURN n.name, n.linkage_key, n.id",
+                {"names": wanted},
+            ).result_set
+            for nm, link, nid in rows:
+                cands_by_name[str(nm)].append((str(link), str(nid)))
         still_unresolved: list[str] = []
-        for ph in stats.unresolved:
-            p = _parse_linkage(ph)
+        for ph, p in ph_parsed:
             if p is None:
                 still_unresolved.append(ph)
                 continue
-            matches = [cl for cl, c in parsed_canon
-                       if c is not None and p[0] == c[0] and p[2] == c[2] and _prefix_mismatch(p[1], c[1])]
-            if len(matches) == 1:
-                cl = matches[0]
-                target = next(nid for nid, resolved, defined, _ in by_link[cl]
-                              if resolved is not False and defined is not False)
-                for src, resolved, defined, _ in by_link[ph]:
+            lang, qual, name = p
+            matches = [(link, nid) for link, nid in cands_by_name.get(name, [])
+                       if (c := _parse_linkage(link)) is not None and c[0] == lang and _prefix_mismatch(qual, c[1])]
+            targets = {nid for _, nid in matches}  # distinct definition NODES (an ambiguous key yields 2+)
+            if len(targets) == 1:
+                target = next(iter(targets))
+                for src, resolved, defined, _ in by_link.get(ph, []):
                     if (resolved is False or defined is False) and src != target:
                         _absorb(writer, absorbable_id=src, canonical_id=target)
                         stats.absorbed += 1
-                stats.resolved_near_misses.append((ph, cl))
-            elif matches:
-                stats.near_misses.append((ph, matches[0]))  # 2+ candidate defs -> ambiguous, don't merge
+                stats.resolved_near_misses.append((ph, matches[0][0]))
+            elif targets:
+                stats.near_misses.append((ph, matches[0][0]))  # 2+ distinct defs -> ambiguous, don't merge
                 still_unresolved.append(ph)
             else:
                 still_unresolved.append(ph)
