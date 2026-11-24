@@ -81,3 +81,60 @@ def watcher_pid_path() -> Path:
 def watcher_log_path() -> Path:
     """Where the detached watcher daemon's stdout/stderr go."""
     return run_dir() / "watcher.log"
+
+
+def embed_dir() -> Path:
+    """Runtime state for the background embedding daemon (lock, pidfile, log, request queue).
+    One daemon per machine builds every repo's vectors off the ingest critical path."""
+    return run_dir() / "embed"
+
+
+def embed_lock_path() -> Path:
+    """fcntl run-lock the embed daemon holds for its whole life -- single-flight: a second
+    daemon that can't acquire it exits, so there's never more than one (and the model loads once)."""
+    return embed_dir() / "daemon.lock"
+
+
+def embed_pid_path() -> Path:
+    """PID file the embed daemon writes; producers read it to decide whether to spawn one."""
+    return embed_dir() / "daemon.pid"
+
+
+def embed_log_path() -> Path:
+    """Where the detached embed daemon's stdout/stderr go."""
+    return embed_dir() / "daemon.log"
+
+
+def embed_requests_dir() -> Path:
+    """The embed daemon's work queue: one ``<graph>.json`` file per graph with pending vectors.
+    The many-producers -> one-consumer seam (an ingest drops a request; the daemon drains it)."""
+    return embed_dir() / "requests"
+
+
+def deepen_dir() -> Path:
+    """Runtime state for the background deepen daemon (lock, pidfile, log, request queue). One daemon
+    per machine runs the deep (type-resolving) analysis pass off the ingest critical path, so a graph
+    is queryable at fast-pass speed and deepens in the background (jedi/Roslyn/rust-analyzer)."""
+    return run_dir() / "deepen"
+
+
+def deepen_lock_path() -> Path:
+    """fcntl run-lock the deepen daemon holds for its whole life -- single-flight, so only one runs."""
+    return deepen_dir() / "daemon.lock"
+
+
+def deepen_pid_path() -> Path:
+    """PID file the deepen daemon writes; producers read it to decide whether to spawn one."""
+    return deepen_dir() / "daemon.pid"
+
+
+def deepen_log_path() -> Path:
+    """Where the detached deepen daemon's stdout/stderr go."""
+    return deepen_dir() / "daemon.log"
+
+
+def deepen_requests_dir() -> Path:
+    """The deepen daemon's work queue: one ``<graph>.json`` file per repo awaiting a deep pass. The
+    request carries the repo's local dir + project name, so the daemon re-runs the ingest with
+    deep="inline" (the fast phase short-circuits; only the deep phase does work)."""
+    return deepen_dir() / "requests"

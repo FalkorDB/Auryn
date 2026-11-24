@@ -1,0 +1,6 @@
+# The concrete image the template references via `{{ .Values.image.repository }}:{{ .Values.image.tag }}`.
+# Resolved render-free to docker.io/shop/api:1.0 -- the shared hub.
+image:
+  repository: shop/api
+  tag: "1.0"
+replicaCount: 2

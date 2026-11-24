@@ -40,6 +40,10 @@ class RawCall:
     is_new: bool = False  # `new Widget()` -- resolves against a constructor/class
     http_url: str | None = None  # request URL/route when this is an HTTP-client call (fetch/axios/$.ajax…)
     http_method: str | None = None  # GET/POST/… when derivable (verb-named call or options); None -> GET at stitch
+    line: int = 0  # 1-based line of the callee *identifier* (what SCIP anchors an occurrence to), for the
+    # deep pass's line-precise call-site gate; 0 means "not captured"
+    col: int = 0  # 0-based UTF-16 column of the callee identifier (scip-typescript's occurrence encoding), for
+    # the deep pass's COLUMN-precise gate -- resolves aliased imports + same-line same-name calls (#802)
 
 
 @dataclass

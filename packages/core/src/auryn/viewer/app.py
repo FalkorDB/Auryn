@@ -6,17 +6,117 @@ fetch, to list current branches/tags) but still never touches FalkorDB."""
 
 from __future__ import annotations
 
+import ipaddress
+import os
+import socket
+
 import git
 from falkordb import FalkorDB
-from flask import Flask, jsonify, request
+from flask import Flask, abort, jsonify, request
 
 from auryn.core import graph_queries as queries
 from auryn.core.embeddings import hybrid_search
 from auryn.core.graph_client import GraphWriter
 
 
-def create_app(client: FalkorDB) -> Flask:
+def _loopback_ip(address: str) -> bool:
+    """Whether `address` is a loopback IP. An IPv4-mapped one (`::ffff:127.0.0.1`) is judged by its
+    IPv4 form, which the `ipaddress` of older Python 3.12 releases doesn't do. Raises ValueError for a
+    name that isn't an IP."""
+    ip = ipaddress.ip_address(address)
+    return (getattr(ip, "ipv4_mapped", None) or ip).is_loopback
+
+
+def _is_loopback(name: str) -> bool:
+    """`localhost`, or a loopback address in any spelling (all of 127.0.0.0/8, `::1`,
+    `0:0:0:0:0:0:0:1`, `::ffff:127.0.0.1`) -- as a bind address or as the name in a Host header."""
+    name = name.strip("[]").lower()
+    if name == "localhost":
+        return True
+    try:
+        return _loopback_ip(name)
+    except ValueError:  # some other DNS name
+        return False
+
+
+def _host_name(host: str) -> str:
+    """The name in a Host header -- `name`, `name:port`, `[v6]` or `[v6]:port` -- without its port
+    or brackets, in lower case, and without a trailing dot (`localhost.` is `localhost`)."""
+    name = host[: host.index("]") + 1] if host.startswith("[") and "]" in host else host.rsplit(":", 1)[0]
+    return name.strip("[]").lower().removesuffix(".")
+
+
+def _binds_loopback(host: str) -> bool:
+    """Whether binding to `host` can land on loopback, resolved the way the OS resolves a bind
+    address -- so `127.1`, `2130706433`, `0x7f.1` or a hosts-file alias count, not only the
+    canonical spellings. Fails closed: a name that does not resolve keeps the Host check on."""
+    if _is_loopback(host):
+        return True
+    try:
+        infos = socket.getaddrinfo(host.strip("[]"), None, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return True
+    for *_, sockaddr in infos:
+        try:
+            if _loopback_ip(str(sockaddr[0]).split("%", 1)[0]):
+                return True
+        except ValueError:
+            return True
+    return False
+
+
+def _sync_blocker(project: dict) -> str | None:
+    """Why the viewer can't git-sync this Project node, or None when it can. The Sources tab's
+    Sync is the C# git-sync (see graph_git_sync), so it fits a C# project tracked in a git
+    repository. Not a project indexed from a plain folder -- what `auryn quickstart` shows first:
+    there is no branch or tag to move it to -- and not another language's, which the C# sync
+    would quietly ingest a second time, as C#."""
+    uri = project["properties"].get("repo_uri") or ""
+    if not uri:
+        return "No source is recorded for this project, so there is nothing to sync from."
+    # Only an ABSOLUTE local path can be judged from here. A relative one (`auryn ingest repo .`
+    # stores it as given) was relative to where the ingest ran, not to this viewer; a remote URI
+    # is git's to open, and so is a value that isn't text at all.
+    path = os.path.expanduser(uri) if isinstance(uri, str) else ""
+    if os.path.isabs(path):
+        try:
+            with git.Repo(path):
+                pass
+        except git.InvalidGitRepositoryError:  # a folder that exists but isn't a repository's root
+            try:  # inside one, the branches are the repository's: only its root can be synced
+                with git.Repo(path, search_parent_directories=True) as repo:
+                    root = repo.working_tree_dir
+            except git.InvalidGitRepositoryError:
+                return ("Indexed from a folder that isn't the root of a git repository: there is no "
+                        "branch or tag to sync to. Re-ingest the folder to refresh the graph.")
+            return (f"Indexed from a subfolder of the git repository at {root}: only a whole repository "
+                    f"syncs. Re-ingest from {root} to sync it, or re-ingest the folder to refresh the graph.")
+        except git.NoSuchPathError:  # it was there when the graph was built
+            return "The source folder no longer exists, so there is nothing to sync from. Re-ingest it from where it is now."
+        except Exception:  # noqa: BLE001 -- unreadable, malformed: the sync itself will tell
+            pass
+    if not str(project["id"]).startswith("csharp://"):
+        return "Sync from the viewer handles C# projects only. Re-ingest this one to refresh the graph."
+    return None
+
+
+def create_app(client: FalkorDB, host: str = "127.0.0.1") -> Flask:
+    """`host` is the address the server is bound to (the `--host` of `view` / `quickstart`)."""
     app = Flask(__name__, static_folder="static", static_url_path="")
+
+    if _binds_loopback(host):
+        bind_name = host.strip("[]").lower().removesuffix(".")  # a bind address has no port
+        # Bound to loopback the viewer is this machine's only -- but a web page can still point its
+        # OWN name at 127.0.0.1 (DNS rebinding) and then read every graph, or POST git-sync, as
+        # same-origin. Such a request carries the page's name in Host, so serve loopback names only.
+        # Bound anywhere else (`--host 0.0.0.0`) it was exposed on purpose: no check.
+        @app.before_request
+        def _loopback_host_only():
+            name = _host_name(request.host)
+            # The bound name itself is fine too (e.g. a hosts-file alias the user chose).
+            if not _is_loopback(name) and name != bind_name:
+                abort(403, "Host not allowed: bound to loopback, the viewer answers loopback names "
+                           "(localhost, 127.0.0.1) and the name it was started with (--host).")
 
     @app.get("/")
     def index():
@@ -187,15 +287,19 @@ def create_app(client: FalkorDB) -> Flask:
         if graph_name not in client.list_graphs():
             return jsonify({"error": "graph not found"}), 404
         graph = client.select_graph(graph_name)
-        return jsonify(queries.git_tracked_projects(graph))
+        projects = queries.git_tracked_projects(graph)
+        for project in projects:  # the card shows this instead of a ref picker that can only fail
+            blocker = _sync_blocker(project)
+            if blocker:
+                project["sync_unavailable"] = blocker
+        return jsonify(projects)
 
     @app.get("/api/graphs/<graph_name>/git-refs")
     def graph_git_refs(graph_name: str):
         # The only endpoint besides git-sync that does real I/O beyond a Cypher
         # query: it fetches from the remote so the branch/tag list is current,
         # not whatever this cache last had. Still never writes to the graph.
-        from auryn.core.git_source import GitRepoCache
-        from auryn.ingestors.csharp.git_sync import repos_cache_dir
+        from auryn.core.git_source import GitRepoCache, repos_cache_dir
 
         project_id = request.args.get("project_id")
         if not project_id:
@@ -208,9 +312,9 @@ def create_app(client: FalkorDB) -> Flask:
         if project is None or project["label"] != "Project":
             return jsonify({"error": "project not found"}), 404
         repo_uri = project["properties"].get("repo_uri")
-        if not repo_uri:
-            return jsonify({"error": "this Project node has no repo_uri -- it wasn't created by git-sync"}), 400
-
+        blocker = _sync_blocker(project)  # a missing repo_uri too
+        if blocker:
+            return jsonify({"error": blocker, "sync_unavailable": blocker}), 400  # as in git-projects
         try:
             refs = GitRepoCache(repo_uri, repos_cache_dir()).list_refs()
         except git.GitCommandError as e:
@@ -222,8 +326,6 @@ def create_app(client: FalkorDB) -> Flask:
         # The one write-capable endpoint in this file -- see module docstring.
         # Everything it needs (repo_uri/solution_name/dto_name_suffixes) comes from
         # the Project node's own properties, not a separate config store.
-        from auryn.ingestors.csharp.git_sync import GitCSharpProjectConfig, sync
-
         body = request.get_json(silent=True) or {}
         project_id = body.get("project_id")
         if not project_id:
@@ -238,8 +340,12 @@ def create_app(client: FalkorDB) -> Flask:
         if project is None or project["label"] != "Project":
             return jsonify({"error": "project not found"}), 404
         props = project["properties"]
-        if not props.get("repo_uri"):
-            return jsonify({"error": "this Project node has no repo_uri -- it wasn't created by git-sync"}), 400
+        blocker = _sync_blocker(project)  # a missing repo_uri too
+        if blocker:
+            return jsonify({"error": blocker, "sync_unavailable": blocker}), 400  # as in git-projects
+        # Only now: a refusal must not depend on the C# plugin being installed (auryn-core alone,
+        # or with another language's plugin, serves the viewer too).
+        from auryn.ingestors.csharp.git_sync import GitCSharpProjectConfig, sync
 
         config = GitCSharpProjectConfig(
             repo_uri=props["repo_uri"],

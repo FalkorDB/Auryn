@@ -507,14 +507,14 @@ so your `sync` never clones or resolves refs itself.
 
 ## 11. Wire the package into the workspace
 
-Adding a language *does* require touching the **root `pyproject.toml`** (four spots) — the
-per-language folder is self-contained, but the workspace has to know the distribution
-exists. Copy every place `go` appears:
+Adding a language *does* require touching the **root `pyproject.toml`** (four spots) and
+**`packages/core/pyproject.toml`** (two spots) — the per-language folder is self-contained,
+but the workspace has to know the distribution exists. Copy every place `go` appears:
 
 ```toml
-[project.optional-dependencies]
-go  = ["auryn-go"]                 # 1. the pip extra: pip install "falkordb-auryn[go]"
-all = [..., "auryn-go", ...]       #    …and add it to `all`
+# pyproject.toml (root: the falkordb-auryn umbrella)
+[project]
+dependencies = [..., "auryn-go==0.1.0", ...]   # 1. `pip install falkordb-auryn` installs every plugin
 
 [tool.uv.sources]
 auryn-go = { workspace = true }    # 2. resolve it from the workspace, not PyPI
@@ -524,7 +524,16 @@ dev = [..., "auryn-go", ...]       # 3. so `uv sync` installs it editable for de
 
 [tool.coverage.run]
 source = [..., "packages/go/src/auryn", ...]   # 4. include it in coverage
+
+# packages/core/pyproject.toml
+[project.optional-dependencies]
+go = ["auryn-go==0.1.0"]           # 5. the custom-install extra: pip install "auryn-core[go]"
+all = [..., "auryn-go==0.1.0", ...]   # 6. pip install "auryn-core[all]" installs every plugin
 ```
+
+Pin to the workspace version (the `version` line of every `pyproject.toml`); the release
+workflow rewrites these pins to the released version. `tests/test_package_extras.py` fails
+if a plugin is missing from the umbrella's dependencies (1), its core extra (5) or `all` (6).
 
 Then `uv sync` and confirm discovery picks it up:
 

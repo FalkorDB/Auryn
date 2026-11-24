@@ -56,6 +56,8 @@ def test_only_dynamic_languages_are_two_phase():
     assert languages["python"].deep_sync is not None
     assert languages["csharp"].is_two_phase()  # fast tree-sitter -> deep Roslyn (perf: --deep off is fast)
     assert languages["csharp"].deep_sync is not None
+    assert languages["rust"].is_two_phase()  # fast tree-sitter -> deep rust-analyzer/SCIP (degrades gracefully)
+    assert languages["rust"].deep_sync is not None
     assert not languages["plsql"].is_two_phase()
     assert not languages["c"].is_two_phase()  # fast tree-sitter only for now; libclang deep is future
 
