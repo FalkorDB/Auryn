@@ -17,7 +17,8 @@ from auryn.core.impact import git_diff, git_toplevel, impact_of_diff, parse_unif
 
 
 def test_parse_modified_file_hunk():
-    diff = "diff --git a/orders/db.py b/orders/db.py\n--- a/orders/db.py\n+++ b/orders/db.py\n@@ -10,3 +10,2 @@\n-old\n+new\n"
+    diff = ("diff --git a/orders/db.py b/orders/db.py\n--- a/orders/db.py\n+++ b/orders/db.py\n"
+            "@@ -10,3 +10,2 @@\n-a\n-b\n-c\n+x\n+y\n")
     changed, deleted = parse_unified_diff(diff)
     assert changed == {"orders/db.py": [(10, 11)]}  # +10,2 -> lines 10..11
     assert deleted == []
@@ -29,7 +30,7 @@ def test_parse_count_omitted_is_single_line():
 
 
 def test_parse_new_file():
-    diff = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,4 @@\n+a\n+b\n"
+    diff = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,4 @@\n+a\n+b\n+c\n+d\n"
     changed, deleted = parse_unified_diff(diff)
     assert changed == {"new.py": [(1, 4)]} and deleted == []
 
@@ -43,12 +44,40 @@ def test_parse_deleted_file_is_full_span():
 
 def test_parse_multiple_hunks_and_files():
     diff = (
-        "--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,1 @@\n-x\n+y\n@@ -20,0 +21,3 @@\n+n\n"
+        "--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,1 @@\n-x\n+y\n@@ -20,0 +21,3 @@\n+n\n+o\n+p\n"
         "--- a/b.py\n+++ b/b.py\n@@ -5,2 +5,0 @@\n-z\n"
     )
     changed, _ = parse_unified_diff(diff)
     assert changed["a.py"] == [(1, 1), (21, 23)]
     assert changed["b.py"] == [(5, 5)]  # +5,0 deletion -> anchored at 5
+
+
+def test_parse_counts_the_changed_lines_not_the_context():
+    """Regression: the ranges came from the hunk header, which spans the context lines too, so a
+    plain `git diff` (three lines of context) of a one-line change to `refund` also reported the
+    function above it."""
+    diff = (
+        "--- a/charges.py\n+++ b/charges.py\n@@ -16,6 +16,6 @@ def charge(customer_id):\n"
+        "     return record(customer_id)\n \n \n-def refund(payment_id):\n+def refund(payment_id, reason=None):\n"
+        "     payment = submit_refund(payment_id)\n     return record_refund(payment)\n"
+    )
+    assert parse_unified_diff(diff)[0] == {"charges.py": [(19, 19)]}
+
+
+def test_parse_a_removal_is_the_line_above_it():
+    """Removed lines alone are anchored at the new line above them -- git's own anchor for a
+    `-U0` deletion -- with or without context around them."""
+    with_context = "--- a/m.py\n+++ b/m.py\n@@ -4,7 +4,5 @@\n a\n b\n c\n-x\n-y\n d\n e\n"
+    without = "--- a/m.py\n+++ b/m.py\n@@ -7,2 +6,0 @@\n-x\n-y\n"
+    assert parse_unified_diff(with_context)[0] == parse_unified_diff(without)[0] == {"m.py": [(6, 6)]}
+
+
+def test_parse_a_removed_sql_comment_is_a_body_line():
+    """A removed `-- note` shows as `--- note`: the hunk's line counts, not the prefix, say it is
+    a removed line and not the next file's header."""
+    diff = "--- a/q.sql\n+++ b/q.sql\n@@ -3,2 +3,1 @@\n--- note\n select 1;\n--- a/r.sql\n+++ b/r.sql\n@@ -1 +1 @@\n-a\n+b\n"
+    changed, deleted = parse_unified_diff(diff)
+    assert changed == {"q.sql": [(2, 2)], "r.sql": [(1, 1)]} and deleted == []
 
 
 def test_git_diff_roundtrip(tmp_path):
@@ -104,7 +133,7 @@ def _stub_the_graph(monkeypatch, indexed):
     monkeypatch.setattr("auryn.cli._resolve_connection", lambda *conn: None)
     monkeypatch.setattr("auryn.cli.connect_client", lambda config: _Client())
     monkeypatch.setattr("auryn.core.impact.impact_of_diff",
-                        lambda graph, changed, max_depth: analysed.append(sorted(changed)) or {"impact": {}})
+                        lambda graph, changed, max_depth, repo: analysed.append(sorted(changed)) or {"impact": {}})
     return selected, analysed
 
 
@@ -300,3 +329,123 @@ def test_symbols_in_ranges_reports_mapped_paths(graph):
     syms, mapped = symbols_in_ranges(graph, {"orders/db.py": [(10, 12)], "config.yaml": [(1, 2)]})
     assert {s["name"] for s in syms} == {"get_connection"}
     assert mapped == {"orders/db.py"}  # config.yaml mapped nothing
+
+
+def _seeded(tmp_path, cypher):
+    cfg = FalkorDBConfig(embedded=True, db_path=str(tmp_path / "seed.db"), graph_name="seed")
+    g = connect_client(cfg).select_graph(cfg.graph_name)
+    g.query(cypher)
+    return g
+
+
+# Svc.java: class Svc (lines 3-20) with a field on line 4, `work` (6-9) and `other` (11-13). `run`
+# calls `work`; `App`, a constructor, takes a Svc. Each shape ties them to the file the way one
+# family of ingestors does.
+_CLASS_WITH_METHODS = (
+    "CREATE (f:File {id:'java://shop/file/Svc.java', path:'Svc.java'}),"
+    "(cls:Class {id:'java://shop/svc.Svc', name:'Svc', line_start:3, line_end:20}),"
+    "(work:Method {id:'java://shop/svc.Svc.work()', name:'work', line_start:6, line_end:9}),"
+    "(other:Method {id:'java://shop/svc.Svc.other()', name:'other', line_start:11, line_end:13}),"
+    "(run:Method {id:'java://shop/app.App.run()', name:'run', line_start:5, line_end:8}),"
+    "(app:Method {id:'java://shop/app.App.App(svc)', name:'App', line_start:2, line_end:3}) "
+    "CREATE (cls)-[:HAS_METHOD]->(work), (cls)-[:HAS_METHOD]->(other),"
+    "(run)-[:CALLS]->(work), (app)-[:DEPENDS_ON]->(cls), "
+)
+_FILE_HOLDS = {
+    "File -DEFINES-> every symbol (Java/Go/Rust/C++)":
+        "(f)-[:DEFINES]->(cls), (cls)-[:DEFINED_IN]->(f), (f)-[:DEFINES]->(work), (f)-[:DEFINES]->(other)",
+    "the class -DEFINED_IN-> File (Kotlin/PHP/Ruby/Swift/C#)": "(cls)-[:DEFINED_IN]->(f)",
+    "a Module -HAS_CLASS-> the class (Python)": "(f)-[:HAS_CLASS]->(cls)",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_FILE_HOLDS))
+def test_impact_of_diff_maps_a_method_change_to_the_method(tmp_path, shape):
+    """Regression: a change inside a Java method mapped to its class alone (only `DEFINED_IN` was
+    followed, and only types have it), so the report listed whoever takes the class -- not the
+    method's callers. The method is found whether the file holds it or only its class does, and
+    the class is left out: the change is inside the method's body. A change outside every method
+    (a field) is still the class's."""
+    g = _seeded(tmp_path, _CLASS_WITH_METHODS + _FILE_HOLDS[shape])
+
+    in_method = impact_of_diff(g, {"Svc.java": [(7, 7)]})
+    assert [s["name"] for s in in_method["changed_symbols"]] == ["work"]
+    assert in_method["impact"]["direct_callers"] == ["run"]
+
+    on_field = impact_of_diff(g, {"Svc.java": [(4, 4)]})
+    assert [s["name"] for s in on_field["changed_symbols"]] == ["Svc"]
+    assert on_field["impact"]["direct_callers"] == ["App"]
+
+
+def test_impact_of_diff_leaves_a_member_to_its_own_file(tmp_path):
+    """A member is taken from its type only when it has no file of its own: a C++ method defined
+    out of line has lines in the .cpp, which may fall inside the class's span in the header."""
+    g = _seeded(tmp_path, (
+        "CREATE (:Project {id:'cpp://shop', name:'shop'}),"
+        "(h:File {id:'cpp://shop/file/svc.h', path:'svc.h'}), (cc:File {id:'cpp://shop/file/svc.cpp', path:'svc.cpp'}),"
+        "(cls:Class {id:'cpp://shop.class.svc', name:'Svc', line_start:1, line_end:10}),"
+        "(work:Method {id:'cpp://shop.class.svc.method.work()', name:'work', line_start:5, line_end:8}) "
+        "CREATE (h)-[:DEFINES]->(cls), (cls)-[:DEFINED_IN]->(h), (cls)-[:HAS_METHOD]->(work), (cc)-[:DEFINES]->(work)"
+    ))
+    assert [s["name"] for s in symbols_in_ranges(g, {"svc.h": [(6, 6)]})[0]] == ["Svc"]
+    assert [s["name"] for s in symbols_in_ranges(g, {"svc.cpp": [(6, 6)]})[0]] == ["work"]
+
+
+def _two_repos_with_one_path(tmp_path):
+    """Projects `alpha` and `beta`, indexed from /w/repos/alpha and /w/repos/beta, both with a
+    `src/app.py`."""
+    return _seeded(tmp_path, (
+        "CREATE (:Project {id:'python://alpha', name:'alpha', repo_uri:'/w/repos/alpha'}),"
+        "(:Project {id:'python://beta', name:'beta', repo_uri:'/w/repos/beta'}),"
+        "(ma:Module {id:'python://alpha/module/src.app', file_path:'src/app.py'}),"
+        "(mb:Module {id:'python://beta/module/src.app', file_path:'src/app.py'}),"
+        "(fa:Function {id:'python://alpha/module/src.app.func.run()', name:'run_alpha', line_start:1, line_end:5}),"
+        "(fb:Function {id:'python://beta/module/src.app.func.run()', name:'run_beta', line_start:1, line_end:5}) "
+        "CREATE (ma)-[:HAS_FUNCTION]->(fa), (mb)-[:HAS_FUNCTION]->(fb)"
+    ))
+
+
+@pytest.mark.parametrize("path, repo, expected", [
+    ("src/app.py", None, ["run_alpha", "run_beta"]),  # nothing says which repo: both, and a flag
+    ("alpha/src/app.py", None, ["run_alpha"]),  # a diff taken in the folder above the repos
+    ("w/repos/beta/src/app.py", None, ["run_beta"]),
+    ("src/app.py", "/w/repos/beta", ["run_beta"]),  # the folder the caller ran git in
+    ("gamma/src/app.py", None, []),  # no project was indexed from a `gamma` folder
+])
+def test_impact_of_diff_scopes_a_path_to_its_project(tmp_path, path, repo, expected):
+    """Regression: a diff path was matched exactly and against every project, so a path from a
+    diff taken above the repo (`alpha/src/app.py`) mapped nothing, and a path two repos share
+    mapped both. A prefix is stripped only toward a project indexed from a folder that ends with
+    it, and the match is scoped to that project."""
+    report = impact_of_diff(_two_repos_with_one_path(tmp_path), {path: [(2, 2)]}, repo=repo)
+    assert sorted(s["name"] for s in report["changed_symbols"]) == expected
+    assert any("more than one project" in f for f in report["flags"]) == (len(expected) > 1)
+
+
+def test_impact_of_diff_reports_a_route_once(tmp_path):
+    """Regression: a handler exposes its declared route and, once the HTTP stitch matched a call
+    to it, the call site's endpoint as well -- named with `{param}` -- so a route with a path
+    parameter was reported twice."""
+    g = _seeded(tmp_path, (
+        "CREATE (h:Function {id:'python://orders/module/api.func.cancel(order_id)', name:'cancel', file_path:'api.py', line_start:1, line_end:5}),"
+        "(own:APIEndpoint {id:'pyapi://python://orders/module/api.func.cancel(order_id)#POST:/orders/{order_id}/cancel', name:'POST /orders/{order_id}/cancel'}),"
+        "(call:APIEndpoint {id:'extern://http/POST:/orders/{param}/cancel', name:'POST /orders/{param}/cancel'}) "
+        "CREATE (h)-[:EXPOSES_ENDPOINT]->(own), (h)-[:EXPOSES_ENDPOINT]->(call)"
+    ))
+    report = impact_of_diff(g, {"api.py": [(2, 2)]})
+    assert report["impact"]["api_endpoints_reached"] == ["POST /orders/{order_id}/cancel"]
+
+
+def test_impact_of_diff_keeps_dot_separated_ids_in_their_project(tmp_path):
+    """C++ and PHP ids go on from the project's id with a `.` (`cpp://shop.class.svc`), so cutting
+    an id at its first `/` made each class its own "service" and flagged every caller in the same
+    repo as cross-service."""
+    g = _seeded(tmp_path, (
+        "CREATE (:Project {id:'cpp://shop', name:'shop'}), (:Project {id:'cpp://billing', name:'billing'}),"
+        "(work:Method {id:'cpp://shop.class.svc.method.work()', name:'work', file_path:'svc.cpp', line_start:5, line_end:8}),"
+        "(run:Method {id:'cpp://shop.class.app.method.run()', name:'run', file_path:'app.cpp', line_start:1, line_end:4}),"
+        "(pay:Function {id:'cpp://billing.func.pay()', name:'pay', file_path:'pay.cpp', line_start:1, line_end:4}) "
+        "CREATE (run)-[:CALLS]->(work), (pay)-[:CALLS]->(work)"
+    ))
+    report = impact_of_diff(g, {"svc.cpp": [(6, 6)]})
+    assert report["impact"]["cross_service_consumers"] == ["cpp://billing"]

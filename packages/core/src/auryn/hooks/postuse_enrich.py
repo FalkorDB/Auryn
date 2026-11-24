@@ -596,7 +596,8 @@ def _enrich_edit(event: dict, ctx: GraphContext, cfg: HookConfig) -> EnrichResul
     try:
         diff = impact_mod.git_diff(str(repo))
         changed, _deleted = impact_mod.parse_unified_diff(diff)
-        report = impact_mod.impact_of_diff(ctx.graph, changed, max_depth=4, limit=500)
+        report = impact_mod.impact_of_diff(ctx.graph, changed, max_depth=4, limit=500,
+                                           repo=impact_mod.git_toplevel(str(repo)))
     except Exception:
         return EnrichResult(reason="no-diff")
     changed_syms = report.get("changed_symbols") or []

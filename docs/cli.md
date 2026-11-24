@@ -225,8 +225,12 @@ a model change); `--graph-name` + connection options. The local model auto-insta
 "What will this change break?" — the blast radius of a diff. Diffs the working tree (or a git
 range via `--base/--head`, or `--staged`), maps changed lines to graph symbols, and reports the
 reverse-dependency closure: direct + transitive callers, API endpoints reached, tests covering it,
-and cross-service consumers. `--json` for a PR bot; `--fail-on none|any|cross-service|endpoint`
-exits non-zero to gate a merge in CI. `--graph-name` + connection options.
+and cross-service consumers. Only the `+`/`-` lines count, never the context around them, and a
+change inside a method maps to that method, not to its class. A diff path is matched against the
+paths each repo stores (relative to the folder it was indexed from); a path with that folder's name
+in front — a diff taken above the repo — is that repo's file only. `--json` for a PR bot;
+`--fail-on none|any|cross-service|endpoint` exits non-zero to gate a merge in CI. `--graph-name` +
+connection options.
 
 ---
 

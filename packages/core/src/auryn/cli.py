@@ -355,7 +355,7 @@ def impact(base, head, staged, path, graph_name, max_depth, as_json, fail_on,
         raise click.ClickException(
             f"{root} isn't indexed (no graph {graph_name!r}). Index it first: auryn ingest dir {root}")
     graph = client.select_graph(graph_name)
-    report = impact_mod.impact_of_diff(graph, changed, max_depth=max_depth)
+    report = impact_mod.impact_of_diff(graph, changed, max_depth=max_depth, repo=str(root))
 
     if as_json:
         click.echo(_json.dumps(report, indent=2))
