@@ -256,12 +256,6 @@ path). Most ingestors emit a `File` with `path`; Python models a source file as 
 `file_path` under its packages, TypeScript as a `Module` with `path`. A Go/Java/Julia `Module` carries
 neither, so it never matches a changed path."""
 
-CHANGED_LINK_VERSION = 2
-"""The version of `_CODE_FILE_NODES` a repository's stored history is linked under, kept on
-GitRepository as `changed_link_version` (absent: linked to `File` only, or to nothing yet). Bump it
-when a kind is added: the next sync relinks each repository's stored commits once from their
-`changed_files`, without walking Git again (see _relink_changed)."""
-
 
 def _code_file_index(writer: GraphWriter, source_uri: str, canonical: str) -> dict[str, list[tuple[str, str]]]:
     """The code nodes each repo-relative path links to, as (label, id), loaded once and scoped by
@@ -297,27 +291,6 @@ def _code_file_index(writer: GraphWriter, source_uri: str, canonical: str) -> di
             return {}
         paths = load(scoped=False)
     return paths
-
-
-def _relink_changed(writer: GraphWriter, repo_id: str, file_targets: dict[str, list[tuple[str, str]]]) -> None:
-    """Re-derive the CHANGED edges of every commit already stored for `repo_id` from its
-    `changed_files`, for history synced before its code was ingested or under an older
-    CHANGED_LINK_VERSION. Edges MERGE, so the ones already present are kept as they are."""
-    rows = writer.ro_query(
-        "MATCH (:GitRepository {id: $repo})-[:HAS_COMMIT]->(c:GitCommit) RETURN c.id, c.changed_files",
-        {"repo": repo_id},
-    ).result_set
-    edge_batch: list[GraphEdge] = []
-    for cid, changed_files in rows:
-        for change in json.loads(changed_files or "[]"):
-            edge_batch.extend(_edge("CHANGED", "GitCommit", cid, label, target_id,
-                                    change_type=change["change_type"])
-                              for label, target_id in file_targets.get(change["path"], ()))
-        if len(edge_batch) >= 2000:
-            writer.merge_edges(edge_batch)
-            edge_batch.clear()
-    if edge_batch:
-        writer.merge_edges(edge_batch)
 
 
 @functools.lru_cache(maxsize=1)
@@ -880,12 +853,10 @@ def sync_git_info(
     writer.merge_edge(_edge("USES_REPOSITORY", "GitCheckout", checkout_id, "GitRepository", repo_id))
 
     state_rows = writer.ro_query(
-        "MATCH (r:GitRepository {id: $id}) RETURN r.branch_tips, r.github_synced_at, r.changed_link_version",
-        {"id": repo_id},
+        "MATCH (r:GitRepository {id: $id}) RETURN r.branch_tips, r.github_synced_at", {"id": repo_id}
     ).result_set
     previous_tips = json.loads(state_rows[0][0]) if state_rows and state_rows[0][0] else {}
     previous_remote_sync = state_rows[0][1] if state_rows else None
-    linked_version = int(state_rows[0][2] or 0) if state_rows else 0
     # Track ALL refs (local branches + remote-tracking + tags), keyed by ref path, not just local
     # branches -- so the incremental cursor covers the same scope as the initial `--all` walk.
     # Otherwise fetched remote-tracking or tag-only commits that didn't move a local branch head are
@@ -1020,12 +991,6 @@ def sync_git_info(
     edge_batch.extend(ref_edges)
     if edge_batch:
         writer.merge_edges(edge_batch)
-    # History stored before this repo's code was in the graph, or under an older link version, was
-    # linked to fewer code nodes than exist now. The version is recorded only once there was code to
-    # link, so a sync that found none leaves the relink to the first sync that does.
-    if file_targets and previous_tips and linked_version < CHANGED_LINK_VERSION:
-        _relink_changed(writer, repo_id, file_targets)
-    link_state = {"changed_link_version": CHANGED_LINK_VERSION} if file_targets else {}
 
     remote_stats = {"issues": 0, "pull_requests": 0, "releases": 0, "github_tags": 0,
                     "check_suites": 0, "check_runs": 0}
@@ -1075,6 +1040,6 @@ def sync_git_info(
     writer.merge_node(_node("GitRepository", repo_id, name=canonical.rstrip("/").rsplit("/", 1)[-1],
                             canonical_url=canonical, provider="github", source_path=source_path,
                             branch_tips=json.dumps(current_tips, sort_keys=True),
-                            github_synced_at=remote_synced_at or "", **link_state))
+                            github_synced_at=remote_synced_at or ""))
     return {"repository": canonical, "commits": commit_count, "users": len(user_ids_seen),
             "tags": len(local_tags) + remote_stats["github_tags"], **remote_stats}

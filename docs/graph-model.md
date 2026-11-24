@@ -70,8 +70,9 @@ When `[git_info].enabled = true`, verified public GitHub repositories add a repo
 subgraph. IDs start with `github://<owner>/<repo>` and do not depend on the checked-out branch.
 The current collector writes `GitCheckout` (a local source mapping), `GitRepository`, `GitCommit`,
 `GitUser`, `GitBranch`, `GitTag`, `GitIssue`, `GitPullRequest`, `GitRelease`, `GitCheckSuite`,
-`GitCheckRun`, and `GitHubApp` nodes. A commit links directly to matching code `File` nodes through
-`CHANGED`; paths without a code `File` do not get a synthetic node, while the commit's `changed_files`
+`GitCheckRun`, and `GitHubApp` nodes. A commit links directly to matching code `File` nodes (Python and
+TypeScript: the source file's `Module`) through `CHANGED`; paths without a code `File` do not get a
+synthetic node, while the commit's `changed_files`
 JSON property preserves their paths and change types (`A`, `M`, or `D`). Renames appear as a deletion
 at the old path and an addition at the new path. Diffs compare against the first parent (root
 commits compare against an empty tree). Check suites and runs come from GitHub's provider-neutral

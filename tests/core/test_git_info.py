@@ -215,34 +215,6 @@ def test_changes_link_to_python_and_typescript_modules(graph, tmp_path, monkeypa
     ]
 
 
-def test_history_collected_before_its_code_is_linked_on_a_later_sync(graph, tmp_path, monkeypatch):
-    # Provenance collected while the graph had no code for the repo links nothing; once the code is
-    # ingested, the next sync links the stored history from each commit's `changed_files`, even with
-    # no new commit -- and only once.
-    root = tmp_path / "checkout"
-    _make_repo(root)
-    writer = GraphWriter(graph)
-    monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
-    monkeypatch.setattr(git_info, "_github_metadata", lambda *_: ([], []))
-    monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
-    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
-
-    git_info.sync_git_info(writer, str(root))
-    assert graph.ro_query("MATCH (:GitCommit)-[e:CHANGED]->() RETURN count(e)").result_set[0][0] == 0
-
-    set_git_info_enabled(True)
-    ingest.ingest_directory(writer, str(root), project_name="Checkout", deep="off", auto_install=False)
-    linked = "MATCH (:GitCommit)-[:CHANGED]->(m:Module) RETURN m.file_path"
-    assert graph.ro_query(linked).result_set == [["main.py"]]
-    assert graph.ro_query("MATCH (r:GitRepository) RETURN r.changed_link_version").result_set == [
-        [git_info.CHANGED_LINK_VERSION]
-    ]
-
-    graph.query("MATCH (:GitCommit)-[e:CHANGED]->() DELETE e")
-    assert git_info.sync_git_info(writer, str(root), source_uri=str(root))["commits"] == 0
-    assert graph.ro_query(linked).result_set == []  # already linked under this version: no re-walk
-
-
 def test_remote_change_keeps_data_while_another_checkout_still_uses_old_repo(
     graph, tmp_path, monkeypatch
 ):
