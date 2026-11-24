@@ -223,6 +223,27 @@ def test_uninstall_also_cleans_the_repos_own_hooks_after_core_hookspath_moved_aw
     assert not hooks.is_installed(repo)
 
 
+def test_a_block_left_in_the_repos_own_hooks_still_counts_after_core_hookspath_moved_away(monkeypatch, tmp_path):
+    """`is_installed` -- what `auryn uninstall` checks to name a repo to clean by hand -- read only
+    the hooks dir git uses now. A block uninstall couldn't take out of `.git/hooks` after husky
+    moved `core.hooksPath` went unreported. It reads every dir uninstall sweeps."""
+    repo = _init_repo(tmp_path / "r")
+    locked = (hooks.hooks_dir(repo) / "post-commit").resolve()
+    hooks.install(repo, ["true"])
+    _git(repo, "config", "core.hooksPath", ".husky/_")
+    real_unlink = Path.unlink
+
+    def refuses_the_locked_hook(self, *args, **kwargs):
+        if self.resolve() == locked:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuses_the_locked_hook)
+    with pytest.raises(PermissionError):
+        hooks.uninstall(repo)
+    assert hooks.is_installed(repo)
+
+
 def test_install_takes_an_older_versions_block_out_of_a_hook_it_now_skips(tmp_path):
     """Upgrading: earlier versions appended the block to ANY hook -- a Python one (a SyntaxError on
     every commit) and one under `core.hooksPath` (a tracked file). Only skipping those on the next

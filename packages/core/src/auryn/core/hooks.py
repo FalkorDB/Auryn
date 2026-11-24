@@ -178,18 +178,23 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
     return [name for name in HOOKS if name in wired or aliases.get(name) in wired]
 
 
+def _swept_dirs(local_dir) -> list[Path]:
+    """The hooks dir git uses now, and the repo's own one too when `core.hooksPath` has moved away
+    from it since (husky sets it on `npm install`): a block left there runs again once the setting
+    goes. Not a shared one."""
+    current, own = hooks_dir(local_dir), _own_hooks_dir(local_dir)
+    return [current] if own == current.resolve() or own.is_symlink() else [current, own]
+
+
 def uninstall(local_dir) -> None:
     """Remove our block from every hook; delete a hook file that was only ours. A hook that
     doesn't carry our block is left byte-for-byte as it is. One we may not write -- or one whose
     begin marker lost its end marker, so the line under it may still run a sync -- doesn't end the
     sweep: the hooks after it are cleaned too, then its error is raised."""
     try:
-        current, own = hooks_dir(local_dir), _own_hooks_dir(local_dir)
+        dirs = _swept_dirs(local_dir)
     except Exception:
         return
-    # The repo's own hooks dir too when `core.hooksPath` has moved away from it since (husky sets it
-    # on `npm install`): a block left there runs again once the setting goes. Not a shared one.
-    dirs = [current] if own == current.resolve() or own.is_symlink() else [current, own]
     failed = None
     for d in dirs:
         for name in HOOKS:
@@ -218,7 +223,7 @@ def uninstall(local_dir) -> None:
 
 def is_installed(local_dir) -> bool:
     try:
-        d = hooks_dir(local_dir)
+        dirs = _swept_dirs(local_dir)
     except Exception:
         return False
-    return any((d / n).exists() and _BEGIN in (_read(d / n) or "") for n in HOOKS)
+    return any((d / n).exists() and _BEGIN in (_read(d / n) or "") for d in dirs for n in HOOKS)
