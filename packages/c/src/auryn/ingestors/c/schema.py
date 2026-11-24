@@ -20,7 +20,7 @@ NODE_SCHEMAS = [
     NodeSchema(label="Struct", indexed_properties=("name",)),
     NodeSchema(label="Union", indexed_properties=("name",)),
     NodeSchema(label="Enum", indexed_properties=("name",)),
-    NodeSchema(label="Typedef", indexed_properties=("name",)),
+    NodeSchema(label="TypeAlias", indexed_properties=("name",)),
     NodeSchema(label="GlobalVariable", indexed_properties=("name",)),
     NodeSchema(label="Macro", indexed_properties=("name",)),
     NodeSchema(label="Field", indexed_properties=("name",)),
@@ -31,7 +31,7 @@ EDGE_SCHEMAS = [
     # File <-> entity: a file DEFINES an entity (has its body/definition) or DECLARES it (a
     # prototype / forward declaration). A single external function is typically DECLARED by
     # one or more headers and DEFINED by exactly one .c -- so one Function node, many edges.
-    EdgeSchema(rel_type="DEFINES"),   # File -> Function|Struct|Union|Enum|Typedef|GlobalVariable|Macro
+    EdgeSchema(rel_type="DEFINES"),   # File -> Function|Struct|Union|Enum|TypeAlias|GlobalVariable|Macro
     EdgeSchema(rel_type="DECLARES"),  # File -> Function|Struct (prototype / forward decl)
     EdgeSchema(rel_type="INCLUDES"),  # File -> File (#include resolved within the project)
     # Structural members.
@@ -39,8 +39,8 @@ EDGE_SCHEMAS = [
     EdgeSchema(rel_type="HAS_PARAMETER"),  # Function -> Parameter
     # Semantic layer -- each carries {resolution}.
     EdgeSchema(rel_type="CALLS"),       # Function -> Function
-    EdgeSchema(rel_type="REFERENCES"),  # Function|Field -> Struct|Union|Enum|Typedef (type usage)
+    EdgeSchema(rel_type="REFERENCES"),  # Function|Field -> Struct|Union|Enum|TypeAlias (type usage)
 ]
 
 # Named-type labels a REFERENCES edge can point at (a field/param/return type naming one).
-TYPE_LABELS = ("Struct", "Union", "Enum", "Typedef")
+TYPE_LABELS = ("Struct", "Union", "Enum", "TypeAlias")

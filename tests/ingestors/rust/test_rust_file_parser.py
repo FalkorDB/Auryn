@@ -105,7 +105,7 @@ def test_trait_supertraits_and_required_vs_default_methods():
         """
     )
     (t,) = rf.types
-    assert t.kind == "Trait" and t.supertraits == ["Named", "Clone"]
+    assert t.kind == "Interface" and t.supertraits == ["Named", "Clone"]
     methods = {m.name: m for m in t.trait_methods}
     assert methods["area"].has_body is False  # required (function_signature_item)
     assert methods["describe"].has_body is True  # default-bodied

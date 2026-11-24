@@ -28,7 +28,7 @@ from auryn.ingestors.typescript.schema import NODE_SCHEMAS
 __all__ = ["ChangeSet", "TS_SPEC", "read_graph_index"]
 
 _CONTAINMENT_RELS = (
-    "HAS_MODULE", "HAS_CLASS", "HAS_INTERFACE", "HAS_ENUM", "HAS_TYPE_ALIAS",
+    "HAS_MODULE", "HAS_TYPE",
     "HAS_FUNCTION", "HAS_METHOD", "HAS_PROPERTY", "HAS_PARAMETER", "HAS_ENUM_MEMBER",
 )
 _SYMBOL_REF_RELS = ("CALLS", "EXTENDS", "IMPLEMENTS", "RETURNS", "REFERENCES")

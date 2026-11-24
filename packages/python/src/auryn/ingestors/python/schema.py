@@ -31,7 +31,7 @@ NODE_SCHEMAS = [
     NodeSchema(label="Class", indexed_properties=("name", "linkage_key")),
     NodeSchema(label="Function", indexed_properties=("name", "linkage_key")),
     NodeSchema(label="Method", indexed_properties=("name", "linkage_key")),
-    NodeSchema(label="Attribute", indexed_properties=("name",)),
+    NodeSchema(label="Field", indexed_properties=("name",)),
     NodeSchema(label="Parameter", indexed_properties=("name",)),
     # Deferred (see GRAPH_MODEL.md): a `DTO` classification for @dataclass /
     # pydantic BaseModel / TypedDict / NamedTuple, mirroring C#'s DTO label. Not emitted
@@ -44,12 +44,12 @@ EDGE_SCHEMAS = [
     EdgeSchema(rel_type="HAS_PACKAGE"),  # Project  -> Package
     EdgeSchema(rel_type="HAS_SUBPACKAGE"),  # Package -> Package
     EdgeSchema(rel_type="HAS_MODULE"),  # Project|Package -> Module
-    EdgeSchema(rel_type="HAS_CLASS"),  # Module|Package -> Class (Package for __init__.py symbols)
+    EdgeSchema(rel_type="HAS_TYPE"),  # Module|Package -> Class (Package for __init__.py symbols)
     EdgeSchema(rel_type="HAS_FUNCTION"),  # Module|Package -> Function
     EdgeSchema(rel_type="HAS_METHOD"),  # Class -> Method
-    EdgeSchema(rel_type="HAS_ATTRIBUTE"),  # Class -> Attribute
+    EdgeSchema(rel_type="HAS_FIELD"),  # Class -> Field
     EdgeSchema(rel_type="HAS_PARAMETER"),  # Function|Method -> Parameter
-    EdgeSchema(rel_type="HAS_NESTED_CLASS"),  # Class -> Class
+    EdgeSchema(rel_type="HAS_NESTED_TYPE"),  # Class -> Class
     EdgeSchema(rel_type="HAS_NESTED_FUNCTION"),  # Function|Method -> Function (a def nested in a body)
     # Semantic layer -- every one carries a provenance property (see contract).
     EdgeSchema(rel_type="EXTENDS"),  # Class -> Class (local base); {resolution, mro_index}
@@ -72,7 +72,7 @@ EDGE_SCHEMAS = [
     #   edge form is what a later framework-enrichment pass (Django/FastAPI/Celery) adds.
 ]
 
-# Every label that can be an EXTENDS/IMPLEMENTS/HAS_CLASS/HAS_NESTED_CLASS endpoint --
+# Every label that can be an EXTENDS/IMPLEMENTS/HAS_TYPE/HAS_NESTED_TYPE endpoint --
 # i.e. every "class-like" declaration kind. Only `Class` today (`DTO` joins it if/when
 # the classification label above is enabled). Kept as a named tuple for parity with the
 # C# ingestor's TYPE_LABELS, which read_fingerprints()-style scans iterate over.

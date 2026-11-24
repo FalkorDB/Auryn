@@ -90,7 +90,7 @@ def test_provenance_covers_annotated_and_inferred(items):
     sources = {
         n.properties["type_source"]
         for n in _nodes(items)
-        if n.label in ("Attribute", "Parameter")
+        if n.label in ("Field", "Parameter")
     }
     assert sources == {"annotated", "inferred"}
 

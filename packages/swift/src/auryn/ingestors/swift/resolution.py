@@ -11,7 +11,7 @@ Swift blends the Rust and Java templates (see schema.py):
   top-level `Function`s alongside type-bound `Method`s.
 * like Java, the type hierarchy is nominal -- but Swift writes superclass and conformances in one
   comma list, so the EXTENDS/IMPLEMENTS split is decided here from the resolved target's kind
-  (a project Class in a class's list -> EXTENDS; a project Protocol -> IMPLEMENTS; any name in a
+  (a project Class in a class's list -> EXTENDS; a project Interface -> IMPLEMENTS; any name in a
   protocol's list -> EXTENDS).
 
 Name-based only -- this is the fast tree-sitter engine, so every resolved CALLS edge is stamped
@@ -63,7 +63,7 @@ _STDLIB_TYPES = frozenset(
 @dataclass
 class _Entry:
     type_id: str
-    kind: str  # "Class" | "Struct" | "Enum" | "Protocol"
+    kind: str  # "Class" | "Struct" | "Enum" | "Interface"
     name: str
     raw: RawType
     file_id: str
@@ -213,8 +213,8 @@ def resolve(raw_files, project_id: str) -> Iterator[GraphNode | GraphEdge]:
     for owner, ext, ext_module in ext_attachments:  # `extension Foo: Bar` adds a conformance to Foo
         for name in ext.conformances:
             target = _resolve_target(name, type_index, ext_module)
-            if target is not None and target.kind == "Protocol" and target.type_id != owner.type_id:
-                yield GraphEdge("IMPLEMENTS", owner.kind, {"id": owner.type_id}, "Protocol", {"id": target.type_id})
+            if target is not None and target.kind == "Interface" and target.type_id != owner.type_id:
+                yield GraphEdge("IMPLEMENTS", owner.kind, {"id": owner.type_id}, "Interface", {"id": target.type_id})
 
     for owner_id, _owner_label, p, module in properties:
         pid = ids.property_id(owner_id, p.name)
@@ -247,7 +247,7 @@ def _flatten(rt: RawType, file_id: str, root_id: str, parent_type_id: str | None
 
 # -- pass 1 emitters -----------------------------------------------------------------------
 
-_KIND_BY_SLUG = {"class": "Class", "struct": "Struct", "enum": "Enum", "protocol": "Protocol"}
+_KIND_BY_SLUG = {"class": "Class", "struct": "Struct", "enum": "Enum", "protocol": "Interface"}
 
 
 def _parent_kind(parent_type_id: str) -> str:
@@ -392,9 +392,9 @@ def _emit_hierarchy(e: _Entry, type_index: dict[str, list[_Entry]]) -> Iterator[
         target = _resolve_target(name, type_index, e.module_id)
         if target is None or target.type_id == e.type_id:
             continue
-        if e.kind == "Protocol":
+        if e.kind == "Interface":
             rel = "EXTENDS"  # a protocol's inherited protocols
-        elif target.kind == "Protocol":
+        elif target.kind == "Interface":
             rel = "IMPLEMENTS"  # a class/struct/enum conforming to a protocol
         elif target.kind == "Class" and e.kind == "Class":
             rel = "EXTENDS"  # a class superclass

@@ -90,14 +90,14 @@ class RawVariant:
 
 @dataclass
 class RawType:
-    kind: str  # "Struct" | "Enum" | "Trait"
+    kind: str  # "Struct" | "Enum" | "Interface"
     name: str
     visibility: str = "private"
     type_parameters: list[str] = field(default_factory=list)
-    supertraits: list[str] = field(default_factory=list)  # Trait only (`trait Foo: Bar + Baz`)
+    supertraits: list[str] = field(default_factory=list)  # Interface only (`trait Foo: Bar + Baz`)
     fields: list[RawField] = field(default_factory=list)  # Struct only
     variants: list[RawVariant] = field(default_factory=list)  # Enum only
-    trait_methods: list[RawFunction] = field(default_factory=list)  # Trait only (sig + default)
+    trait_methods: list[RawFunction] = field(default_factory=list)  # Interface only (sig + default)
     source: str = ""
     doc: str = ""  # shared `doc` property: the leading `///`/`//`/`/** */` comment, cleaned
     line_start: int = 0

@@ -308,7 +308,7 @@ def _emit_module(m: RawModule, idx: _Index, oracle: SemanticOracle | None) -> It
     for fn in m.functions:
         yield from _emit_function(fn, scope_id, m.dotted, m.dotted, "HAS_FUNCTION", scope_id, scope_label, ctx)
     for cls in m.classes:
-        yield from _emit_class(cls, scope_id, m.dotted, scope_id, scope_label, "HAS_CLASS", ctx)
+        yield from _emit_class(cls, scope_id, m.dotted, scope_id, scope_label, "HAS_TYPE", ctx)
     yield from _emit_imports(m, scope_id, scope_label, idx)
 
     # Module-scope (top-level) calls: the Module (or Package, for an __init__.py) node is the
@@ -413,18 +413,18 @@ def _emit_class(cls: RawClass, scope_id: str, scope_dotted: str, container_id: s
     for method in cls.methods:
         yield from _emit_function(method, cls_id, qname, scope_dotted, "HAS_METHOD", cls_id, "Class", ctx)
     for nested in cls.nested:
-        yield from _emit_class(nested, cls_id, qname, cls_id, "Class", "HAS_NESTED_CLASS", ctx)
+        yield from _emit_class(nested, cls_id, qname, cls_id, "Class", "HAS_NESTED_TYPE", ctx)
 
 
 def _emit_attribute(attr: RawAttribute, cls_id: str, ctx: _ModCtx) -> Iterator[GraphNode | GraphEdge]:
     attr_id = ids.attribute_id(cls_id, attr.name)
     type_str, source = _type_of(attr.annotation, attr.name_line, attr.name_col, ctx)
     yield GraphNode(
-        "Attribute",
+        "Field",
         {"id": attr_id},
         {"name": attr.name, "type": type_str, "type_source": source, "defined_in": attr.defined_in, "is_classvar": attr.is_classvar},
     )
-    yield GraphEdge("HAS_ATTRIBUTE", "Class", {"id": cls_id}, "Attribute", {"id": attr_id})
+    yield GraphEdge("HAS_FIELD", "Class", {"id": cls_id}, "Field", {"id": attr_id})
 
 
 # -- functions / methods -----------------------------------------------------------

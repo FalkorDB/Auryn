@@ -3,7 +3,7 @@ ADR 0005) -- the fourth language on it (after C, Go, Java), validating again tha
 fixes (definition ownership, order-independent multi-definer winner, v2 blast-radius narrowing)
 carry over with only per-language glue and NO core changes.
 
-Rust is authored-shared like Go/Java but with a hierarchical MODULE tier: a Struct/Enum/Trait/
+Rust is authored-shared like Go/Java but with a hierarchical MODULE tier: a Struct/Enum/Interface/
 Function/Method/Const is keyed under its containing module (`rust://<proj>/module/<dotted>...`) or,
 for a crate-root item, directly under the project id -- NOT under a file. Many files feed the
 crate-root scope (and each `mod`), and a type's methods live in separate `impl` blocks that may sit
@@ -58,10 +58,10 @@ __all__ = ["ChangeSet", "RUST_SPEC", "read_rust_index", "incremental_rust_sync"]
 _PROVENANCE_RELS = ("DEFINES",)
 _LATERAL_RELS = ("CALLS", "DEPENDS_ON", "IMPLEMENTS", "EXTENDS", "DEFINED_IN")
 _CONTAINMENT_RELS = ("HAS_PACKAGE", "HAS_TARGET", "HAS_MODULE", "HAS_SUBMODULE", "HAS_FILE",
-                     "HAS_TYPE", "HAS_FUNCTION", "HAS_METHOD", "HAS_FIELD", "HAS_VARIANT",
+                     "HAS_TYPE", "HAS_FUNCTION", "HAS_METHOD", "HAS_FIELD", "HAS_ENUM_MEMBER",
                      "HAS_PARAMETER", "HAS_CONST")
 _SYMBOL_REF_RELS = ("CALLS", "DEPENDS_ON", "IMPLEMENTS", "EXTENDS")
-_TARGETABLE = ("Struct", "Enum", "Trait", "Function", "Method")
+_TARGETABLE = ("Struct", "Enum", "Interface", "Function", "Method")
 
 
 def _scope_key(path: str) -> str:
@@ -161,16 +161,16 @@ def read_rust_index(writer: GraphWriter, proj_id: str, exclude_keys: set[str], n
     if not seed_file_ids:
         return idx
 
-    # Named types (Struct/Enum/Trait) defined by the surviving files -> _TypeEntry stubs, with a
+    # Named types (Struct/Enum/Interface) defined by the surviving files -> _TypeEntry stubs, with a
     # struct's fields attached (so an emit method on a non-emit receiver types field calls).
     fields_by_tid: dict[str, list] = defaultdict(list)
     for tid, fname, ftype in writer.ro_query(
-        "MATCH (t)-[:HAS_FIELD]->(fld:Field) WHERE (t:Struct OR t:Enum OR t:Trait) "
+        "MATCH (t)-[:HAS_FIELD]->(fld:Field) WHERE (t:Struct OR t:Enum OR t:Interface) "
         "AND t.id >= $lo AND t.id < $hi RETURN t.id, fld.name, fld.type", {"lo": lo, "hi": hi},
     ).result_set:
         fields_by_tid[str(tid)].append(RawField(name=str(fname), type=str(ftype) if ftype is not None else ""))
     for tid, label, tname, tparams in writer.ro_query(
-        f"MATCH (file:File)-[:DEFINES]->(t) WHERE file.id IN $fids AND (t:Struct OR t:Enum OR t:Trait) "
+        f"MATCH (file:File)-[:DEFINES]->(t) WHERE file.id IN $fids AND (t:Struct OR t:Enum OR t:Interface) "
         f"RETURN DISTINCT t.id, {semantic_label('t')}, t.name, t.type_parameters", {"fids": seed_file_ids},
     ).result_set:
         # type_parameters comes back so an emit method on this (generic) receiver flags dynamic dispatch
@@ -245,7 +245,7 @@ RUST_SPEC = ScopedSpec(
     # OtherCrate::Type` (an orphan impl keyed under the foreign type). So when a type is touched, pull
     # its method-definer files via HAS_METHOD, re-authoring the type's full method set + IMPLEMENTS
     # edges together (else resyncing a file that merely references the type deletes those cross-file
-    # methods/edges -- the real-repo data loss this closes). HAS_FIELD/HAS_VARIANT/HAS_CONST are
+    # methods/edges -- the real-repo data loss this closes). HAS_FIELD/HAS_ENUM_MEMBER/HAS_CONST are
     # single-file (declared with the type) so they're not needed here.
     type_member_rels=("HAS_METHOD",),
     # A METHODLESS `impl Trait for Type {}` carries an IMPLEMENTS edge but no method node, and the impl

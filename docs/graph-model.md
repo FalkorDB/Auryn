@@ -29,11 +29,25 @@ language-specific labels/edges where its concepts genuinely don't map.
 | **`Function`** | A free/top-level callable. |
 | **`Method`** | A callable bound to a type (has a receiver/owner). |
 | **`Parameter`** | A parameter of a function/method; carries a **`type`** property. |
-| `Class` / `Interface` / `Struct` / `Enum` / `Trait` / `Record` … | Named types (which exist depends on the language). |
-| `Field` / `Property` | Members of a type. |
+| `Class` / `Interface` / `Struct` / `Enum` / `Union` / `Record` / `TypeAlias` … | Named types (which exist depends on the language). |
+| `Field` / `Property` | Members of a type (`Field` = plain data member; `Property` only where the language has accessor-backed properties — C#/Swift/TS). |
+| `EnumMember` | A member of an enum (every language — never `EnumCase`/`EnumVariant`). |
+| `Const` | A named constant (every language — never `Constant`). |
 
 Callables are always `Function` (free) or `Method` (bound) — never a language-specific name —
 so call-graph traversal is uniform.
+
+**The vocabulary is deliberately minimal — one name per concept, no aliases.** A language reuses the
+shared labels/edges and only introduces its own when the concept *genuinely differs*. Convergences already
+enforced: enum members are `EnumMember` (not `EnumCase`/`EnumVariant`), a constant is `Const`, a type alias
+is `TypeAlias` (not `Typedef`), a Swift protocol / Rust trait is an `Interface` (those languages have no
+separate interface), a class data member is a `Field` (not `Attribute`), and the container→type edge is
+always `HAS_TYPE` (not `HAS_CLASS`/`HAS_INTERFACE`/`HAS_ENUM`/`HAS_TYPE_ALIAS`). The few distinctions that
+*earn* a separate name: **PHP `Trait`/`USES_TRAIT`** (PHP has both traits and interfaces — a `use`d mixin is
+not an `implements`ed contract), and C/C++ **`DEFINES` vs `DECLARES`** (a definition vs a forward
+declaration, load-bearing for incremental resync). A future step folds the remaining type labels
+(`Class`/`Struct`/`Record`/…) into a single `Type` label carrying a `kind` property, extending the
+`Function`/`Method` rule to types.
 
 ### Shared node properties
 

@@ -5,8 +5,8 @@ diff this project's PHP subgraph.
 Mirrors ingestors/java/schema.py -- PHP and Java are structural siblings (a namespace/package tier
 over types with methods; explicit extends/implements). Differences track the language: the tier is
 `Namespace` (with HAS_NAMESPACE/HAS_SUBNAMESPACE, like Java's Package tier but backslash-separated);
-PHP adds a `Trait` type kind and the `USES_TRAIT` edge, `Property`/`Constant` class members
-(HAS_PROPERTY/HAS_CONSTANT), `EnumCase`s (HAS_ENUM_CASE), and top-level free `Function`s
+PHP adds a `Trait` type kind and the `USES_TRAIT` edge, `Property`/`Const` class members
+(HAS_PROPERTY/HAS_CONST), `EnumMember`s (HAS_ENUM_MEMBER), and top-level free `Function`s
 (HAS_FUNCTION) alongside methods.
 
 The shared cross-ingestor set is held to the contract: callables are `Function`/`Method`, the call
@@ -28,9 +28,9 @@ NODE_SCHEMAS = [
     NodeSchema(label="Function", indexed_properties=("name", "linkage_key")),  # linkage_key: ADR 0004 cross-repo
     NodeSchema(label="Method", indexed_properties=("name", "linkage_key")),    # linkage_key: ADR 0004 cross-repo
     NodeSchema(label="Property", indexed_properties=("name",)),
-    NodeSchema(label="Constant", indexed_properties=("name",)),
+    NodeSchema(label="Const", indexed_properties=("name",)),
     NodeSchema(label="Parameter", indexed_properties=("name",)),
-    NodeSchema(label="EnumCase", indexed_properties=("name",)),
+    NodeSchema(label="EnumMember", indexed_properties=("name",)),
 ]
 
 EDGE_SCHEMAS = [
@@ -43,9 +43,9 @@ EDGE_SCHEMAS = [
     EdgeSchema(rel_type="DEFINED_IN"),         # type|Function -> File
     EdgeSchema(rel_type="HAS_METHOD"),         # type -> Method
     EdgeSchema(rel_type="HAS_PROPERTY"),       # type -> Property
-    EdgeSchema(rel_type="HAS_CONSTANT"),       # type -> Constant
+    EdgeSchema(rel_type="HAS_CONST"),          # type -> Const
     EdgeSchema(rel_type="HAS_PARAMETER"),      # Method|Function -> Parameter
-    EdgeSchema(rel_type="HAS_ENUM_CASE"),      # Enum -> EnumCase
+    EdgeSchema(rel_type="HAS_ENUM_MEMBER"),    # Enum -> EnumMember
     # Semantic layer.
     EdgeSchema(rel_type="EXTENDS"),      # Class -> Class ; Interface -> Interface(s)
     EdgeSchema(rel_type="IMPLEMENTS"),   # Class|Enum -> Interface

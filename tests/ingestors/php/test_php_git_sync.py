@@ -50,8 +50,8 @@ def test_type_kinds_and_members(graph):
     q = _ingest(graph)
     assert q("MATCH (i:Interface {name:'Repository'}) RETURN 1") == [[1]]
     assert q("MATCH (t:Trait {name:'Timestamps'}) RETURN 1") == [[1]]
-    assert q("MATCH (e:Enum {name:'Status'})-[:HAS_ENUM_CASE]->(c) RETURN count(c)")[0][0] == 2
-    assert q("MATCH (:Class {name:'Store'})-[:HAS_CONSTANT]->(k) RETURN k.name") == [["MAX_ITEMS"]]
+    assert q("MATCH (e:Enum {name:'Status'})-[:HAS_ENUM_MEMBER]->(c) RETURN count(c)")[0][0] == 2
+    assert q("MATCH (:Class {name:'Store'})-[:HAS_CONST]->(k) RETURN k.name") == [["MAX_ITEMS"]]
     assert q("MATCH (:Class {name:'Store'})-[:HAS_METHOD]->(m) RETURN count(m)")[0][0] >= 3
 
 

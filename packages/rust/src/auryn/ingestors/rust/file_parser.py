@@ -72,7 +72,7 @@ from auryn.ingestors.rust.raw_model import (
     RawVariant,
 )
 
-_TYPE_ITEMS = {"struct_item": "Struct", "enum_item": "Enum", "trait_item": "Trait"}
+_TYPE_ITEMS = {"struct_item": "Struct", "enum_item": "Enum", "trait_item": "Interface"}
 
 
 def parse_file(path: str) -> RawFile:
@@ -386,7 +386,7 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
     def build_trait(node) -> RawType:
         ls, le = lines(node)
         rt = RawType(
-            kind="Trait",
+            kind="Interface",
             name=txt(fieldn(node, "name")),
             visibility=visibility(node),
             type_parameters=type_parameters(node),

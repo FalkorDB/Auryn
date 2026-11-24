@@ -35,7 +35,7 @@ def test_type_kinds_and_inheritance():
     assert by_name["Dog"].kind == "Class" and by_name["Dog"].inherits == ["Animal", "Named"]
     assert by_name["Point"].kind == "Struct" and by_name["Point"].inherits == ["Shape"]
     assert by_name["Direction"].kind == "Enum" and by_name["Direction"].inherits == ["String"]
-    assert by_name["Shape"].kind == "Protocol" and by_name["Shape"].inherits == ["Named"]
+    assert by_name["Shape"].kind == "Interface" and by_name["Shape"].inherits == ["Named"]
 
 
 def test_functions_and_argument_labels():
@@ -135,7 +135,7 @@ def test_protocol_requirements():
         """
     )
     (p,) = rf.types
-    assert p.kind == "Protocol"
+    assert p.kind == "Interface"
     assert [m.name for m in p.methods] == ["describe"]
     assert p.methods[0].has_body is False
     assert [pr.name for pr in p.properties] == ["area"]

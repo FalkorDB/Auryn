@@ -304,7 +304,7 @@ def _emit_classes(files, scope: _Scope, items: list) -> None:
                 "type_parameters": c.type_parameters, "source": c.source, "doc": c.doc,
                 **_loc(rf.path, c.line_start, c.line_end),
             }))
-            items.append(GraphEdge("HAS_CLASS", "Module", {"id": mid}, "Class", {"id": cid}))
+            items.append(GraphEdge("HAS_TYPE", "Module", {"id": mid}, "Class", {"id": cid}))
             _emit_heritage(c, cid, "Class", scope, items)
             _emit_properties(c.properties, cid, "Class", rf, scope, items)
             for m in c.methods:
@@ -322,7 +322,7 @@ def _emit_interfaces(files, scope: _Scope, items: list) -> None:
                 "is_exported": it.is_exported, "type_parameters": it.type_parameters,
                 "source": it.source, "doc": it.doc, **_loc(rf.path, it.line_start, it.line_end),
             }))
-            items.append(GraphEdge("HAS_INTERFACE", "Module", {"id": mid}, "Interface", {"id": iid}))
+            items.append(GraphEdge("HAS_TYPE", "Module", {"id": mid}, "Interface", {"id": iid}))
             _emit_heritage(it, iid, "Interface", scope, items)
             _emit_properties(it.properties, iid, "Interface", rf, scope, items)
             for m in it.methods:  # method_signature -- no body, so no CALLS
@@ -339,7 +339,7 @@ def _emit_enums(files, scope: _Scope, items: list) -> None:
                 "is_const": en.is_const, "is_exported": en.is_exported, "members": en.members,
                 "source": en.source, "doc": en.doc, **_loc(rf.path, en.line_start, en.line_end),
             }))
-            items.append(GraphEdge("HAS_ENUM", "Module", {"id": mid}, "Enum", {"id": eid}))
+            items.append(GraphEdge("HAS_TYPE", "Module", {"id": mid}, "Enum", {"id": eid}))
             for pos, member in enumerate(en.members):
                 memid = ids.enum_member_id(eid, member)
                 items.append(GraphNode("EnumMember", {"id": memid}, {"name": member, "position": pos}))
@@ -356,7 +356,7 @@ def _emit_type_aliases(files, scope: _Scope, items: list) -> None:
                 "value": ta.value, "is_exported": ta.is_exported, "source": ta.source, "doc": ta.doc,
                 **_loc(rf.path, ta.line_start, ta.line_end),
             }))
-            items.append(GraphEdge("HAS_TYPE_ALIAS", "Module", {"id": mid}, "TypeAlias", {"id": tid}))
+            items.append(GraphEdge("HAS_TYPE", "Module", {"id": mid}, "TypeAlias", {"id": tid}))
             # a type alias referencing project types (`type X = A | B`)
             for ref in _dedup(ta.type_refs):
                 hit = scope.type_index.get(ref)

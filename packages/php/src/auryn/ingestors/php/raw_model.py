@@ -10,7 +10,7 @@ made later, in resolution.py, where all files are visible at once.
 Modelled after the Java ingestor's raw_model (PHP is a structural sibling: explicit classes/
 interfaces with extends/implements), extended for PHP's own constructs: `Trait` types and the
 `use TraitName;` uses list (USES_TRAIT), `Property` members with a visibility (PHP's term, matching
-the C# precedent), class `Constant`s, `EnumCase`s, top-level free `Function`s, and
+the C# precedent), class `Const`s, `EnumMember`s, top-level free `Function`s, and
 constructor-promoted properties. A class has a single `superclass` plus a separate `interfaces`
 list, so EXTENDS vs IMPLEMENTS needs no naming heuristic. line_start/line_end are 1-based
 inclusive; 0 means not captured."""
