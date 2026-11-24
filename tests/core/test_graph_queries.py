@@ -226,6 +226,28 @@ class TestNeighbors:
         assert len(result["nodes"]) == 3
         assert result["truncated"] is True
 
+    def test_lean_per_type_cap_bounds_each_type_and_reports_counts(self, graph):
+        # A hot File: many CHANGED commits (the new provenance layer) + a few structural DEFINES.
+        # get_context's lean + per_type_cap must bound EACH type so the commit flood can't crowd out
+        # the structural neighbours, and must report the true fan-out + drop bulky props.
+        graph.query("CREATE (f:File {id: 'f', name: 'f'})")
+        graph.query("UNWIND range(1, 3) AS j MATCH (f:File {id: 'f'}) "
+                    "CREATE (f)-[:DEFINES]->(:Function {id: 'fn' + toString(j), name: 'fn' + toString(j)})")
+        graph.query("UNWIND range(1, 30) AS i MATCH (f:File {id: 'f'}) "
+                    "CREATE (:GitCommit {id: 'c' + toString(i), sha: toString(i), message: $m})-[:CHANGED]->(f)",
+                    {"m": "m" * 300})
+
+        result = gq.neighbors(graph, "f", lean=True, per_type_cap=5)
+
+        changed = [e for e in result["edges"] if e["type"] == "CHANGED"]
+        assert len(changed) == 5                                   # the 30 CHANGED are capped at 5
+        assert result["edge_counts"]["in"]["CHANGED"] == 30        # true fan-out still reported
+        assert result["edge_counts"]["out"]["DEFINES"] == 3
+        assert result["truncated"] is True
+        assert any(e["type"] == "DEFINES" for e in result["edges"])  # structural neighbours survive the flood
+        commits = [n for n in result["nodes"] if n["label"] == "GitCommit"]
+        assert commits and all("message" not in n["properties"] for n in commits)  # lean dropped the >200-char message
+
 
 class TestShortestPath:
     """The single path primitive behind the viewer's Path finder and the MCP
@@ -425,6 +447,60 @@ class TestCallersCalleesEdges:
         graph.query("CREATE (x:Function {id:'x'})-[:CALLS {resolution:'inferred'}]->(y:Function {id:'y'})")
         edge = gq.callees(graph, "x", max_depth=1)["edges"][0]
         assert (edge["from"], edge["to"], edge["resolution"]) == ("x", "y", "inferred")
+
+
+class TestCompactTraversalResponses:
+    """The traversal tools (who_calls/callees/impact_of/find_path) must NOT echo the full
+    `source` of the node the caller already identified by id, nor the full per-edge property
+    bag -- that echo, repeated across a multi-call investigation, was the single largest
+    avoidable token cost. get_context(id) remains the full-source escape hatch."""
+
+    def test_center_echo_omits_source(self, graph):
+        graph.query(
+            "CREATE (x:Function {id:'x', name:'charge', source:'def charge(): ...body...'})"
+            "-[:CALLS]->(y:Function {id:'y', name:'authorize', source:'def authorize(): ...'})"
+        )
+        for res in (
+            gq.callers(graph, "y"),
+            gq.callees(graph, "x"),
+            gq.impact_of(graph, "x", direction="downstream"),
+        ):
+            assert res["center"]["name"]  # still self-describing (id/name/label kept)
+            assert "source" not in res["center"]["properties"]
+        # get_context (neighbors) is the detail tool -- it DOES keep the center source.
+        assert gq.neighbors(graph, "x")["center"]["properties"].get("source")
+
+    def test_find_path_endpoints_omit_source(self, graph):
+        graph.query(
+            "CREATE (x:Function {id:'x', source:'...body...'})-[:CALLS]->(y:Function {id:'y', source:'...'})"
+        )
+        res = gq.shortest_path(graph, "x", "y")
+        assert res["found"]
+        assert "source" not in res["from"]["properties"] and "source" not in res["to"]["properties"]
+
+    def test_traversal_list_nodes_drop_duplication_and_internal_keys(self, graph):
+        graph.query(
+            "CREATE (a:Function {id:'a', name:'a', qualified_name:'m.a', linkage_key:'extern://a', "
+            "signature:'a()', is_async:false, decorators:[], line_start:1})"
+            "-[:CALLS]->(b:Function {id:'b', name:'b'})"
+        )
+        node = gq.callers(graph, "b", max_depth=1)["nodes"][0]
+        assert node["id"] == "a" and node["name"] == "a"            # top-level identity preserved
+        p = node["properties"]
+        assert "id" not in p and "name" not in p                    # the top-level duplication is gone
+        assert "linkage_key" not in p and "qualified_name" not in p  # internal / redundant dropped
+        assert "is_async" not in p and "decorators" not in p        # empty / low-value dropped
+        assert p.get("signature") == "a()" and p.get("line_start") == 1  # locating props survive
+
+    def test_lean_edges_drop_the_full_property_bag(self, graph):
+        graph.query(
+            "CREATE (x:Function {id:'x'})-[:CALLS {resolution:'resolved', via:'http', "
+            "argument_types:['int','str'], type_arguments:['T']}]->(y:Function {id:'y'})"
+        )
+        edge = gq.callees(graph, "x", max_depth=1)["edges"][0]
+        assert (edge["from"], edge["to"], edge["type"]) == ("x", "y", "CALLS")
+        assert edge["resolution"] == "resolved" and edge["via"] == "http"
+        assert "properties" not in edge  # the full bag (argument_types/type_arguments) is gone
 
 
 class TestTraceCrossesHttpSeam:

@@ -46,10 +46,11 @@ def test_every_option_has_help():
 
 
 def test_reference_doc_lists_every_top_level_command(tmp_path):
-    """docs/cli.md is the consolidated reference -- it must mention every top-level command so it
-    can't silently fall out of date when a command is added."""
+    """docs/cli.md is the consolidated reference -- it must mention every user-facing top-level
+    command so it can't silently fall out of date when a command is added. Hidden commands
+    (internal plumbing like the embed daemon) aren't part of the user reference."""
     from pathlib import Path
 
     doc = (Path(__file__).resolve().parents[2] / "docs" / "cli.md").read_text()
-    missing = [name for name in cli.commands if name not in doc]
+    missing = [name for name, cmd in cli.commands.items() if not cmd.hidden and name not in doc]
     assert not missing, f"docs/cli.md is missing commands: {missing}"

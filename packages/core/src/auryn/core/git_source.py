@@ -52,6 +52,15 @@ def cache_home() -> Path:
     return Path(env) if env else DEFAULT_CACHE_ROOT
 
 
+def refuse_option_like(rev: str) -> None:
+    """Refuse a revision git would read as an option -- `--output=<file>` makes `git diff`
+    overwrite that file -- with the error git raises for any other bad revision. Checked here
+    rather than with git's `--end-of-options`: that flag only exists from git 2.24, and this has
+    to hold with whatever git is installed."""
+    if rev.startswith("-"):
+        raise git.GitCommandError(("git", "diff", rev), 129, f"fatal: bad revision '{rev}'")
+
+
 def parse_name_status(out: str, suffix: str) -> dict:
     """Parse `git diff --name-status -M` output into {modified, added, deleted, renamed} of
     `suffix` paths -- shared by GitRepoCache (commit-to-commit) and the working-tree source
@@ -204,6 +213,19 @@ class GitRepoCache:
             if path.endswith(suffix) and not (excluded_dir_names & set(path.split("/")[:-1]))
         ]
 
+    def list_files_glob(
+        self, sha: str, patterns: tuple[str, ...], excluded_dir_names: set[str]
+    ) -> list[tuple[str, str]]:
+        """Every blob matching any of `patterns` (basename fnmatch; a pattern with a `/` matches the
+        relative path -- see registry.glob_matches), excluding `excluded_dir_names` -- the glob-aware
+        counterpart of `list_files`, over the same cached one-time tree traversal."""
+        from auryn.core.registry import glob_matches
+
+        return [
+            (path, blob_sha) for path, blob_sha in self._all_files(sha)
+            if glob_matches(path, patterns) and not (excluded_dir_names & set(path.split("/")[:-1]))
+        ]
+
     def read_blob(self, blob_sha: str) -> bytes:
         repo = git.Repo(str(self._path))
         return repo.odb.stream(bytes.fromhex(blob_sha)).read()
@@ -219,6 +241,8 @@ class GitRepoCache:
         orchestrator intersects these paths with the live file listing (which is filtered),
         so an excluded or already-gone path simply drops out there."""
         repo = git.Repo(str(self._path))
+        for sha in (old_sha, new_sha):  # `old_sha` is read back from the graph: never an option
+            refuse_option_like(sha)
         out = repo.git.diff("-M", "--name-status", old_sha, new_sha)
         return parse_name_status(out, suffix)
 

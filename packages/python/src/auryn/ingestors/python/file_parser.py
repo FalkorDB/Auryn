@@ -118,6 +118,12 @@ def parse_module(source: bytes | str, path: str, package_dirs: frozenset[str] | 
     dotted = ids.dotted_module_path(path, package_dirs)
     module = RawModule(path=path, dotted=dotted, is_package=ids.is_package_init(path))
     text = source.decode("utf-8", "replace") if isinstance(source, bytes) else source
+    if text.startswith("\ufeff"):
+        # Python accepts a leading UTF-8 BOM, but ast.parse() on a str rejects it with
+        # "invalid non-printable character U+FEFF", which would skip the whole file. Drop the
+        # single leading BOM so BOM-prefixed source is parsed. _Source sees the same stripped
+        # text below, so byte offsets/segments stay consistent.
+        text = text[1:]
     try:
         with _parse_deadline(_max_parse_seconds()):
             tree = ast.parse(text, filename=path)
@@ -248,10 +254,38 @@ def _function(node: ast.FunctionDef | ast.AsyncFunctionDef, src: _Source, *, in_
         calls=_calls(node),
         source=src.segment(node),
         doc=src.leading_comment(_decl_top_line(node)),
+        nested=_nested_functions(node.body, src),
     )
     if in_class and fn.params:
         fn.self_attrs = _self_attrs(node, self_name=fn.params[0].name)
     return fn
+
+
+def _nested_functions(body: list[ast.stmt], src: _Source) -> list[RawFunction]:
+    """The functions declared inside a scope's OWN body -- so a nested `def` (a tool/handler
+    registered inside a `register(app)` factory, a closure) becomes its own node and its calls
+    aren't lost. Mirrors `_calls_in_body`'s scope rules: it finds defs at any statement depth in
+    the body (inside `if`/`for`/...) but stops at a deeper `def`/`class` -- those own their inner
+    defs. A nested `def` is always a plain function, never a method (even inside a method body)."""
+    out: list[RawFunction] = []
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.append(_function(child, src))  # its own nested defs are collected recursively there
+                continue  # don't descend -- that scope owns its inner defs
+            if isinstance(child, ast.ClassDef):
+                continue  # a nested class's methods aren't this scope's nested functions
+            walk(child)
+
+    for stmt in body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.append(_function(stmt, src))
+            continue
+        if isinstance(stmt, ast.ClassDef):
+            continue
+        walk(stmt)
+    return out
 
 
 def _params(args: ast.arguments) -> list[RawParameter]:
@@ -324,24 +358,49 @@ def _calls_in_body(body: list[ast.stmt]) -> list[RawCall]:
     function's decorators and default-argument expressions -- which hang off the `def` node, not
     its body, and execute in the ENCLOSING scope at definition time (`@deco`, `def f(x=compute())`)
     -- are correctly excluded from the function's own calls. Document order; a call's arguments are
-    descended into so `print(load())` captures both."""
+    descended into so `print(load())` captures both.
+
+    A `lambda` body is NOT skipped: a lambda is anonymous and never becomes its own graph node, so
+    the calls inside it (`observe(lambda: helper(x))` -> `helper`) would otherwise vanish. They're
+    attributed to the enclosing scope -- EXCEPT a call to one of the lambda's OWN parameters, which is
+    a local (`lambda helper: helper()` calls the arg, not a same-named function), so it's dropped.
+    A nested `def`/`class` IS skipped here -- it gets its own node and its calls are collected there
+    (see `_function`'s nested recursion)."""
     out: list[RawCall] = []
 
-    def walk(node: ast.AST) -> None:
+    def visit(node: ast.AST, bound: frozenset[str]) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return  # a nested def/class -- its own node owns its calls
+        if isinstance(node, ast.Lambda):
+            # defaults run in THIS scope (at definition time); the body runs with the lambda's params
+            # bound, so a call to one of those params is a local, not a project function.
+            for default in [*node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]:
+                visit(default, bound)
+            visit(node.body, bound | _lambda_param_names(node.args))
+            return
+        if isinstance(node, ast.Call):
+            rc = _raw_call(node.func)
+            # Drop a call bound to a lambda parameter: a simple-name call to it (`lambda f: f()`), OR a
+            # `receiver.attr()` whose RECEIVER is the param (`lambda client: client.send()` -- the arg,
+            # not a same-named import). An unbound receiver still resolves normally.
+            if rc is not None and not (rc.is_simple_name and rc.name in bound) and not (rc.receiver and rc.receiver in bound):
+                out.append(rc)
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-                continue  # a nested scope -- owns its own calls
-            if isinstance(child, ast.Call):
-                rc = _raw_call(child.func)
-                if rc is not None:
-                    out.append(rc)
-            walk(child)
+            visit(child, bound)
 
     for stmt in body:
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        walk(stmt)
+        visit(stmt, frozenset())
     return out
+
+
+def _lambda_param_names(args: ast.arguments) -> frozenset[str]:
+    """Every parameter name a lambda binds (positional, keyword-only, *args, **kwargs)."""
+    names = {a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
+    if args.vararg:
+        names.add(args.vararg.arg)
+    if args.kwarg:
+        names.add(args.kwarg.arg)
+    return frozenset(names)
 
 
 def _calls(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[RawCall]:

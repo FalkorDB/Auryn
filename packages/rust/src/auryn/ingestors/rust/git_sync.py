@@ -46,25 +46,48 @@ class SyncStats:
     files_cached: int = 0
 
 
-def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, ref: str | None) -> SyncStats:
-    """Recompute the whole Rust subgraph at `target_sha` and delta it onto the graph. `source`
-    is duck-typed (GitRepoCache or LocalDirectorySource): only list_files/read_blob used."""
+# Two-phase depth (mirrors C#/Python): the fast tree-sitter pass stamps the Project `depth="fast"`,
+# the deep rust-analyzer pass `depth="deep"`. A re-run short-circuits only when the commit matches AND
+# the existing depth is at least the requested one -- so a fast re-run never downgrades a deep graph,
+# but the deep phase still runs right after the fast one at the same commit.
+_DEPTH_RANK = {None: 0, "": 0, "fast": 1, "deep": 2}
+
+
+def _project_node(proj_id: str, project_name: str, repo_uri: str, target_sha: str, ref: str | None, depth: str) -> GraphNode:
+    return GraphNode(
+        "Project", {"id": proj_id},
+        {"name": project_name, "repo_uri": repo_uri, "commit_sha": target_sha, "ref": ref, "depth": depth},
+    )
+
+
+def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, ref: str | None,
+            engine: str = "treesitter") -> SyncStats:
+    """Recompute the whole Rust subgraph at `target_sha` and delta it onto the graph. `source` is
+    duck-typed (GitRepoCache or LocalDirectorySource). `engine`: "treesitter" (fast, blob-streamed) or
+    "rust_analyzer" (deep, SCIP over an on-disk cargo checkout, falling back to tree-sitter if the tool
+    or a buildable crate is unavailable)."""
     started = time.monotonic()
     proj_id = project_id(project_name)
+    requested_depth = "deep" if engine == "rust_analyzer" else "fast"
 
     writer.setup_schema(NODE_SCHEMAS)  # brings the graph key into existence before the first read
     current_sha = writer.get_property("Project", {"id": proj_id}, "commit_sha")
-    if current_sha == target_sha:
+    current_depth = writer.get_property("Project", {"id": proj_id}, "depth")
+    if current_sha == target_sha and _DEPTH_RANK.get(current_depth, 0) >= _DEPTH_RANK[requested_depth]:
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
-    # Incremental resync (ADR 0005, authored-shared engine): when a prior graph exists at a
+    # Incremental resync (ADR 0005, authored-shared engine) -- fast engine only; the deep pass always
+    # fully re-analyzes (rust-analyzer is whole-crate), like C#'s Roslyn. When a prior graph exists at a
     # different, reachable commit, move it by processing only the git diff + its graph-derived blast
-    # radius instead of recomputing the whole tree -- see incremental.py. Any failure falls back to
-    # the full recompute below (which leaves the graph untouched until it writes).
-    if current_sha and current_sha != target_sha:
+    # radius instead of recomputing the whole tree. Any failure falls back to the full recompute below.
+    if engine == "treesitter" and current_sha and current_sha != target_sha:
         incr = _route(writer, source, target_sha, ref, current_sha,
                       project_name=project_name, repo_uri=repo_uri)
         if incr is not None:
+            # A fast incremental resync degrades a deep graph (changed callables get name-resolution,
+            # unchanged ones keep their deep edges), so stamp depth="fast" -- else a later deep phase
+            # would see commit==target & depth=="deep" and short-circuit, leaving the changes shallow.
+            writer.query("MATCH (p:Project {id: $id}) SET p.depth = 'fast'", {"id": proj_id})
             _reconcile_cargo(writer, proj_id, source, target_sha)
             return _finish(writer, proj_id, source, incr)
 
@@ -78,9 +101,15 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
         preload=["auryn.ingestors.rust.file_parser"], logger=logger,
     )
 
-    project_node = GraphNode(
-        "Project", {"id": proj_id}, {"name": project_name, "repo_uri": repo_uri, "commit_sha": target_sha, "ref": ref}
-    )
+    if engine == "rust_analyzer":
+        is_upgrade = current_sha == target_sha and current_depth == "fast"
+        deep = _deep_sync_at(writer, source, target_sha, files, proj_id, project_name, repo_uri, ref,
+                             started, is_upgrade=is_upgrade, entry_sha=current_sha)
+        if deep is not None:
+            return deep
+        # rust-analyzer unavailable / crate not analyzable -> fall through to the tree-sitter fast pass.
+
+    project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "fast")
 
     def make_target():  # re-iterable: stream_apply runs it once for nodes, once for edges
         return itertools.chain([project_node], resolution.resolve(files, proj_id))
@@ -88,6 +117,117 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
     result = _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(files))
     _reconcile_cargo(writer, proj_id, source, target_sha)
     return _finish(writer, proj_id, source, result)
+
+
+def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_name: str, repo_uri: str,
+                  ref: str | None, started: float, *, is_upgrade: bool, entry_sha) -> "SyncStats | None":
+    """Deep pass: resolve CALLS precisely via rust-analyzer's SCIP index, layered over the fast pass's
+    structural subgraph (same node ids). Returns None (caller falls back to tree-sitter) if rust-analyzer
+    can't run. The overlay is SURGICAL -- it only touches the callables SCIP actually analyzed
+    (`covered_ids`): a fast name-CALLS is replaced only where deep authored a resolved edge for it (so a
+    call to an unresolvable same-line method keeps its fast edge), and `unresolved_calls` is recomputed
+    from what SCIP resolved (so a fn-pointer call `f()` stays counted). A callable SCIP never saw
+    (feature-gated-out / unlinked) keeps its fast resolution untouched. `diff_extern_edges=False` on an
+    upgrade leaves the fast pass's extern:// placeholders alone."""
+    try:
+        from auryn.core.deep_sync import is_name_calls_edge as _is_name_calls_edge, should_drop_name_edge
+        from auryn.core.scip_resolve import resolve_calls
+    except ImportError:  # a plugin-only upgrade left an older auryn-core without the resolver
+        logger.warning("rust deep pass: this auryn-core lacks core.scip_resolve (upgrade auryn-core); "
+                       "falling back to tree-sitter")
+        return None
+    from auryn.ingestors.rust import rust_analyzer
+
+    def moved() -> "str | None":
+        # the graph moved off the revision we started from (a concurrent ingest, e.g. deep="background"
+        # on a sibling writer) -> our result is stale. Compare against ENTRY, not target: a direct A->B
+        # deep sync legitimately still reads A here (we haven't written B yet).
+        live = writer.get_property("Project", {"id": proj_id}, "commit_sha")
+        return str(live) if live is not None and live != entry_sha else None
+
+    try:
+        # on-disk cargo checkout rust-analyzer needs. A git source yields an immutable checkout at
+        # target_sha; a LOCAL directory yields the live tree, so (as with the fast parse, which also reads
+        # the live tree) an edit landing between the parse and this SCIP read can skew the join -- worst
+        # case a few calls fall back to fast. A content snapshot would close that live-dir window (v2).
+        with source.working_tree(target_sha) as workdir:
+            scip_bytes = rust_analyzer.run_scip(str(workdir))
+    except rust_analyzer.RustAnalyzerUnavailable as exc:
+        # Don't roll a newer concurrent revision back to this one via the fast fallback: no-op if moved.
+        live = moved()
+        if live is not None:
+            return SyncStats(commit_sha=live, elapsed_seconds=time.monotonic() - started)
+        logger.warning("rust deep pass unavailable (%s); falling back to tree-sitter", exc)
+        return None
+
+    locations = resolution.callable_locations(files, proj_id)
+    deep = resolve_calls(scip_bytes, locations)
+    loc_by_id = {loc.id: loc for loc in locations}
+    unresolved_by_id = {cid: _recompute_unresolved(loc_by_id[cid], deep.seen_by_caller.get(cid, set()))
+                        for cid in deep.covered_ids}
+    # Keep the project node at "fast" in the delta; the depth is bumped to "deep" by an ATOMIC guarded
+    # write AFTER the delta lands (see below), so a concurrent ingest that moved the commit can't be
+    # overwritten with a stale "deep" claim.
+    project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "fast")
+
+    def make_target():  # a GENERATOR (not a materialized list) -- preserves stream_apply's bounded memory
+        yield project_node
+        for item in resolution.resolve(files, proj_id):
+            if _is_name_calls_edge(item):
+                if should_drop_name_edge(item, deep, loc_by_id):
+                    continue  # deep identified this call -> drop the fast name-edge (deep edge replaces it)
+                yield item
+            elif _is_callable_node(item) and item.key["id"] in unresolved_by_id:
+                yield _set_unresolved(item, unresolved_by_id[item.key["id"]])
+            else:
+                yield item  # structure, external CALLS, uncovered callables pass through
+        yield from deep.edges
+
+    # Freshness guard before the write (see `moved`): discard a stale revision rather than clobber a
+    # newer one. Narrows but doesn't fully close the write-time TOCTOU -- a transactional conditional
+    # write is a shared two-phase concern for a follow-up.
+    live = moved()
+    if live is not None:
+        logger.warning("rust deep pass: graph moved to %s while analyzing %s; discarding stale result",
+                       live, target_sha)
+        return SyncStats(commit_sha=live, elapsed_seconds=time.monotonic() - started)
+
+    result = _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(files),
+                    diff_extern_edges=not is_upgrade)
+    # Atomically stamp depth="deep" only if the graph is STILL at this commit -- a single guarded write
+    # (GraphWriter.set_if) that no-ops if a concurrent ingest moved the commit while we deepened, so the
+    # depth marker never makes a stale deep claim (closes the read-then-decide TOCTOU).
+    writer.set_if("Project", proj_id, "depth", "deep", "commit_sha", target_sha)
+    logger.info("rust deep: %d resolved / %d external CALLS over %d/%d callables covered",
+                deep.metrics["resolved"], deep.metrics["external"], len(deep.covered_ids), len(locations))
+    _reconcile_cargo(writer, proj_id, source, target_sha)
+    return _finish(writer, proj_id, source, result)
+
+
+def _recompute_unresolved(loc, seen: set) -> int:
+    """`unresolved_calls` for a deep-covered callable: call sites with no identifiable concrete callee.
+      * non-macro: fast-parse call names SCIP did NOT tie to a callable (a fn-pointer/param call `f()`);
+      * macro: the callable's macro-internal call count minus the macro-expanded calls SCIP resolved
+        (a name SCIP attributed that the fast parse didn't record is a resolved macro call).
+    An external callee (stdlib / other-crate) counts as identified -- consistent with the fast pass not
+    counting concrete externals (#794). Name-based, so it can be off under same-name call collisions or
+    import aliases; position-precise per-call-site reconciliation is a follow-up (needs SCIP/tree-sitter
+    occurrence columns)."""
+    non_macro = len(loc.called_names - seen)
+    macro_resolved = len(seen - loc.called_names)  # names SCIP saw but the fast parse didn't = macro-expanded
+    return non_macro + max(0, loc.macro_calls - macro_resolved)
+
+
+
+
+def _is_callable_node(item) -> bool:
+    return type(item).__name__ == "GraphNode" and item.label in ("Function", "Method")
+
+
+def _set_unresolved(node: GraphNode, count: int) -> GraphNode:
+    """Re-emit a callable node with `unresolved_calls=count` -- the sites deep could not tie to a
+    concrete callee (0 when it resolved everything). Supersedes the fast pass's estimate (#792)."""
+    return GraphNode(node.label, node.key, {**node.properties, "unresolved_calls": count})
 
 
 def _route(writer, source, target_sha, ref, current_sha, *, project_name, repo_uri) -> "SyncStats | None":
@@ -122,15 +262,19 @@ def _finish(writer, proj_id: str, source, result: SyncStats) -> SyncStats:
     return result
 
 
-def _apply(writer, proj_id: str, make_target, target_sha: str, started: float, files_parsed: int) -> SyncStats:
+def _apply(writer, proj_id: str, make_target, target_sha: str, started: float, files_parsed: int,
+           *, diff_extern_edges: bool = True) -> SyncStats:
     # Cross-repo reconciliation (ADR 0004): fold placeholder<->definer pairs among the linkages
     # this ingest touched -- targeted index seeks, no scan. No-op unless the graph holds >1 repo.
     from auryn.core.linkage import reconcile_linkages
 
     # stream_apply writes the delta without materialising the target graph, and returns the
-    # linkage strings collected inline (see graph_sync.stream_apply / core.linkage).
+    # linkage strings collected inline (see graph_sync.stream_apply / core.linkage). The deep pass
+    # passes diff_extern_edges=False so it doesn't prune the fast pass's extern:// placeholder CALLS
+    # (it can't author cross-repo edges; reconcile_linkages heals them when the definer is ingested).
     labels = [s.label for s in NODE_SCHEMAS]
-    stats, reals, placeholders = stream_apply(writer, proj_id, labels, make_target)
+    stats, reals, placeholders = stream_apply(writer, proj_id, labels, make_target,
+                                              diff_extern_edges=diff_extern_edges)
     reconcile_linkages(writer, reals, placeholders)
 
     return SyncStats(
@@ -208,10 +352,12 @@ def _git_language_sync(
     solution_name: str | None,
     ref: str | None,
     cache_root=None,
+    engine: str = "treesitter",
 ) -> LanguageIngestResult:
     """GitLanguage adapter for the multi-language endpoint (Rust has no solution/cache knobs --
-    accepted for the shared interface and ignored)."""
-    s = sync_at(writer, source, target_sha, project_name=project_name, repo_uri=repo_uri, ref=ref)
+    accepted for the shared interface and ignored). `engine` selects the fast or deep pass."""
+    s = sync_at(writer, source, target_sha, project_name=project_name, repo_uri=repo_uri, ref=ref,
+                engine=engine)
     return LanguageIngestResult(
         nodes_added=s.nodes_added,
         nodes_updated=s.nodes_updated,
@@ -226,6 +372,16 @@ def _git_language_sync(
     )
 
 
-# The GitLanguage is registered by the import-light plugin.py (the entry-point target), whose
-# lazy `sync` thunk calls `_git_language_sync` above -- so importing this tree-sitter engine
-# module is deferred until a source actually contains Rust files.
+def treesitter_language_sync(writer, source, target_sha, **kwargs) -> LanguageIngestResult:
+    """Fast-phase GitLanguage `sync` thunk (the default engine)."""
+    return _git_language_sync(writer, source, target_sha, engine="treesitter", **kwargs)
+
+
+def rust_analyzer_language_sync(writer, source, target_sha, **kwargs) -> LanguageIngestResult:
+    """Deep-phase GitLanguage `deep_sync` thunk (rust-analyzer / SCIP, degrading to the fast pass)."""
+    return _git_language_sync(writer, source, target_sha, engine="rust_analyzer", **kwargs)
+
+
+# The GitLanguage is registered by the import-light plugin.py (the entry-point target), whose lazy
+# `sync`/`deep_sync` thunks call the adapters above -- so importing this engine module (and, for the
+# deep phase, rust-analyzer) is deferred until a source actually contains Rust files.

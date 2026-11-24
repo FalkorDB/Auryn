@@ -30,7 +30,7 @@ from pathlib import Path
 from auryn.core import progress
 from auryn.core.graph_client import SHARED_NODE_LABEL, GraphWriter, semantic_label
 from auryn.core.graph_model import GraphEdge, GraphNode
-from auryn.core.graph_sync import compute_delta, edge_key, node_key
+from auryn.core.graph_sync import compute_delta, edge_key, node_key, unstamped
 from auryn.core.instrument import phase
 
 logger = logging.getLogger(__name__)
@@ -357,6 +357,7 @@ def incremental_sync(
     removed_nodes = 0
     orphan_candidates: set[tuple[str, str]] = set()
     with phase("write"):
+        writer.merge_nodes([unstamped(target_items[0])])  # no commit claimed from the first mutation on
         for scope_id in removed_scope_ids:
             orphan_candidates |= _externs_referenced_by(writer, spec, scope_id)
             removed_nodes += _delete_subgraph(writer, spec, scope_id)
@@ -632,6 +633,7 @@ def incremental_sync_authored(
     removed_nodes = 0
     orphan_candidates: set[tuple[str, str]] = set()
     with phase("write"):
+        writer.merge_nodes([unstamped(target_items[0])])  # no commit claimed from the first mutation on
         for fid in removed_file_ids:
             orphan_candidates |= _externs_referenced_by(writer, spec, fid)
             removed_nodes += _delete_subgraph(writer, spec, fid)

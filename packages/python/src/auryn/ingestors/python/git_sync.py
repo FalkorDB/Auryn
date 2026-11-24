@@ -326,7 +326,10 @@ def _jedi_sync_at(writer, config, source, target_sha, ref, proj_id, started, *,
                 modules.append(parse_module((workdir / rel).read_bytes(), rel, pkg_dirs))
         # Fan the (dominant) Jedi inference cost across a process pool up front, inside the
         # `with` -- workers read files that only exist while the working tree is materialized.
-        project_items = _project_items(config, proj_id, target_sha, ref, "deep")
+        # Keep the project node at "fast" in the delta; depth is bumped to "deep" atomically AFTER the
+        # delta lands (guarded on commit_sha), so a concurrent ingest that moved the commit can't be
+        # overwritten with a stale deep claim.
+        project_items = _project_items(config, proj_id, target_sha, ref, "fast")
         with phase("resolve"):
             oracle = build_precomputed_oracle(str(workdir), modules, workers=config.workers)
 
@@ -336,8 +339,10 @@ def _jedi_sync_at(writer, config, source, target_sha, ref, proj_id, started, *,
         broken = sorted(m.path for m in modules if not m.parse_ok)
         # Stay INSIDE the working-tree context: stream_apply re-runs make_target (hence
         # resolve over the oracle) as it writes, and the oracle is anchored to this checkout.
-        return _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(modules),
-                      broken=broken, diff_extern_edges=diff_extern_edges)
+        result = _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(modules),
+                        broken=broken, diff_extern_edges=diff_extern_edges)
+        writer.set_if("Project", proj_id, "depth", "deep", "commit_sha", target_sha)  # atomic depth bump
+        return result
 
 
 def _apply(writer: GraphWriter, proj_id: str, make_target, target_sha: str, started: float,

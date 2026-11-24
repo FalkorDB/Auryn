@@ -46,15 +46,35 @@ class SyncStats:
     files_cached: int = 0
 
 
-def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, ref: str | None) -> SyncStats:
+# Two-phase depth (mirrors Rust/C#/Python/TS): the fast tree-sitter pass stamps the Project
+# `depth="fast"`, the deep scip-go pass `depth="deep"`. A re-run short-circuits only when the commit
+# matches AND the existing depth is at least the requested one -- so a fast re-run never downgrades a deep
+# graph, but the deep phase still runs right after the fast one at the same commit.
+_DEPTH_RANK = {None: 0, "": 0, "fast": 1, "deep": 2}
+
+
+def _project_node(proj_id: str, project_name: str, repo_uri: str, target_sha: str, ref: str | None,
+                  depth: str) -> GraphNode:
+    return GraphNode(
+        "Project", {"id": proj_id},
+        {"name": project_name, "repo_uri": repo_uri, "commit_sha": target_sha, "ref": ref, "depth": depth},
+    )
+
+
+def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, ref: str | None,
+            engine: str = "treesitter") -> SyncStats:
     """Recompute the whole Go subgraph at `target_sha` and delta it onto the graph. `source` is
-    duck-typed (GitRepoCache or LocalDirectorySource): only list_files/read_blob used."""
+    duck-typed (GitRepoCache or LocalDirectorySource). `engine`: "treesitter" (fast, blob-streamed) or
+    "scip_go" (deep, SCIP over an on-disk module checkout, falling back to tree-sitter if scip-go or a
+    loadable module is unavailable)."""
     started = time.monotonic()
     proj_id = project_id(project_name)
+    requested_depth = "deep" if engine == "scip_go" else "fast"
 
     writer.setup_schema(NODE_SCHEMAS)  # brings the graph key into existence before the first read
     current_sha = writer.get_property("Project", {"id": proj_id}, "commit_sha")
-    if current_sha == target_sha:
+    current_depth = writer.get_property("Project", {"id": proj_id}, "depth")
+    if current_sha == target_sha and _DEPTH_RANK.get(current_depth, 0) >= _DEPTH_RANK[requested_depth]:
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
     # go.mod module map (module_dir -> module_path), from the manifests at the target. It turns each
@@ -63,15 +83,19 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
     modules = _read_modules(source, target_sha)
     module_map = gomod.build_module_map(modules)
 
-    # Incremental resync (ADR 0005, authored-shared engine): when a prior graph exists at a
-    # different, reachable commit, move it by processing only the git diff + its graph-derived blast
-    # radius. GUARD: a go.mod STRUCTURAL change (a module path added/removed/renamed) shifts the
-    # import paths -- and thus the linkage keys -- of files that did NOT change, which an incremental
-    # pass would not re-emit; fall back to a full recompute so incremental == full always holds.
-    if current_sha and current_sha != target_sha and _module_map_from_graph(writer, proj_id) == module_map:
+    # Incremental resync (ADR 0005, authored-shared engine) -- fast engine only; the deep pass always
+    # fully re-analyzes (scip-go is whole-module), like Rust/Roslyn. GUARD: a go.mod STRUCTURAL change
+    # (a module path added/removed/renamed) shifts the import paths -- and thus the linkage keys -- of
+    # files that did NOT change, which an incremental pass would not re-emit; fall back to a full
+    # recompute so incremental == full always holds.
+    if (engine == "treesitter" and current_sha and current_sha != target_sha
+            and _module_map_from_graph(writer, proj_id) == module_map):
         incr = _route(writer, source, target_sha, ref, current_sha,
                       project_name=project_name, repo_uri=repo_uri)
         if incr is not None:
+            # A fast incremental resync degrades a deep graph -> stamp depth="fast" so a later deep phase
+            # re-runs (else commit==target & depth=="deep" would short-circuit it, leaving changes shallow).
+            writer.query("MATCH (p:Project {id: $id}) SET p.depth = 'fast'", {"id": proj_id})
             _reconcile_gomod(writer, proj_id, modules)
             return _finish(writer, proj_id, source, incr)
 
@@ -85,14 +109,106 @@ def sync_at(writer, source, target_sha: str, project_name: str, repo_uri: str, r
         preload=["auryn.ingestors.go.file_parser"], logger=logger,
     )
 
-    project_node = GraphNode(
-        "Project", {"id": proj_id}, {"name": project_name, "repo_uri": repo_uri, "commit_sha": target_sha, "ref": ref}
-    )
+    if engine == "scip_go":
+        is_upgrade = current_sha == target_sha and current_depth == "fast"
+        deep = _deep_sync_at(writer, source, target_sha, files, module_map, modules, proj_id, project_name,
+                             repo_uri, ref, started, is_upgrade=is_upgrade, entry_sha=current_sha)
+        if deep is not None:
+            return deep
+        # scip-go unavailable / analyzed nothing -> fall through to the tree-sitter fast pass.
+
+    project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "fast")
 
     def make_target():  # re-iterable: stream_apply runs it once for nodes, once for edges
         return itertools.chain([project_node], resolution.resolve(files, proj_id, module_map))
 
     result = _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(files))
+    _reconcile_gomod(writer, proj_id, modules)
+    return _finish(writer, proj_id, source, result)
+
+
+
+
+def _deep_sync_at(writer, source, target_sha: str, files, module_map, modules, proj_id: str,
+                  project_name: str, repo_uri: str, ref: str | None, started: float, *,
+                  is_upgrade: bool, entry_sha) -> "SyncStats | None":
+    """Deep pass: resolve CALLS precisely via scip-go's SCIP index, layered over the fast pass's
+    structural subgraph (same node ids). Returns None (caller falls back to tree-sitter) if scip-go can't
+    run or analyzed none of our callables. The overlay drops a fast name-CALLS only where deep IDENTIFIED
+    that intra-project call (a resolved deep edge replaces it, or it was a wrong local guess for an
+    external callee); on an upgrade (fast->deep at the same commit) extern:// placeholders are left alone
+    (diff_extern_edges=False). Go's fast pass omits self-CALLS, so deep does too (no emit_self_calls)."""
+    try:
+        from auryn.core.deep_sync import is_name_calls_edge as _is_name_calls_edge, should_drop_name_edge
+        from auryn.core.scip_resolve import resolve_calls
+    except ImportError:  # a plugin-only upgrade left an older auryn-core without the resolver
+        logger.warning("go deep pass: this auryn-core lacks core.scip_resolve (upgrade auryn-core); "
+                       "falling back to tree-sitter")
+        return None
+    from auryn.ingestors.go import scip_go
+
+    def moved() -> "str | None":
+        live = writer.get_property("Project", {"id": proj_id}, "commit_sha")
+        return str(live) if live is not None and live != entry_sha else None
+
+    def _fall_back() -> "SyncStats | None":
+        # deep can't proceed: no-op on a same-commit upgrade (the fast graph already exists here), else
+        # None to fall through and build the fast graph; never roll a newer concurrent revision back.
+        live = moved()
+        if live is not None or is_upgrade:
+            return SyncStats(commit_sha=live or target_sha, elapsed_seconds=time.monotonic() - started)
+        return None
+
+    try:
+        # scip-go needs an on-disk module checkout. A git source yields an immutable checkout at
+        # target_sha; a LOCAL directory yields the live tree (as the fast parse also reads it), so an edit
+        # landing between the parse and this SCIP read can skew the join -- worst case a few calls fall
+        # back to fast. A content snapshot would close that live-dir window (v2).
+        with source.working_tree(target_sha) as workdir:
+            scip_bytes = scip_go.run_scip(str(workdir))
+    except scip_go.ScipGoUnavailable as exc:
+        logger.warning("go deep pass unavailable (%s); falling back to tree-sitter", exc)
+        return _fall_back()
+
+    locations = resolution.callable_locations(files, proj_id)
+    # require_call_site (#802): Go records every syntactic call's (name, line) in `called_sites` -- INCLUDING
+    # the chained-selector calls (`svc.store.Put()`) its fast `calls` list omits (receiver too complex to
+    # name) -- so the line-precise gate keeps those genuine deep-resolved method dispatches (the deep pass's
+    # main win) while dropping a callable used as a VALUE (`return helper`): a SCIP reference on a line with
+    # no syntactic call of that name is a value use, not a call, so it no longer yields a spurious edge.
+    deep = resolve_calls(scip_bytes, locations, require_call_site=True)
+    if locations and not deep.covered_ids:
+        # scip-go ran but analyzed none of our callables (module won't load, no toolchain): don't make a
+        # hollow depth="deep" claim -- fall back to the fast graph.
+        logger.warning("go deep pass: scip-go covered no callables; falling back to tree-sitter")
+        return _fall_back()
+
+    loc_by_id = {loc.id: loc for loc in locations}
+    # Keep the project node at "fast" in the delta; depth is bumped to "deep" by an ATOMIC guarded write
+    # AFTER the delta lands, so a concurrent ingest that moved the commit can't be overwritten with a stale
+    # "deep" claim.
+    project_node = _project_node(proj_id, project_name, repo_uri, target_sha, ref, "fast")
+
+    def make_target():  # re-iterable: stream_apply runs it once for nodes, once for edges
+        yield project_node
+        for item in resolution.resolve(files, proj_id, module_map):
+            if _is_name_calls_edge(item) and should_drop_name_edge(item, deep, loc_by_id):
+                continue  # deep identified this call -> drop the fast name-edge (deep edge replaces it)
+            yield item
+        yield from deep.edges
+
+    live = moved()  # freshness guard before the write: discard a stale revision rather than clobber a newer one
+    if live is not None:
+        logger.warning("go deep pass: graph moved to %s while analyzing %s; discarding stale result",
+                       live, target_sha)
+        return SyncStats(commit_sha=live, elapsed_seconds=time.monotonic() - started)
+
+    result = _apply(writer, proj_id, make_target, target_sha, started, files_parsed=len(files),
+                    diff_extern_edges=not is_upgrade)
+    # Atomically stamp depth="deep" only if the graph is STILL at this commit (GraphWriter.set_if).
+    writer.set_if("Project", proj_id, "depth", "deep", "commit_sha", target_sha)
+    logger.info("go deep: %d resolved / %d external CALLS over %d/%d callables covered",
+                deep.metrics["resolved"], deep.metrics["external"], len(deep.covered_ids), len(locations))
     _reconcile_gomod(writer, proj_id, modules)
     return _finish(writer, proj_id, source, result)
 
@@ -129,15 +245,19 @@ def _finish(writer, proj_id: str, source, result: SyncStats) -> SyncStats:
     return result
 
 
-def _apply(writer, proj_id: str, make_target, target_sha: str, started: float, files_parsed: int) -> SyncStats:
+def _apply(writer, proj_id: str, make_target, target_sha: str, started: float, files_parsed: int,
+           *, diff_extern_edges: bool = True) -> SyncStats:
     # Cross-repo reconciliation (ADR 0004): fold placeholder<->definer pairs among the linkages
     # this ingest touched -- targeted index seeks, no scan. No-op unless the graph holds >1 repo.
     from auryn.core.linkage import reconcile_linkages
 
-    # stream_apply writes the delta without materialising the target graph, and returns the
-    # linkage strings collected inline (see graph_sync.stream_apply / core.linkage).
+    # stream_apply writes the delta without materialising the target graph, and returns the linkage strings
+    # collected inline (see graph_sync.stream_apply / core.linkage). The deep pass passes
+    # diff_extern_edges=False on an upgrade so it doesn't prune the fast pass's extern:// placeholder CALLS
+    # (it can't author cross-repo edges; reconcile_linkages heals them later).
     labels = [s.label for s in NODE_SCHEMAS]
-    stats, reals, placeholders = stream_apply(writer, proj_id, labels, make_target)
+    stats, reals, placeholders = stream_apply(writer, proj_id, labels, make_target,
+                                              diff_extern_edges=diff_extern_edges)
     reconcile_linkages(writer, reals, placeholders)
 
     return SyncStats(
@@ -237,10 +357,12 @@ def _git_language_sync(
     solution_name: str | None,
     ref: str | None,
     cache_root=None,
+    engine: str = "treesitter",
 ) -> LanguageIngestResult:
     """GitLanguage adapter for the multi-language endpoint (Go has no solution/cache knobs --
-    accepted for the shared interface and ignored)."""
-    s = sync_at(writer, source, target_sha, project_name=project_name, repo_uri=repo_uri, ref=ref)
+    accepted for the shared interface and ignored). `engine` selects the fast or deep pass."""
+    s = sync_at(writer, source, target_sha, project_name=project_name, repo_uri=repo_uri, ref=ref,
+                engine=engine)
     return LanguageIngestResult(
         nodes_added=s.nodes_added,
         nodes_updated=s.nodes_updated,
@@ -255,6 +377,16 @@ def _git_language_sync(
     )
 
 
-# The GitLanguage is registered by the import-light plugin.py (the entry-point target), whose
-# lazy `sync` thunk calls `_git_language_sync` above -- so importing this tree-sitter engine
-# module is deferred until a source actually contains Go files.
+def treesitter_language_sync(writer, source, target_sha, **kwargs) -> LanguageIngestResult:
+    """Fast-phase GitLanguage `sync` thunk (the default engine)."""
+    return _git_language_sync(writer, source, target_sha, engine="treesitter", **kwargs)
+
+
+def scip_go_language_sync(writer, source, target_sha, **kwargs) -> LanguageIngestResult:
+    """Deep-phase GitLanguage `deep_sync` thunk (scip-go / SCIP, degrading to the fast pass)."""
+    return _git_language_sync(writer, source, target_sha, engine="scip_go", **kwargs)
+
+
+# The GitLanguage is registered by the import-light plugin.py (the entry-point target), whose lazy
+# `sync`/`deep_sync` thunks call the adapters above -- so importing this tree-sitter engine module (and,
+# for the deep phase, scip-go) is deferred until a source actually contains Go files.

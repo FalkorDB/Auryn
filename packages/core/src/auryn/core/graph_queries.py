@@ -43,9 +43,12 @@ DEFAULT_QUERY_TIMEOUT_MS = 15000
 # CALLS/DEPENDS_ON/READS/WRITES/REFERENCES are the edges every ingestor already
 # treats as "this uses that" -- EXTENDS/IMPLEMENTS/HAS_* are structural, not
 # usage, and are intentionally left out of the default so impact_of doesn't
-# report "everything in the same namespace" as impacted by default.
-DEFAULT_IMPACT_EDGE_TYPES = ("CALLS", "DEPENDS_ON", "READS", "WRITES", "REFERENCES")
-DEFAULT_CLOSURE_CALL_EDGE_TYPES = ("CALLS",)
+# report "everything in the same namespace" as impacted by default. INVOKES is the
+# derived cross-service call the HTTP stitch writes (caller -> handler, across the
+# request/response seam) so blast radius and reachability span repos and languages
+# in one traversal instead of dying at the first HTTP boundary.
+DEFAULT_IMPACT_EDGE_TYPES = ("CALLS", "INVOKES", "DEPENDS_ON", "READS", "WRITES", "REFERENCES")
+DEFAULT_CLOSURE_CALL_EDGE_TYPES = ("CALLS", "INVOKES")
 DEFAULT_CLOSURE_DATA_EDGE_TYPES = ("READS", "WRITES")
 
 _SAFE_REL_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -117,6 +120,39 @@ def serialize_node_lean(node: Node) -> dict:
     }
 
 
+# Keys dropped from a traversal-LIST node's property bag (who_calls/callees/impact/trace/path):
+# `id`/`name` are already top-level (pure duplication across dozens of nodes); `linkage_key` and
+# `qualified_name` are internal / redundant with the id; the modifier booleans, return-type details
+# and (usually empty) decorators/doc are dead weight the agent rarely needs in a *list*. A denylist
+# (not an allowlist) so an ingestor's location key -- file/path/line_* under any name -- always
+# survives. get_context(id) still returns the full node when the detail is actually wanted.
+_MIN_NODE_DROP_KEYS = frozenset({
+    "id", "name", "linkage_key", "qualified_name", "decorators", "unresolved_calls", "doc",
+    "return_type", "return_type_source", "is_async", "is_generator", "is_static", "is_abstract",
+    "is_virtual", "is_override", "accessibility", "kind",
+})
+
+
+def serialize_node_min(node: Node) -> dict:
+    """serialize_node_lean, trimmed further for the traversal-LIST tools: keeps the top-level
+    id/name/label plus only the locating/disambiguating props (signature, file/path, line_*),
+    dropping the id/name duplication and the internal/low-value keys (_MIN_NODE_DROP_KEYS). On a
+    who_calls/impact result of dozens of nodes this is the dominant token saving; the full bag is
+    one get_context(id) away."""
+    label = first_semantic_label(node.labels)  # strip system labels -- caller sees the dedicated label
+    props = _visible_properties(node.properties)
+    kept = {
+        k: v for k, v in _lean_props(props).items()
+        if k not in _MIN_NODE_DROP_KEYS and v not in ("", [], {}, None)
+    }
+    return {
+        "id": props.get("id"),
+        "label": label,
+        "name": props.get("name") or props.get("id"),
+        "properties": kept,
+    }
+
+
 def serialize_edge(from_id: str, to_id: str, rel_type: str, rel_props) -> dict:
     """One edge in the canonical shape every edge-returning tool uses: explicit **direction**
     (`from` -> `to`), the relation `type`, and -- lifted to the top level so a caller never has to
@@ -128,6 +164,22 @@ def serialize_edge(from_id: str, to_id: str, rel_type: str, rel_props) -> dict:
     edge = {"from": from_id, "to": to_id, "type": rel_type, "properties": props}
     if "resolution" in props:
         edge["resolution"] = props["resolution"]
+    return edge
+
+
+def serialize_edge_lean(from_id: str, to_id: str, rel_type: str, rel_props) -> dict:
+    """serialize_edge trimmed to the fields that carry meaning for a call-chain list --
+    direction (`from` -> `to`), the relation `type`, and the `resolution`/`via` provenance
+    when present. Drops the full property bag (`argument_types`, `type_arguments`, ...) that a
+    who_calls/callees result would otherwise multiply across dozens of edges. The viewer's
+    edge-returning paths (neighbors / all_nodes_and_edges / shortest_path) keep the full
+    serialize_edge; only the traversal-list tools use this."""
+    props = _visible_properties(dict(rel_props))
+    edge = {"from": from_id, "to": to_id, "type": rel_type}
+    if "resolution" in props:
+        edge["resolution"] = props["resolution"]
+    if "via" in props:
+        edge["via"] = props["via"]
     return edge
 
 
@@ -301,7 +353,7 @@ def _result_columns(result) -> list[str]:
     return columns
 
 
-def run_read_query(graph: Graph, cypher: str, limit: int = DEFAULT_ALL_LIMIT) -> dict:
+def run_read_query(graph: Graph, cypher: str, limit: int = DEFAULT_ALL_LIMIT, *, lean: bool = False) -> dict:
     """Run an arbitrary user-supplied Cypher query **read-only** (GRAPH.RO_QUERY,
     so any write clause is rejected by FalkorDB itself, not by us) and reshape the
     result two ways: the {nodes, edges} the viewer's canvas speaks, AND `columns`/`rows`
@@ -340,7 +392,10 @@ def run_read_query(graph: Graph, cypher: str, limit: int = DEFAULT_ALL_LIMIT) ->
         for (node,) in rows:
             nodes_by_internal[node.id] = node
 
-    serialized = [serialize_node(n) for n in nodes_by_internal.values()]
+    # lean (MCP run_cypher) drops bulky props so e.g. `MATCH (c:GitCommit) RETURN c` can't flood the
+    # agent's context with commit messages / changed_files blobs; the viewer (default) keeps full nodes.
+    node_ser = serialize_node_lean if lean else serialize_node
+    serialized = [node_ser(n) for n in nodes_by_internal.values()]
     # a node the viewer can render must have an "id" property to key on
     renderable = [n for n in serialized if n["id"] is not None]
     id_by_internal = {
@@ -400,6 +455,21 @@ def node_detail(graph: Graph, node_id: str) -> dict | None:
     return serialize_node(rows[0][0])
 
 
+def node_summary(graph: Graph, node_id: str) -> dict | None:
+    """Like node_detail, but returns the LEAN node (no `source` text, no bulky props) -- for the
+    `center`/endpoint echo of the traversal tools (who_calls/callees/impact_of/trace_entrypoint/
+    find_path). The caller already supplied this node's id and does NOT need its full source
+    echoed back on every call; that echo, repeated across a multi-call investigation, was the
+    single largest avoidable cost in those responses. get_context(id) still returns the full
+    node with source when it's actually wanted."""
+    rows = graph.ro_query(
+        "MATCH (n:Entity {id: $id}) RETURN n", {"id": node_id}, timeout=DEFAULT_QUERY_TIMEOUT_MS
+    ).result_set
+    if not rows:
+        return None
+    return serialize_node_lean(rows[0][0])
+
+
 def git_tracked_projects(graph: Graph) -> list[dict]:
     """Every Project node in this graph that git_sync.sync() created (i.e. has a
     repo_uri) -- a graph can hold several (different git-tracked codebases, plus
@@ -423,7 +493,8 @@ def repositories(graph: Graph) -> list[dict]:
     return [{"name": r[0], "repo_uri": r[1], "depth": r[2], "base_commit": r[3]} for r in rows]
 
 
-def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT) -> dict | None:
+def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT, *,
+              lean: bool = False, per_type_cap: int | None = None) -> dict | None:
     """One node plus its immediate (1-hop) neighbors, each direction bounded
     independently at `limit`. Unbounded until now -- a node with a huge fan-out
     (e.g. a Project with thousands of HAS_FILE edges into a large ingested
@@ -436,9 +507,44 @@ def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT) -> di
     if center is None:
         return None
 
+    # The viewer (default) wants full nodes capped per direction. The MCP get_context opts into
+    # `lean` (drop bulky props -- commit messages, PR/issue bodies, changed_files) and `per_type_cap`
+    # (bound EACH edge type so a hot node's thousands of CHANGED/HAS_COMMIT edges from the new
+    # provenance layer can't crowd out its structural neighbors), with the true fan-out in `edge_counts`.
+    ser = serialize_node_lean if lean else serialize_node
     nodes_by_id: dict[str, dict] = {}
     edges: list[dict] = []
     truncated = False
+
+    if per_type_cap is not None:
+        edge_counts: dict[str, dict[str, int]] = {"out": {}, "in": {}}
+        for direction in ("out", "in"):
+            count_q = ("MATCH (n:Entity {id: $id})-[r]->(m) RETURN type(r), count(*)" if direction == "out"
+                       else "MATCH (n:Entity {id: $id})<-[r]-(m) RETURN type(r), count(*)")
+            for rel_type, cnt in graph.ro_query(count_q, {"id": node_id},
+                                                timeout=DEFAULT_QUERY_TIMEOUT_MS).result_set:
+                edge_counts[direction][rel_type] = int(cnt)
+            for rel_type in edge_counts[direction]:
+                if not _SAFE_REL_TYPE.match(rel_type):  # rel_type comes from the DB; validate before interpolating
+                    continue
+                fetch_q = (f"MATCH (n:Entity {{id: $id}})-[r:{rel_type}]->(m) RETURN properties(r), m LIMIT $lim"
+                           if direction == "out"
+                           else f"MATCH (n:Entity {{id: $id}})<-[r:{rel_type}]-(m) RETURN properties(r), m LIMIT $lim")
+                # Fetch one past the cap and derive `truncated` from THIS fetch, not the separate count
+                # query above -- a concurrent write between the two would otherwise make the stale count
+                # under-report truncation.
+                rows = graph.ro_query(fetch_q, {"id": node_id, "lim": per_type_cap + 1},
+                                      timeout=DEFAULT_QUERY_TIMEOUT_MS).result_set
+                if len(rows) > per_type_cap:
+                    truncated = True
+                    rows = rows[:per_type_cap]
+                for rel_props, neighbor in rows:
+                    serialized = ser(neighbor)
+                    nodes_by_id[serialized["id"]] = serialized
+                    edges.append(serialize_edge(node_id, serialized["id"], rel_type, rel_props) if direction == "out"
+                                 else serialize_edge(serialized["id"], node_id, rel_type, rel_props))
+        return {"center": center, "nodes": list(nodes_by_id.values()), "edges": edges,
+                "edge_counts": edge_counts, "truncated": truncated}
 
     outgoing = graph.ro_query(
         "MATCH (n:Entity {id: $id})-[r]->(m) RETURN type(r), properties(r), m LIMIT $limit",
@@ -449,7 +555,7 @@ def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT) -> di
         truncated = True
         outgoing = outgoing[:limit]
     for rel_type, rel_props, neighbor in outgoing:
-        serialized = serialize_node(neighbor)
+        serialized = ser(neighbor)
         nodes_by_id[serialized["id"]] = serialized
         edges.append(serialize_edge(node_id, serialized["id"], rel_type, rel_props))
 
@@ -462,7 +568,7 @@ def neighbors(graph: Graph, node_id: str, limit: int = DEFAULT_ROOT_LIMIT) -> di
         truncated = True
         incoming = incoming[:limit]
     for rel_type, rel_props, neighbor in incoming:
-        serialized = serialize_node(neighbor)
+        serialized = ser(neighbor)
         nodes_by_id[serialized["id"]] = serialized
         edges.append(serialize_edge(serialized["id"], node_id, rel_type, rel_props))
 
@@ -501,7 +607,7 @@ def impact_of(
     way). Returns None if `node_id` doesn't exist. `limit` bounds each direction
     independently; `truncated` is set if either direction hit it, without ever
     silently dropping a direction's rows below its own limit."""
-    center = node_detail(graph, node_id)
+    center = node_summary(graph, node_id)
     if center is None:
         return None
     if direction not in ("downstream", "upstream", "both"):
@@ -528,7 +634,7 @@ def impact_of(
             truncated = True
             rows = rows[:limit]
         for (node,) in rows:
-            impacted.append({"node": serialize_node_lean(node), "direction": dir_label})
+            impacted.append({"node": serialize_node_min(node), "direction": dir_label})
 
     return {
         "center": center,
@@ -584,7 +690,7 @@ def _closure_across_seam(
         if len(rows) > limit:
             truncated = True
         for row in rows[:limit]:
-            node = serialize_node_lean(row[0])
+            node = serialize_node_min(row[0])
             if node["id"] not in reached and node["id"] not in root_set:
                 reached[node["id"]] = node
         # Cross the seam: any node so far that calls an endpoint reaches that endpoint's handler(s).
@@ -595,7 +701,7 @@ def _closure_across_seam(
         ).result_set
         frontier = []
         for row in seam_rows:
-            handler = serialize_node_lean(row[0])
+            handler = serialize_node_min(row[0])
             if handler["id"] not in frontier_seen:
                 frontier_seen.add(handler["id"])
                 frontier.append(handler["id"])
@@ -625,7 +731,7 @@ def trace_entrypoint(
     reported explicitly (with `validations_note` explaining why) rather than
     omitted, so a caller can tell "not applicable" apart from "not built yet."
     Returns None if `entry_id` doesn't exist."""
-    entry = node_detail(graph, entry_id)
+    entry = node_summary(graph, entry_id)
     if entry is None:
         return None
     if max_depth is not None and not 1 <= max_depth <= MAX_ALLOWED_DEPTH:
@@ -638,7 +744,7 @@ def trace_entrypoint(
     # one, start the closure from its handler(s) so "the behavior of this endpoint" reaches
     # real code. Any other entry starts the closure from itself, as before.
     handler_nodes = _endpoint_handlers(graph, entry_id) if entry["label"] == "APIEndpoint" else []
-    roots = [serialize_node_lean(h) for h in handler_nodes] if handler_nodes else [entry]
+    roots = [serialize_node_min(h) for h in handler_nodes] if handler_nodes else [entry]
     root_ids = [r["id"] for r in roots]
 
     # CALLS closure from the root(s), transitively crossing the HTTP seam so the trace is truly
@@ -666,7 +772,7 @@ def trace_entrypoint(
     tables_read = []
     tables_written = []
     for table, rel_type in table_rows[:limit]:
-        (tables_read if rel_type == "READS" else tables_written).append(serialize_node_lean(table))
+        (tables_read if rel_type == "READS" else tables_written).append(serialize_node_min(table))
 
     return {
         "entry": entry,
@@ -686,13 +792,15 @@ DEFAULT_CALL_DEPTH = 1
 def _call_neighbors(graph: Graph, node_id: str, direction: str, max_depth: int, limit: int) -> dict | None:
     """Shared core for callers()/callees(): CALLS neighbours of `node_id` in one direction,
     up to `max_depth` hops (1 = direct)."""
-    center = node_detail(graph, node_id)
+    center = node_summary(graph, node_id)
     if center is None:
         return None
     if not 1 <= max_depth <= MAX_ALLOWED_DEPTH:
         raise ValueError(f"max_depth must be between 1 and {MAX_ALLOWED_DEPTH}, got {max_depth!r}")
-    # callers = who CALLS this (inward); callees = what this CALLS (outward).
-    pattern = f"<-[:CALLS*1..{max_depth}]-" if direction == "callers" else f"-[:CALLS*1..{max_depth}]->"
+    # callers = who reaches this (inward); callees = what this reaches (outward). CALLS is an
+    # in-process call; INVOKES is the HTTP stitch's derived cross-service call (caller -> handler),
+    # so "who calls X" spans the request/response seam across repos and languages, not just one repo.
+    pattern = f"<-[:CALLS|INVOKES*1..{max_depth}]-" if direction == "callers" else f"-[:CALLS|INVOKES*1..{max_depth}]->"
     rows = graph.ro_query(
         f"MATCH (n:Entity {{id: $id}}){pattern}(m) RETURN DISTINCT m LIMIT $limit",
         {"id": node_id, "limit": limit + 1},
@@ -709,12 +817,12 @@ def _call_neighbors(graph: Graph, node_id: str, direction: str, max_depth: int, 
         {"id": node_id, "elimit": edge_limit + 1},
         timeout=DEFAULT_QUERY_TIMEOUT_MS,
     ).result_set
-    edges = [serialize_edge(f, t, ty, p) for f, t, ty, p in edge_rows[:edge_limit]]
+    edges = [serialize_edge_lean(f, t, ty, p) for f, t, ty, p in edge_rows[:edge_limit]]
     return {
         "center": center,
         "direction": direction,
         "max_depth": max_depth,
-        "nodes": [serialize_node_lean(row[0]) for row in rows[:limit]],
+        "nodes": [serialize_node_min(row[0]) for row in rows[:limit]],
         "edges": edges,
         "edges_truncated": len(edge_rows) > edge_limit,
         "truncated": truncated,
@@ -773,8 +881,8 @@ def shortest_path(
         frontier. The query timeout still backstops a pathological deep search."""
     if not 1 <= max_depth <= MAX_ALLOWED_DEPTH:
         raise ValueError(f"max_depth must be between 1 and {MAX_ALLOWED_DEPTH}, got {max_depth!r}")
-    start = node_detail(graph, from_id)
-    end = node_detail(graph, to_id)
+    start = node_summary(graph, from_id)
+    end = node_summary(graph, to_id)
     if start is None or end is None:
         return None
 
@@ -810,6 +918,9 @@ def shortest_path(
             "found": False, "hops": 0, "nodes": [], "edges": [],
         }
 
+    # NB: serialize_node_LEAN (not _min) here -- shortest_path also backs the viewer's /path endpoint,
+    # whose nodes replace cached data the inspector reads from node.properties; min would strip the
+    # id/qualified_name/signature the viewer shows. Paths are short, so the token cost is negligible.
     path_nodes = [serialize_node_lean(n) for n in path.nodes()]
     # A relationship carries only its endpoints' *internal* ids; map them back to
     # the real string ids via the path's own nodes so each edge renders with its

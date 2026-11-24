@@ -113,6 +113,57 @@ def make_type_stub(type_id: str, kind: str, name: str, pkg_dir: str, pkg_name: s
     return _Type(type_id, kind, name, pkg_dir, pkg_name, import_path, raw, file_id="")
 
 
+def callable_locations(raw_files: list[RawFile], project_id: str):
+    """Every Go callable's SCIP-join location (graph id, file, 1-based line span, name, called names, and
+    per-call-site (name, line) for the line-precise `require_call_site` gate) -- the bridge the deep
+    (scip-go / SCIP) pass needs. Reuses the SAME id builders as the fast pass
+    (dir-keyed package -> type/func/method ids), so deep CALLS edges land byte-identically on the nodes
+    resolve() authored -- no module map or type inference needed: ids are dir-keyed, and a Go method's
+    receiver type is always in the method's own package, so a per-(package-key, type-name) index resolves
+    the owner type exactly as _resolve's (import_path, name) index does. A parity test asserts these ids
+    are a subset of resolve()'s Function/Method node ids. The core.scip_resolve import is deferred here
+    (deep-only) so the fast pass never requires it (buildable against an older auryn-core).
+
+    Interface method SPECS are deliberately excluded: scip-go encodes them as *term* descriptors
+    (`Reader#Read.`, not `Read().`), so they never match the callable-symbol gate and a call through an
+    interface-typed receiver resolves (in scip-go) to the interface term rather than a concrete method --
+    interface-dispatch deep resolution is a follow-up, so including these locations would be dead weight."""
+    from auryn.core.scip_resolve import CallableLocation
+
+    raw_files = sorted(raw_files, key=lambda rf: _norm(rf.path))
+    pid_of_path: dict[str, str] = {}
+    pkey_of_path: dict[str, str] = {}
+    type_id_by_pkey_name: dict[tuple[str, str], str] = {}
+    for rf in raw_files:
+        if not rf.package:
+            continue
+        pkey = _pkg_key(_dir_of(rf.path), rf.package)
+        pid = ids.package_id(project_id, pkey)
+        pid_of_path[rf.path] = pid
+        pkey_of_path[rf.path] = pkey
+        for rt in rf.types:  # first-wins (setdefault), matching _resolve's type_by_import_path
+            type_id_by_pkey_name.setdefault((pkey, rt.name), ids.type_id(pid, rt.kind, rt.name, rt.type_parameters))
+
+    out = []
+    for rf in raw_files:
+        if not rf.package:
+            continue
+        pid, pkey, rel = pid_of_path[rf.path], pkey_of_path[rf.path], _norm(rf.path)
+        for rfn in rf.functions:
+            ptypes = [p.type for p in rfn.parameters]
+            if rfn.receiver is None:
+                cid, label = ids.function_id(pid, rfn.name, ptypes), "Function"
+            else:
+                owner_tid = type_id_by_pkey_name.get((pkey, rfn.receiver.type_name))
+                if owner_tid is None:  # receiver type not a project type (shouldn't happen in valid Go)
+                    continue
+                cid, label = ids.method_id(owner_tid, rfn.name, ptypes), "Method"
+            out.append(CallableLocation(cid, label, rel, rfn.line_start, rfn.line_end, rfn.name,
+                                        frozenset(name for name, _ in rfn.call_sites),
+                                        frozenset(rfn.call_sites)))
+    return out
+
+
 def _resolve(raw_files: list[RawFile], project_id: str, seed: "GoGraphIndex | None",
              module_map: dict) -> Iterator[GraphNode | GraphEdge]:
     # Stable path order so a symbol DEFINED in several files (multi-program dirs: several

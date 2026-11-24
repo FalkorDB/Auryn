@@ -4,7 +4,12 @@ fast tree-sitter engine models the demo sample end-to-end: the flat package tier
 interface/type-alias extraction, method attachment to receiver types, EMBEDS (struct + interface
 embedding), DEPENDS_ON resolution (field/param/construction, incl. cross-package), and CALLS
 resolution (bare same-package, receiver-typed, package-qualified cross-package). Needs FalkorDB
-(the conftest fixture)."""
+(the conftest fixture).
+
+Ingests pin `deep="off"`: this suite asserts the FAST engine's name-based resolution (e.g. a CALLS
+`resolution="name"`), which the deep scip-go pass would upgrade to `"resolved"` when scip-go is
+installed -- so pinning it keeps these tests deterministic regardless of the host. The deep pass has
+its own coverage in test_go_deep.py."""
 
 from __future__ import annotations
 
@@ -18,7 +23,7 @@ _SAMPLE = _REPO_ROOT / "demo" / "go-ingestor" / "sample"
 
 
 def _ingest(graph):
-    ingest.ingest_directory(GraphWriter(graph), str(_SAMPLE), project_name="acme")
+    ingest.ingest_directory(GraphWriter(graph), str(_SAMPLE), project_name="acme", deep="off")
 
     def q(cypher):
         return graph.query(cypher).result_set
@@ -27,7 +32,7 @@ def _ingest(graph):
 
 
 def test_ingest_directory_owns_go(graph):
-    report = ingest.ingest_directory(GraphWriter(graph), str(_SAMPLE), project_name="acme")
+    report = ingest.ingest_directory(GraphWriter(graph), str(_SAMPLE), project_name="acme", deep="off")
 
     ingested = {r.language: r for r in report.languages if r.result is not None}
     assert "go" in ingested
@@ -122,6 +127,6 @@ def test_external_calls_surface_as_placeholders(graph):
 def test_reingest_is_idempotent(graph):
     q = _ingest(graph)
     before = q("MATCH (n) RETURN count(n)")[0][0]
-    ingest.ingest_directory(GraphWriter(graph), str(_SAMPLE), project_name="acme")
+    ingest.ingest_directory(GraphWriter(graph), str(_SAMPLE), project_name="acme", deep="off")
     after = q("MATCH (n) RETURN count(n)")[0][0]
     assert before == after

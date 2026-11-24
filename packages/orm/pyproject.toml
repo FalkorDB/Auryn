@@ -2,9 +2,10 @@
 name = "auryn-orm"
 version = "0.1.0"
 description = "Language-agnostic ORM model<->database-table stitch for Auryn: a post-ingestion hook that joins a SQLAlchemy model class (in a code graph) to the physical Table/Column nodes a SQL ingestor produced (in a schema graph), by table/column name. Forms the code->database connection across two ingestors so a query can trace a function -> its ORM model -> the real table. Depends only on auryn-core."
+readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
-license = { text = "SSPL-1.0" }
+license = { text = "MIT" }
 dependencies = [
     "auryn-core",
 ]

@@ -66,11 +66,23 @@ def parse_unified_diff(text: str) -> tuple[dict[str, list[tuple[int, int]]], lis
     return changed, deleted
 
 
-def git_diff(repo_dir: str, base: str | None = None, head: str | None = None, *, staged: bool = False) -> str:
+def git_toplevel(path: str) -> str:
+    """The top folder of the git work tree `path` is in. Raises CalledProcessError outside one."""
+    return subprocess.run(
+        ["git", "-C", path, "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
+    ).stdout.rstrip("\n")  # only git's newline: a folder name may end in a space
+
+
+def git_diff(repo_dir: str, base: str | None = None, head: str | None = None, *, staged: bool = False,
+             relative: bool = False) -> str:
     """Unified diff (`-U0`, exact changed lines) for the requested range: `base..head` if both
     given, `base` vs the working tree if only base, staged changes with `staged=True`, else all
-    uncommitted changes vs HEAD. Raises CalledProcessError if git fails."""
-    cmd = ["git", "-C", repo_dir, "diff", "-U0", "--no-color"]
+    uncommitted changes vs HEAD. Paths are relative to the top of the repository, wherever in it
+    `repo_dir` is. `relative=True` is for a caller that has resolved `repo_dir` to the folder its
+    graph was indexed from: paths are then relative to that folder, and the diff is limited to
+    it -- a graph indexed from a subfolder stores its paths that way. Raises CalledProcessError
+    if git fails."""
+    cmd = ["git", "-C", repo_dir, "diff", "-U0", "--no-color", *(["--relative"] if relative else [])]
     if base and head:
         cmd += [base, head]
     elif base:
@@ -79,6 +91,13 @@ def git_diff(repo_dir: str, base: str | None = None, head: str | None = None, *,
         cmd += ["--staged"]
     else:
         cmd += ["HEAD"]
+    # `base`/`head` come from the caller (the impact_of_diff MCP tool, --base/--head). One that
+    # starts with `-` would run as a git option (`--output=<file>` overwrites that file), so it is
+    # refused here the way git refuses any other bad revision. Checked in Python rather than with
+    # git's `--end-of-options`: that flag needs git 2.24, and this must hold on any git.
+    for rev in (base, head):
+        if rev and rev.startswith("-"):
+            raise subprocess.CalledProcessError(129, cmd, stderr=f"fatal: bad revision '{rev}'")
     return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
 
 

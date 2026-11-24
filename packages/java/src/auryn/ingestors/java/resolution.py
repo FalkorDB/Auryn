@@ -107,6 +107,46 @@ def resolve_incremental(emit_raws: list[RawFile], project_id: str, index: JavaGr
     return list(_resolve(emit_raws, project_id, seed=index))
 
 
+def callable_locations(raw_files: list[RawFile], project_id: str):
+    """Every Java method/constructor's SCIP-join location (graph id, file, 1-based line span, name, called
+    names) -- the bridge the deep (scip-java / SCIP) pass needs. Reuses the fast pass's OWN flattening
+    (_flatten -> _Entry, keyed via the module->package->type scope in _scope_root/ids) and _method_id, so
+    deep CALLS edges land byte-identically on the Method nodes resolve() authored -- no type inference.
+    A constructor's location name is `<init>` (scip-java's JVM name for it), while its id stays
+    class-name-based, so a resolved `new X()` deep edge still lands on the right node. A parity test
+    asserts these ids subset resolve()'s Method node ids. The core.scip_resolve import is deferred here
+    (deep-only) so the fast pass never requires it (buildable against an older auryn-core)."""
+    from auryn.core.scip_resolve import CallableLocation
+
+    raw_files = sorted(raw_files, key=lambda rf: _norm(rf.path))
+    path_by_fid: dict[str, str] = {}
+    entries: list[_Entry] = []
+    for rf in raw_files:
+        fid = ids.file_id(project_id, rf.path)
+        path_by_fid[fid] = _norm(rf.path)
+        module = javamod.module_for_path(rf.path)
+        scope_root = _scope_root(project_id, module)
+        for rt in rf.types:
+            _flatten(rt, fid, scope_root, None, rf.package, entries, module)
+    seen_tids: set[str] = set()  # keep-first dedup, matching _resolve
+    entries = [e for e in entries if not (e.type_id in seen_tids or seen_tids.add(e.type_id))]
+
+    out = []
+    for e in entries:
+        rel = path_by_fid.get(e.file_id, "")
+        for m in e.raw_type.methods:
+            name = "<init>" if m.kind == "CONSTRUCTOR" else m.name
+            # Normalize a `new X()` call (RawCall.is_new, recorded under the type name X) to `<init>` --
+            # scip-java reports the constructor reference as `X#<init>().`, so the gate must see `<init>`
+            # (by name AND on the right line), else the resolved constructor edge is filtered AND the fast
+            # ctor edge dropped with no replacement.
+            called = frozenset("<init>" if c.is_new else c.name for c in m.calls)
+            called_sites = frozenset(("<init>" if c.is_new else c.name, c.line) for c in m.calls)
+            out.append(CallableLocation(_method_id(e.type_id, m), "Method", rel,
+                                        m.line_start, m.line_end, name, called, called_sites))
+    return out
+
+
 def _resolve(raw_files: list[RawFile], project_id: str, seed: "JavaGraphIndex | None") -> Iterator[GraphNode | GraphEdge]:
     # Stable path order so a symbol somehow defined in several files reduces to an order-INDEPENDENT
     # winner -- identical here and in resolve_incremental's subset (ADR 0005). Java forbids duplicate
