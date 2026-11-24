@@ -212,7 +212,7 @@ def _gather_type_members(writer: GraphWriter, pending: list[tuple[str, str, dict
 
 def _gather_container_members(writer: GraphWriter, containers: list[tuple[str, str, dict]]) -> dict[str, list[str]]:
     """Symbol inventory per container id: the names of the callables/types it contains -- via any
-    outgoing edge to a callable/type-labeled node (HAS_FUNCTION/HAS_CLASS/HAS_TYPE/... across
+    outgoing edge to a callable/type-labeled node (HAS_FUNCTION/HAS_TYPE/... across
     languages) and via incoming DEFINED_IN (types/functions that declare themselves in a File).
     `any(l IN labels(x) ...)` (not `labels(x)[0]`) so an already-embedded child -- which also
     carries the shared marker label -- is still recognised."""

@@ -41,7 +41,7 @@ def test_types_fields_enums(graph):
     q = _ingest(graph)
     assert sorted(r[0] for r in q("MATCH (:Struct {name:'Point'})-[:HAS_FIELD]->(f) RETURN f.name")) == ["x", "y"]
     assert sorted(r[0] for r in q("MATCH (:Struct {name:'Shape'})-[:HAS_FIELD]->(f) RETURN f.name")) == ["kind", "origin", "size"]
-    assert {r[0] for r in q("MATCH (t:Typedef) RETURN t.name")} >= {"Point", "Shape"}
+    assert {r[0] for r in q("MATCH (t:TypeAlias) RETURN t.name")} >= {"Point", "Shape"}
     assert set(q("MATCH (e:Enum {name:'ShapeKind'}) RETURN e.members")[0][0]) == {"SHAPE_CIRCLE", "SHAPE_SQUARE"}
 
 

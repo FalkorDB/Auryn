@@ -42,10 +42,7 @@ NODE_SCHEMAS = [
 EDGE_SCHEMAS = [
     # Containment backbone -- pure structure, no properties (as in Python/C#).
     EdgeSchema(rel_type="HAS_MODULE"),  # Project -> Module
-    EdgeSchema(rel_type="HAS_CLASS"),  # Module -> Class
-    EdgeSchema(rel_type="HAS_INTERFACE"),  # Module -> Interface
-    EdgeSchema(rel_type="HAS_ENUM"),  # Module -> Enum
-    EdgeSchema(rel_type="HAS_TYPE_ALIAS"),  # Module -> TypeAlias
+    EdgeSchema(rel_type="HAS_TYPE"),  # Module -> Class|Interface|Enum|TypeAlias
     EdgeSchema(rel_type="HAS_FUNCTION"),  # Module -> Function
     EdgeSchema(rel_type="HAS_METHOD"),  # Class|Interface -> Method
     EdgeSchema(rel_type="HAS_PROPERTY"),  # Class|Interface -> Property

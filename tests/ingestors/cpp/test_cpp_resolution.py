@@ -44,7 +44,7 @@ def test_namespace_hierarchy_materialized():
         "b.hpp": "namespace geo::detail { class B {}; }",
     })
     assert _edges(edges, "HAS_NAMESPACE") == {("~", "geo"): {}}
-    subs = set(_edges(edges, "HAS_SUB_NAMESPACE"))
+    subs = set(_edges(edges, "HAS_SUBNAMESPACE"))
     assert ("geo", "geo::detail") in subs
 
 

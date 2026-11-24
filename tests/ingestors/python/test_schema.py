@@ -40,7 +40,7 @@ def test_project_root_label_present():
 def test_backbone_and_semantic_edges_present():
     rels = {s.rel_type for s in schema.EDGE_SCHEMAS}
     # containment backbone
-    assert {"HAS_PACKAGE", "HAS_MODULE", "HAS_CLASS", "HAS_FUNCTION", "HAS_METHOD",
-            "HAS_ATTRIBUTE", "HAS_PARAMETER", "HAS_NESTED_CLASS"} <= rels
+    assert {"HAS_PACKAGE", "HAS_MODULE", "HAS_TYPE", "HAS_FUNCTION", "HAS_METHOD",
+            "HAS_FIELD", "HAS_PARAMETER", "HAS_NESTED_TYPE"} <= rels
     # semantic layer
     assert {"EXTENDS", "IMPLEMENTS", "CALLS", "RETURNS"} <= rels

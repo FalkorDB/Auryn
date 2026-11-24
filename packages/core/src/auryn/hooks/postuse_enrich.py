@@ -568,7 +568,7 @@ def _file_defined_symbols(graph, path: str) -> list[dict]:
     found: dict[str, dict] = {}
     for q in (
         "MATCH (n) WHERE n.file_path ENDS WITH $s AND n.line_start > 0 RETURN n.id, n.name, " + semantic_label("n"),
-        "MATCH (m)-[:HAS_FUNCTION|HAS_CLASS|HAS_METHOD|HAS_PROCEDURE|HAS_TYPE]->(n) "
+        "MATCH (m)-[:HAS_FUNCTION|HAS_METHOD|HAS_PROCEDURE|HAS_TYPE]->(n) "
         "WHERE m.file_path ENDS WITH $s OR m.path ENDS WITH $s RETURN n.id, n.name, " + semantic_label("n"),
         "MATCH (n)-[:DEFINED_IN]->(f) WHERE f.path ENDS WITH $s OR f.file_path ENDS WITH $s "
         "RETURN n.id, n.name, " + semantic_label("n"),

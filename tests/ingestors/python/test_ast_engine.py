@@ -115,7 +115,7 @@ def test_types_are_only_annotated_or_unresolved(items):
     for n in _nodes(items):
         if n.properties.get("resolved") is False:
             continue  # ADR 0004 placeholders are shallow (no type provenance)
-        if n.label in ("Attribute", "Parameter"):
+        if n.label in ("Field", "Parameter"):
             sources.add(n.properties["type_source"])
         if n.label in ("Method", "Function"):
             sources.add(n.properties["return_type_source"])

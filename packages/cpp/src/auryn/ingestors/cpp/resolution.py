@@ -5,7 +5,7 @@ challenge), resolving EXTENDS/DEPENDS_ON to project types, and best-effort call 
 
 C++ is the structural union of the C and Java ingestors, so this pass is too: it carries Java's
 namespace/type/member machinery (the tier here is `Namespace`, chained by HAS_NAMESPACE/
-HAS_SUB_NAMESPACE) *and* C's free-function/macro/#include layer. Two C++-specific twists:
+HAS_SUBNAMESPACE) *and* C's free-function/macro/#include layer. Two C++-specific twists:
 
   * out-of-line definitions -- `double geo::Shape::area() const {..}` is written at namespace or
     global scope, physically apart from `class Shape`. We split its `qualified_identifier`, match
@@ -467,7 +467,7 @@ def resolve_incremental(emit_raws: list[RawFile], project_id: str, index: CppGra
 def _emit_namespaces(namespaces: set[str], project_id: str) -> Iterator[GraphNode | GraphEdge]:
     """Materialize every prefix of every declared namespace (as Java does for packages / C# for
     namespaces): the first segment hangs off the Project via HAS_NAMESPACE, deeper segments chain
-    via HAS_SUB_NAMESPACE. `a::b::c` -> Namespace(a) -> Namespace(a::b) -> Namespace(a::b::c)."""
+    via HAS_SUBNAMESPACE. `a::b::c` -> Namespace(a) -> Namespace(a::b) -> Namespace(a::b::c)."""
     emitted: set[str] = set()
     for ns in namespaces:
         prefix = ""
@@ -479,7 +479,7 @@ def _emit_namespaces(namespaces: set[str], project_id: str) -> Iterator[GraphNod
                 emitted.add(nid)
                 yield GraphNode("Namespace", {"id": nid}, {"name": segment, "qualified_name": prefix})
                 yield GraphEdge(parent_rel, parent_label, {"id": parent_id}, "Namespace", {"id": nid})
-            parent_id, parent_label, parent_rel = nid, "Namespace", "HAS_SUB_NAMESPACE"
+            parent_id, parent_label, parent_rel = nid, "Namespace", "HAS_SUBNAMESPACE"
 
 
 # -- flattening ----------------------------------------------------------------------------

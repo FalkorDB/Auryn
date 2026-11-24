@@ -16,7 +16,7 @@ from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.ingestors.c import ids
 from auryn.ingestors.c.raw_model import RawFile, RawFunction
 
-_TYPE_PRECEDENCE = {"Typedef": 3, "Struct": 2, "Union": 1, "Enum": 0}
+_TYPE_PRECEDENCE = {"TypeAlias": 3, "Struct": 2, "Union": 1, "Enum": 0}
 
 # ADR 0004: a curated C standard-library / POSIX name set, so a call to one is surfaced with
 # origin="libc" (a terminal external that never resolves to an ingested repo) rather than
@@ -171,7 +171,7 @@ def _type_index(files: list[RawFile], proj_id: str) -> dict[str, tuple[str, str]
         for en in rf.enums:
             offer(en.name, "Enum", ids.enum_id(proj_id, en.name))
         for td in rf.typedefs:
-            offer(td.name, "Typedef", ids.typedef_id(proj_id, td.name))
+            offer(td.name, "TypeAlias", ids.typedef_id(proj_id, td.name))
     return idx
 
 
@@ -258,11 +258,11 @@ def _emit_types(files: list[RawFile], proj_id: str, items: list, defined_elsewhe
         fid = ids.file_id(proj_id, rf.path)
         for td in rf.typedefs:
             tid = ids.typedef_id(proj_id, td.name)
-            typedefs.setdefault(tid, GraphNode("Typedef", {"id": tid}, {
+            typedefs.setdefault(tid, GraphNode("TypeAlias", {"id": tid}, {
                 "name": td.name, "qualified_name": td.name, "underlying": td.underlying,
                 "source": td.source, "doc": td.doc, **_loc(rf.path, td.line_start, td.line_end),
             }))
-            items.append(GraphEdge("DEFINES", "File", {"id": fid}, "Typedef", {"id": tid}))
+            items.append(GraphEdge("DEFINES", "File", {"id": fid}, "TypeAlias", {"id": tid}))
     items.extend(typedefs.values())
 
 

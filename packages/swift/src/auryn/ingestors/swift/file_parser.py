@@ -316,7 +316,7 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
 
     def build_type(node) -> RawType:
         if node.type == "protocol_declaration":
-            kind = "Protocol"
+            kind = "Interface"
         else:
             kind = _TYPE_KIND[_decl_kind(node)]
         keywords, attributes, access, _is_static = modifiers_of(node)

@@ -11,7 +11,7 @@ impl's `fn area`; the trait suffix keeps those two Method ids from colliding."""
 
 from __future__ import annotations
 
-_KIND_SLUG = {"Struct": "struct", "Enum": "enum", "Trait": "trait"}
+_KIND_SLUG = {"Struct": "struct", "Enum": "enum", "Interface": "trait"}
 
 
 def project_id(project_name: str) -> str:

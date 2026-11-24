@@ -126,7 +126,7 @@ def symbols_in_ranges(graph, changed: dict[str, list[tuple[int, int]]]) -> tuple
                 "MATCH (n) WHERE n.file_path = $p AND n.line_start <= $hi AND n.line_end >= $lo "
                 "AND n.line_start > 0 RETURN n.id, n.name, " + semantic_label("n"),
                 # (b) symbol under a Module/File container (Python, PL/SQL)
-                "MATCH (m)-[:HAS_FUNCTION|HAS_CLASS|HAS_METHOD|HAS_PROCEDURE|HAS_TYPE]->(n) "
+                "MATCH (m)-[:HAS_FUNCTION|HAS_METHOD|HAS_PROCEDURE|HAS_TYPE]->(n) "
                 "WHERE (m.file_path = $p OR m.path = $p) AND n.line_start <= $hi AND n.line_end >= $lo "
                 "RETURN n.id, n.name, " + semantic_label("n"),
                 # (c) symbol -> File via DEFINED_IN (Go/Java/Rust/PHP)
