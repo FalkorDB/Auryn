@@ -147,11 +147,14 @@ def test_a_block_without_its_end_marker_does_not_take_the_users_lines_with_it(tm
         hooks.uninstall(repo)
     assert hook.read_text() == broken
 
-    from auryn.cli import _deregister_repo
+    from click import ClickException
+
+    from auryn.cli import _unhook_repo
 
     monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
     app_config.register_repo(app_config.RepoRegistration(local_dir=str(repo)))
-    _deregister_repo(str(repo), None, None, "g")  # `auryn forget`: says so, and keeps the repo on record
+    with pytest.raises(ClickException, match="Nothing was deleted"):  # `auryn forget` stops before its delete
+        _unhook_repo(str(repo), None, None, "g")
     assert app_config.get_repo(str(repo))
 
 
@@ -389,9 +392,11 @@ def test_uninstall_removes_the_hooks_of_every_registered_repo(monkeypatch, tmp_p
 def test_a_hook_we_may_not_write_does_not_end_the_uninstall_sweep(monkeypatch, tmp_path):
     """A read-only post-commit raised out of the loop: the hooks after it kept their block, and
     `forget` dropped the repo from the registry all the same -- nothing left to retry from. The
-    other hooks are cleaned first, and the repo stays registered. (The refusal is simulated, so
-    this holds when run as root too.)"""
-    from auryn.cli import _deregister_repo
+    other hooks are cleaned first, `forget` stops before its delete, and the repo stays
+    registered. (The refusal is simulated, so this holds when run as root too.)"""
+    from click import ClickException
+
+    from auryn.cli import _unhook_repo
     from auryn.core.install import do_uninstall
 
     monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
@@ -415,12 +420,47 @@ def test_a_hook_we_may_not_write_does_not_end_the_uninstall_sweep(monkeypatch, t
         hooks.uninstall(repo)
     assert [n for n in hooks.HOOKS if (d / n).exists()] == ["post-commit"]  # the rest are cleaned
 
-    _deregister_repo(str(repo), None, None, "g")  # `auryn forget`
+    with pytest.raises(ClickException):  # `auryn forget`
+        _unhook_repo(str(repo), None, None, "g")
     assert app_config.get_repo(str(repo))
     app_config.set_resync_trigger("save")
     do_uninstall(adapters=[])
     assert app_config.get_repo(str(repo))
     assert app_config.load_config().resync_trigger == "save"  # the rest of config.toml stays as it was
+
+
+def test_forget_cleans_the_hooks_before_its_delete_so_it_can_be_run_again(monkeypatch, tmp_path):
+    """`forget` deleted the graph, then met a hook it couldn't clean: the repo stayed registered,
+    but a second `forget` stopped at "no such graph" and never got to the hooks. The hooks now
+    come first -- one that can't be cleaned stops `forget` with nothing deleted -- so running it
+    again once the hook is fixed finishes the job."""
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+    from auryn.core import lifecycle
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "home"))
+    repo = _init_repo(tmp_path / "r")
+    app_config.register_repo(app_config.RepoRegistration(local_dir=str(repo)))
+    hooks.install(repo, ["true"])
+    hook = hooks.hooks_dir(repo) / "post-commit"
+    ours = hook.read_text()
+    hook.write_text(ours.replace("# <<< auryn resync <<<\n", ""))  # its end marker, deleted by hand
+    deleted = []
+    monkeypatch.setattr("auryn.cli._resolve_connection", lambda *a, **k: None)
+    monkeypatch.setattr("auryn.cli.connect_client", lambda config: None)
+    monkeypatch.setattr(lifecycle, "plan_forget", lambda client, graph, project: lifecycle.ForgetPlan(
+        graph_name=graph, mode="drop_graph", project_name=None, languages=["python"], nodes=3))
+    monkeypatch.setattr(lifecycle, "execute_forget", lambda client, plan: deleted.append(plan.graph_name))
+
+    first = CliRunner().invoke(cli, ["forget", str(repo), "--yes"])
+    assert first.exit_code == 1 and "Nothing was deleted" in first.output
+    assert deleted == [] and app_config.get_repo(str(repo))
+
+    hook.write_text(ours)  # the end marker is back
+    second = CliRunner().invoke(cli, ["forget", str(repo), "--yes"])
+    assert second.exit_code == 0, second.output
+    assert len(deleted) == 1 and not app_config.get_repo(str(repo)) and not hooks.is_installed(repo)
 
 
 @pytest.mark.skipif(os.name == "nt",

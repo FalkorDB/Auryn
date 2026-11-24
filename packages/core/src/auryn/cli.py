@@ -847,7 +847,7 @@ def forget(path, graph_opt, project, host, port, username, password, ssl, yes, d
     pass --project to remove just that repo's subgraph (inbound cross-repo edges are cleaned up
     too). Your files are never touched."""
     from auryn.core import lifecycle
-    from auryn.core.app_config import get_repo
+    from auryn.core.app_config import get_repo, unregister_repo
     from auryn.core.project import default_graph_name, resolve_project_root
 
     client = connect_client(_resolve_connection(host, port, username, password, ssl))
@@ -879,13 +879,17 @@ def forget(path, graph_opt, project, host, port, username, password, ssl, yes, d
     if not yes and not click.confirm("Proceed?", default=False):
         click.echo("Aborted.")
         return
+    local_dir = _unhook_repo(path, graph_opt, project, plan.graph_name)
     lifecycle.execute_forget(client, plan)
-    _deregister_repo(path, graph_opt, project, plan.graph_name)
+    if local_dir:
+        unregister_repo(local_dir)
     click.echo(f"Forgot {target}.")
 
 
-def _deregister_repo(path, graph_opt, project, graph_name) -> None:
-    """Remove a forgotten repo's git hooks + registry entry."""
+def _unhook_repo(path, graph_opt, project, graph_name) -> str | None:
+    """Take a repo's resync block out of its git hooks ahead of `forget`'s delete, and return its
+    folder, whose registry entry goes once the delete is done (None when no repo maps there). A
+    hook we can't clean stops `forget` here, with nothing deleted, so running it again retries."""
     from auryn.core import app_config, hooks
     from auryn.core.project import resolve_project_root
 
@@ -898,10 +902,10 @@ def _deregister_repo(path, graph_opt, project, graph_name) -> None:
     if local_dir:
         try:
             hooks.uninstall(local_dir)
-        except (OSError, ValueError) as e:  # a hook we may not write, or a stray marker: say so, keep the repo
-            click.echo(f"Could not remove the resync hooks from {local_dir} ({e}); it stays registered.", err=True)
-            return
-        app_config.unregister_repo(local_dir)
+        except (OSError, ValueError) as e:  # a hook we may not write, or a stray marker
+            raise click.ClickException(f"Could not remove the resync hooks from {local_dir} ({e}). Nothing was "
+                                       "deleted: fix that, then run `auryn forget` again.") from e
+    return local_dir
 
 
 @cli.command("sync")
