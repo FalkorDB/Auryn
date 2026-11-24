@@ -202,7 +202,9 @@ def test_changes_link_to_python_and_typescript_modules(graph, tmp_path, monkeypa
     monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
 
     set_git_info_enabled(True)
-    ingest.ingest_directory(writer, str(root), project_name="Checkout", deep="off", auto_install=False)
+    # embed="inline" keeps the git-info sync in this process (not detached) on a server backend too.
+    ingest.ingest_directory(writer, str(root), project_name="Checkout", deep="off", embed="inline",
+                            auto_install=False)
 
     rows = graph.ro_query(
         "MATCH (c:GitCommit)-[e:CHANGED]->(m:Module) "
