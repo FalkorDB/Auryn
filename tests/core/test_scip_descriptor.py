@@ -37,6 +37,21 @@ def test_ancestor_symbol_rebuilds_the_exact_parent_symbol():
         "scip-go gomod example.com/acme/proj v0 `example.com/acme/proj/app`/Service#"
 
 
+def test_bare_names_exclude_their_closing_delimiter():
+    # a type-parameter `[T]` and a parameter `(x)` must stop the bare name at the closing ] / )
+    tp = next(c for c in sd.parse("scip . pkg v Box#[T]") if c.kind == sd.TYPE_PARAMETER)
+    assert tp.name == "T"   # not "T]"
+    param = next(c for c in sd.parse("scip . pkg v f().(x)") if c.kind == sd.PARAMETER)
+    assert param.name == "x"   # not "x)"
+
+
+def test_doubled_space_in_a_header_field_is_not_a_separator():
+    # SCIP escapes a literal space inside a header field by doubling it: the package is `my  package`.
+    prefix, desc = sd.split_symbol("scip . my  package 1.0.0 Foo#")
+    assert desc == "Foo#" and prefix + desc == "scip . my  package 1.0.0 Foo#"
+    assert sd.parse("scip . my  package 1.0.0 Foo#")[-1].name == "Foo"   # not "0 Foo"
+
+
 def test_split_symbol_keeps_the_descriptor_intact():
     prefix, desc = sd.split_symbol("scip-typescript npm pkg 1.0.0 src/`a.ts`/f().")
     assert prefix == "scip-typescript npm pkg 1.0.0 " and desc == "src/`a.ts`/f()."

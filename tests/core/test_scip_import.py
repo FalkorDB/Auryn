@@ -95,6 +95,14 @@ def test_project_node_and_scoped_stable_ids():
     assert {n.key["id"] for n in nodes} == {n.key["id"] for n in again}
 
 
+def test_dotfile_paths_do_not_collide_on_the_file_id():
+    # _norm_path must strip only a leading "./", not a run of dots/slashes -- else a dotfile path would
+    # collapse onto a real sibling and share one File node.
+    assert scip_import._norm_path("./src/a.py") == "src/a.py"
+    assert scip_import._norm_path(".config/tool.py") == ".config/tool.py"
+    assert scip_import.file_id("p", ".config/tool.py") != scip_import.file_id("p", "config/tool.py")
+
+
 def test_locals_and_terms_are_not_emitted_as_callables():
     # `local N` (function-scoped) and term descriptors (Go struct fields / consts) are not callables/types
     nodes, _ = _build(_GO, "p")

@@ -34,7 +34,9 @@ _TYPE_KINDS = {sd.TYPE}
 
 
 def _norm_path(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
+    # removeprefix, NOT lstrip: lstrip("./") would strip a leading run of dots/slashes and collapse a
+    # dotfile path (`.config/tool.py` -> `config/tool.py`) onto a real sibling, giving them one File id.
+    return path.replace("\\", "/").removeprefix("./")
 
 
 def _basename(path: str) -> str:

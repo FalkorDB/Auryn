@@ -36,7 +36,8 @@ PARAMETER = "parameter"
 META = "meta"
 MACRO = "macro"
 
-_SUFFIX_CHARS = "/#(.:!["  # a bare name ends at the first of these
+_SUFFIX_CHARS = "/#(.:![])"  # a bare name ends at the first of these (incl. the CLOSING `]`/`)` so a
+#                              type-parameter `[T]` / parameter `(x)` name doesn't swallow its delimiter)
 
 
 @dataclass(frozen=True)
@@ -52,14 +53,22 @@ def is_local(symbol: str) -> bool:
 
 
 def split_symbol(symbol: str) -> tuple[str, str]:
-    """(scheme prefix, descriptor): the prefix is the four space-delimited fields + the trailing space, so
-    `prefix + descriptor == symbol`. A symbol with fewer than four spaces (malformed / bare) yields ("", symbol)."""
-    if symbol.count(" ") < 4:
-        return "", symbol
-    cut = -1
-    for _ in range(4):
-        cut = symbol.index(" ", cut + 1)
-    return symbol[: cut + 1], symbol[cut + 1 :]
+    """(scheme prefix, descriptor): the prefix is the four header fields + the trailing separator space, so
+    `prefix + descriptor == symbol` (the prefix is returned verbatim, so `ancestor_symbol` stays exact).
+    SCIP escapes a literal space inside a header field by DOUBLING it, so only every UNescaped space is a
+    field separator -- a package name like `my  package` must not be mis-split. Fewer than four separators
+    (malformed / bare, e.g. `local 0`) yields ("", symbol)."""
+    seps, i, n = 0, 0, len(symbol)
+    while i < n:
+        if symbol[i] == " ":
+            if i + 1 < n and symbol[i + 1] == " ":  # doubled -> an escaped literal space, not a separator
+                i += 2
+                continue
+            seps += 1
+            if seps == 4:
+                return symbol[: i + 1], symbol[i + 1 :]
+        i += 1
+    return "", symbol
 
 
 def parse(symbol: str) -> list[Descriptor]:
