@@ -68,7 +68,8 @@ def _strip_block(text: str) -> str:
     out, block = [], None  # block: the lines since a begin marker whose end marker is still to come
     for ln in text.splitlines(keepends=True):
         s = ln.strip()
-        if s == _BEGIN and block is None:
+        if s == _BEGIN:
+            out.extend(block or [])  # one already open had no end marker: it bounds nothing
             block = [ln]
         elif s == _END and block is not None:
             block = None
@@ -165,7 +166,8 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
             # Right after the shebang -- ahead of the user's body, whose `exit` / `exec` would
             # otherwise end the hook before our (backgrounded) line. The file keeps its mode.
             head, _, body = base.partition("\n") if base.startswith("#!") else ("", "", base)
-            path.write_text((head + "\n" if head else "") + block + body, newline="")
+            eol = "\r\n" if "\r\n" in base else "\n"  # the block's lines end like the hook's own
+            path.write_text((head + "\n" if head else "") + block.replace("\n", eol) + body, newline="")
         elif path.is_symlink():  # a dangling link: its target isn't ours to create
             continue
         else:

@@ -158,6 +158,21 @@ def test_a_block_without_its_end_marker_does_not_take_the_users_lines_with_it(tm
     assert app_config.get_repo(str(repo))
 
 
+def test_a_stray_begin_marker_above_a_whole_block_keeps_the_lines_between(tmp_path):
+    """A begin marker left above a whole block (a hand edit): the lines between the two read as
+    ours and went out with the block, unreported. The stray marker bounds nothing, so they stay --
+    and uninstall says the marker is there."""
+    repo = _init_repo(tmp_path / "r")
+    hook = hooks.hooks_dir(repo) / "post-commit"
+    hook.write_text("#!/bin/sh\n# >>> auryn resync >>>\necho user1\n"
+                    "# >>> auryn resync >>>\n(true >/dev/null 2>&1 &)\n# <<< auryn resync <<<\necho user2\n")
+    hook.chmod(0o755)
+
+    with pytest.raises(ValueError, match="without its end marker"):
+        hooks.uninstall(repo)
+    assert hook.read_text() == "#!/bin/sh\n# >>> auryn resync >>>\necho user1\necho user2\n"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="native Windows has no exec bit: chmod 644 can't switch a hook off there")
 def test_install_leaves_a_non_shell_hook_and_a_disabled_hook_as_they_are(tmp_path):
     """A shell line appended to a Python hook is a SyntaxError that also stops the USER's hook;
@@ -332,6 +347,7 @@ def test_a_crlf_hook_keeps_its_line_endings(tmp_path):
     hooks.install(repo, ["true"])
     assert path.read_bytes().startswith(b"#!/bin/sh\r\n# >>> auryn resync >>>")
     assert path.read_bytes().endswith(b"echo mine\r\n")
+    assert b"\n" not in path.read_bytes().replace(b"\r\n", b"")  # the block's lines too
 
     hooks.uninstall(repo)
     assert path.read_bytes() == b"#!/bin/sh\r\necho mine\r\n"
@@ -402,6 +418,27 @@ def test_uninstall_removes_the_hooks_of_every_registered_repo(monkeypatch, tmp_p
     assert not hooks.is_installed(repos[1])  # one repo failing doesn't strand the next...
     assert users_hook.read_text() == "#!/bin/sh\necho mine\n"  # ...whose own hook body stays
     assert not (tmp_path / "home").exists()  # ...or the rest of the teardown
+
+
+def test_uninstall_says_which_repo_still_carries_our_block(monkeypatch, tmp_path):
+    """`uninstall --purge` removed ~/.auryn although a repo's hook kept our block -- its next commit
+    recreates the home dir -- and only a log warning named the repo. The output says so too."""
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("AURYN_HOME", str(home))
+    repo = _init_repo(tmp_path / "r")
+    app_config.register_repo(app_config.RepoRegistration(local_dir=str(repo)))
+    hook = hooks.hooks_dir(repo) / "post-commit"
+    hook.write_text("#!/bin/sh\n# >>> auryn resync >>>\n(true >/dev/null 2>&1 &)\necho user-code\n")  # no end marker
+    hook.chmod(0o755)
+
+    res = CliRunner().invoke(cli, ["uninstall", "--purge", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert f"git hooks of {repo}" in res.output and "by hand" in res.output
+    assert not home.exists()
 
 
 def test_a_hook_we_may_not_write_does_not_end_the_uninstall_sweep(monkeypatch, tmp_path):

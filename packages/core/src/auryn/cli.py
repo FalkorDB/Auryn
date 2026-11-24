@@ -531,7 +531,7 @@ def uninstall(purge, force, yes) -> None:
     """Reverse `install`: stop the local server and deregister Auryn from every agent it was
     registered with. Keeps ~/.auryn (your graphs) unless --purge. In your repos, only Auryn's
     resync block comes out of their git hooks."""
-    from auryn.core import watcher
+    from auryn.core import hooks, watcher
     from auryn.core.app_config import load_config
     from auryn.core.install import do_uninstall
 
@@ -542,11 +542,15 @@ def uninstall(purge, force, yes) -> None:
         if not click.confirm(msg, default=True):
             return
     watcher.stop_watcher()
-    recorded = load_config().agents
+    recorded = load_config()
     removed = do_uninstall(purge=purge, force=force).agents
-    failed = ", ".join(a.name for a in recorded if a not in removed)
+    failed = ", ".join(a.name for a in recorded.agents if a not in removed)
     if removed or not failed:
         click.echo(f"Deregistered from: {', '.join(a.name for a in removed) or '(no agents were registered)'}")
+    for repo in recorded.repos:  # a hook we couldn't clean: its next commit runs `auryn sync` again
+        if hooks.is_installed(repo.local_dir):
+            click.echo(f"Could not take Auryn's resync block out of the git hooks of {repo.local_dir} -- "
+                       "remove it by hand.", err=True)
     if failed and not force:  # they stay on record, so the next run can retry
         raise click.ClickException(
             f"Could not deregister from: {failed} (see the warning above). Kept on record"
