@@ -247,17 +247,43 @@ def _batch_commit_file_changes(repo: git.Repo, commits: list[git.Commit]) -> dic
     return changes_by_sha
 
 
-def _code_file_index(writer: GraphWriter, source_uri: str, canonical: str) -> dict[str, list[str]]:
-    """Load source File IDs by path once, scoped by Project provenance where available."""
-    rows = writer.ro_query(
-        "MATCH (p:Project)-[:HAS_FILE]->(f:File) "
-        "WHERE p.repo_uri IN $origins RETURN DISTINCT f.path, f.id",
-        {"origins": [source_uri, canonical]},
-    ).result_set
-    if not rows:
-        # The scoped query found no matching Project for this repo. Falling back to every File by path
-        # risks cross-linking to another repo's same-named files, so only do it when the graph has NO
-        # repo-scoped projects at all (code not ingested, or a bare test graph -- at most this one repo).
+_CODE_FILE_NODES = (
+    ("File", "HAS_FILE", "n.path"),
+    ("Module", "HAS_PACKAGE|HAS_SUBPACKAGE|HAS_MODULE*1..", "coalesce(n.file_path, n.path)"),
+)
+"""The code nodes that stand for a source file, as (label, containment from its Project, repo-relative
+path). Most ingestors emit a `File` with `path`; Python models a source file as a `Module` with
+`file_path` under its packages, TypeScript as a `Module` with `path`. A Go/Java/Julia `Module` carries
+neither, so it never matches a changed path."""
+
+CHANGED_LINK_VERSION = 2
+"""The version of `_CODE_FILE_NODES` a repository's stored history is linked under, kept on
+GitRepository as `changed_link_version` (absent: linked to `File` only, or to nothing yet). Bump it
+when a kind is added: the next sync relinks each repository's stored commits once from their
+`changed_files`, without walking Git again (see _relink_changed)."""
+
+
+def _code_file_index(writer: GraphWriter, source_uri: str, canonical: str) -> dict[str, list[tuple[str, str]]]:
+    """The code nodes each repo-relative path links to, as (label, id), loaded once and scoped by
+    Project provenance where available."""
+    def load(scoped: bool) -> dict[str, list[tuple[str, str]]]:
+        paths: dict[str, list[tuple[str, str]]] = {}
+        for label, containment, path in _CODE_FILE_NODES:
+            match = (f"MATCH (p:Project)-[:{containment}]->(n:{label}) WHERE p.repo_uri IN $origins AND"
+                     if scoped else f"MATCH (n:{label}) WHERE")
+            rows = writer.ro_query(f"{match} {path} IS NOT NULL RETURN DISTINCT {path}, n.id",
+                                   {"origins": [source_uri, canonical]}).result_set
+            for file_path, node_id in rows:
+                if file_path and node_id:
+                    paths.setdefault(str(file_path), []).append((label, str(node_id)))
+        return paths
+
+    paths = load(scoped=True)
+    if not paths:
+        # The scoped query found no matching Project for this repo. Falling back to every code file
+        # node by path risks cross-linking to another repo's same-named files, so only do it when the
+        # graph has NO repo-scoped projects at all (code not ingested, or a bare test graph -- at most
+        # this one repo).
         # A single project that is NOT this repo must NOT be matched: if any repo project exists but
         # none matched, this repo isn't identifiable here, so skip CHANGED edges rather than guess
         # (commits still carry their changed_files property).
@@ -269,12 +295,29 @@ def _code_file_index(writer: GraphWriter, source_uri: str, canonical: str) -> di
             logger.debug("No Project matched %r/%r (%d repo project(s) present); skipping CHANGED edges",
                          source_uri, canonical, repo_count)
             return {}
-        rows = writer.ro_query("MATCH (f:File) RETURN DISTINCT f.path, f.id").result_set
-    paths: dict[str, list[str]] = {}
-    for path, file_id in rows:
-        if path and file_id:
-            paths.setdefault(str(path), []).append(str(file_id))
+        paths = load(scoped=False)
     return paths
+
+
+def _relink_changed(writer: GraphWriter, repo_id: str, file_targets: dict[str, list[tuple[str, str]]]) -> None:
+    """Re-derive the CHANGED edges of every commit already stored for `repo_id` from its
+    `changed_files`, for history synced before its code was ingested or under an older
+    CHANGED_LINK_VERSION. Edges MERGE, so the ones already present are kept as they are."""
+    rows = writer.ro_query(
+        "MATCH (:GitRepository {id: $repo})-[:HAS_COMMIT]->(c:GitCommit) RETURN c.id, c.changed_files",
+        {"repo": repo_id},
+    ).result_set
+    edge_batch: list[GraphEdge] = []
+    for cid, changed_files in rows:
+        for change in json.loads(changed_files or "[]"):
+            edge_batch.extend(_edge("CHANGED", "GitCommit", cid, label, target_id,
+                                    change_type=change["change_type"])
+                              for label, target_id in file_targets.get(change["path"], ()))
+        if len(edge_batch) >= 2000:
+            writer.merge_edges(edge_batch)
+            edge_batch.clear()
+    if edge_batch:
+        writer.merge_edges(edge_batch)
 
 
 @functools.lru_cache(maxsize=1)
@@ -837,10 +880,12 @@ def sync_git_info(
     writer.merge_edge(_edge("USES_REPOSITORY", "GitCheckout", checkout_id, "GitRepository", repo_id))
 
     state_rows = writer.ro_query(
-        "MATCH (r:GitRepository {id: $id}) RETURN r.branch_tips, r.github_synced_at", {"id": repo_id}
+        "MATCH (r:GitRepository {id: $id}) RETURN r.branch_tips, r.github_synced_at, r.changed_link_version",
+        {"id": repo_id},
     ).result_set
     previous_tips = json.loads(state_rows[0][0]) if state_rows and state_rows[0][0] else {}
     previous_remote_sync = state_rows[0][1] if state_rows else None
+    linked_version = int(state_rows[0][2] or 0) if state_rows else 0
     # Track ALL refs (local branches + remote-tracking + tags), keyed by ref path, not just local
     # branches -- so the incremental cursor covers the same scope as the initial `--all` walk.
     # Otherwise fetched remote-tracking or tag-only commits that didn't move a local branch head are
@@ -930,8 +975,8 @@ def sync_git_info(
                 "change_type": change["change_type"],
             }
             path = change["path"]
-            edge_batch.extend(_edge("CHANGED", "GitCommit", cid, "File", target_id, **properties)
-                              for target_id in file_targets.get(path, ()))
+            edge_batch.extend(_edge("CHANGED", "GitCommit", cid, label, target_id, **properties)
+                              for label, target_id in file_targets.get(path, ()))
         if len(edge_batch) >= 2000:
             writer.merge_edges(edge_batch)
             edge_batch.clear()
@@ -975,6 +1020,12 @@ def sync_git_info(
     edge_batch.extend(ref_edges)
     if edge_batch:
         writer.merge_edges(edge_batch)
+    # History stored before this repo's code was in the graph, or under an older link version, was
+    # linked to fewer code nodes than exist now. The version is recorded only once there was code to
+    # link, so a sync that found none leaves the relink to the first sync that does.
+    if file_targets and previous_tips and linked_version < CHANGED_LINK_VERSION:
+        _relink_changed(writer, repo_id, file_targets)
+    link_state = {"changed_link_version": CHANGED_LINK_VERSION} if file_targets else {}
 
     remote_stats = {"issues": 0, "pull_requests": 0, "releases": 0, "github_tags": 0,
                     "check_suites": 0, "check_runs": 0}
@@ -1024,6 +1075,6 @@ def sync_git_info(
     writer.merge_node(_node("GitRepository", repo_id, name=canonical.rstrip("/").rsplit("/", 1)[-1],
                             canonical_url=canonical, provider="github", source_path=source_path,
                             branch_tips=json.dumps(current_tips, sort_keys=True),
-                            github_synced_at=remote_synced_at or ""))
+                            github_synced_at=remote_synced_at or "", **link_state))
     return {"repository": canonical, "commits": commit_count, "users": len(user_ids_seen),
             "tags": len(local_tags) + remote_stats["github_tags"], **remote_stats}

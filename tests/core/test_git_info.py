@@ -183,6 +183,66 @@ def test_changed_file_without_code_node_has_no_duplicate_file_entity(graph, tmp_
     assert graph.ro_query("MATCH (:GitCommit)-[:CHANGED]->(f:File) RETURN f.id").result_set == []
 
 
+def test_changes_link_to_python_and_typescript_modules(graph, tmp_path, monkeypatch):
+    # Python and TypeScript model a source file as a `Module` (Python `file_path`, TypeScript `path`),
+    # not a `File` -- so a commit that touches one must reach that Module, found through its Project.
+    root = tmp_path / "checkout"
+    repo = _make_repo(root)
+    (root / "pkg").mkdir()
+    (root / "pkg" / "__init__.py").write_text("")
+    (root / "pkg" / "core.py").write_text("def helper():\n    return 2\n")
+    (root / "web").mkdir()
+    (root / "web" / "app.ts").write_text("export function render(): number {\n  return 3;\n}\n")
+    repo.git.add(A=True)
+    repo.index.commit("add package and web app")
+    writer = GraphWriter(graph)
+    monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
+    monkeypatch.setattr(git_info, "_github_metadata", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
+
+    set_git_info_enabled(True)
+    ingest.ingest_directory(writer, str(root), project_name="Checkout", deep="off", auto_install=False)
+
+    rows = graph.ro_query(
+        "MATCH (c:GitCommit)-[e:CHANGED]->(m:Module) "
+        "RETURN c.summary, coalesce(m.file_path, m.path) AS path, e.change_type ORDER BY c.summary, path"
+    ).result_set
+    assert rows == [
+        ["add package and web app", "pkg/core.py", "A"],
+        ["add package and web app", "web/app.ts", "A"],
+        ["initial commit", "main.py", "A"],
+    ]
+
+
+def test_history_collected_before_its_code_is_linked_on_a_later_sync(graph, tmp_path, monkeypatch):
+    # Provenance collected while the graph had no code for the repo links nothing; once the code is
+    # ingested, the next sync links the stored history from each commit's `changed_files`, even with
+    # no new commit -- and only once.
+    root = tmp_path / "checkout"
+    _make_repo(root)
+    writer = GraphWriter(graph)
+    monkeypatch.setattr(git_info, "_verify_public_github", lambda *_: None)
+    monkeypatch.setattr(git_info, "_github_metadata", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_checks", lambda *_: ([], []))
+    monkeypatch.setattr(git_info, "_github_commit_logins", lambda *a, **k: {})
+
+    git_info.sync_git_info(writer, str(root))
+    assert graph.ro_query("MATCH (:GitCommit)-[e:CHANGED]->() RETURN count(e)").result_set[0][0] == 0
+
+    set_git_info_enabled(True)
+    ingest.ingest_directory(writer, str(root), project_name="Checkout", deep="off", auto_install=False)
+    linked = "MATCH (:GitCommit)-[:CHANGED]->(m:Module) RETURN m.file_path"
+    assert graph.ro_query(linked).result_set == [["main.py"]]
+    assert graph.ro_query("MATCH (r:GitRepository) RETURN r.changed_link_version").result_set == [
+        [git_info.CHANGED_LINK_VERSION]
+    ]
+
+    graph.query("MATCH (:GitCommit)-[e:CHANGED]->() DELETE e")
+    assert git_info.sync_git_info(writer, str(root), source_uri=str(root))["commits"] == 0
+    assert graph.ro_query(linked).result_set == []  # already linked under this version: no re-walk
+
+
 def test_remote_change_keeps_data_while_another_checkout_still_uses_old_repo(
     graph, tmp_path, monkeypatch
 ):
