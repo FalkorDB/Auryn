@@ -109,19 +109,41 @@ def _read_name(d: str, i: int) -> tuple[str, int]:
     return d[i:j], j
 
 
+def _find_unquoted(d: str, i: int, close: str) -> int:
+    """Index of the next `close` char at/after i that is NOT inside a backtick-quoted name (where an internal
+    backtick is doubled) -- so a closing `]`/`)` embedded in a quoted name doesn't end the component early.
+    -1 if none."""
+    while i < len(d):
+        if d[i] == "`":
+            i += 1
+            while i < len(d):
+                if d[i] == "`":
+                    if i + 1 < len(d) and d[i + 1] == "`":  # doubled -> literal backtick inside the name
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if d[i] == close:
+            return i
+        i += 1
+    return -1
+
+
 def _parse_descriptor(d: str) -> list[Descriptor]:
     out: list[Descriptor] = []
     i, n = 0, len(d)
     while i < n:
         if d[i] == "[":  # type-parameter `[name]` -- a standalone component, no preceding name
-            j = d.find("]", i)
+            j = _find_unquoted(d, i + 1, "]")
             end = (j + 1) if j != -1 else n
             name, _ = _read_name(d, i + 1)
             out.append(Descriptor(name, TYPE_PARAMETER, end))
             i = end
             continue
         if d[i] == "(":  # parameter `(name)` -- standalone, no preceding name
-            j = d.find(")", i)
+            j = _find_unquoted(d, i + 1, ")")
             end = (j + 1) if j != -1 else n
             name, _ = _read_name(d, i + 1)
             out.append(Descriptor(name, PARAMETER, end))
@@ -140,7 +162,7 @@ def _parse_descriptor(d: str) -> list[Descriptor]:
             out.append(Descriptor(name, TYPE, i + 1))
             i += 1
         elif c == "(":  # method `name(<disambiguator>).` -- the parens may hold an overload hash
-            close = d.find(")", i)
+            close = _find_unquoted(d, i + 1, ")")
             i = (close + 1) if close != -1 else n
             if i < n and d[i] == ".":  # the mandatory trailing dot
                 i += 1

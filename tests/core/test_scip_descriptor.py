@@ -45,6 +45,12 @@ def test_bare_names_exclude_their_closing_delimiter():
     assert param.name == "x"   # not "x)"
 
 
+def test_delimiter_search_skips_backtick_quoted_names():
+    # a `)` inside a backtick-quoted method disambiguator must not end the method early
+    comps = sd.parse("s m p v `f`(`a)b`).")
+    assert comps[-1].kind == sd.METHOD and comps[-1].name == "f"   # one method, not method + spurious term
+
+
 def test_doubled_space_in_a_header_field_is_not_a_separator():
     # SCIP escapes a literal space inside a header field by doubling it: the package is `my  package`.
     prefix, desc = sd.split_symbol("scip . my  package 1.0.0 Foo#")

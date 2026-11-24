@@ -75,12 +75,12 @@ def _type_parent(comps: list[sd.Descriptor]) -> sd.Descriptor | None:
 
 def build_graph(index_bytes: bytes, project_id: str, *, project_name: str = "",
                 repo_uri: str = "") -> Iterator[GraphNode | GraphEdge]:
-    """Yield the Project + File + symbol nodes and DEFINES/HAS_METHOD/HAS_FILE edges for `index_bytes`.
+    """Yield the Project + File + symbol nodes and DEFINED_IN/HAS_METHOD/HAS_FILE edges for `index_bytes`.
     Re-iterable callers (stream_apply runs the generator twice) should pass a fresh call each time."""
     documents = scip.parse_index(index_bytes)
 
     # Pass 1: collect each defined Function/Method/Type (dedup by symbol, first definition wins) + its file.
-    # A type may be defined in several files (C++ header + ...); keep the first, so HAS_METHOD/DEFINES are stable.
+    # A type may be defined in several files (C++ header + ...); keep the first, so HAS_METHOD/DEFINED_IN are stable.
     defs: dict[str, tuple[str, str, str, int]] = {}  # symbol -> (label, name, file path, 1-based def line)
     for doc in documents:
         path = _norm_path(doc.relative_path)
