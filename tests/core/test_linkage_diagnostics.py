@@ -114,6 +114,32 @@ def test_ambiguous_key_definition_still_blocks_auto_resolution():
     assert len(stats.near_misses) == 1
 
 
+def test_module_placeholder_does_not_bind_to_a_same_named_symbol():
+    # A Module import `backend.core` must NOT absorb into a Function `plugins.backend::core` (same name
+    # `core`) -- different symbol KINDS (module key has no `::`, symbol key does).
+    ph = "extern://python/backend.core"                 # `import backend.core` (module placeholder)
+    fn = "extern://python/plugins.backend::core"        # a function named `core` in plugins.backend
+    writer = _FakeWriter([
+        (fn, "py://a/core", None, None, "local", "core"),
+        (ph, ph, False, None, "external", "core"),
+    ], labels=("Module", "Function"))
+    stats = reconcile_linkages(writer, real_linkages=[fn], placeholder_ids=[ph])
+    assert stats.absorbed == 0 and stats.unresolved == [ph] and stats.resolved_near_misses == []
+
+
+def test_declared_namespace_language_is_not_auto_resolved():
+    # Java keys use DECLARED package/type names, not file paths: `acme.billing.Charger#charge` and
+    # `com.acme.billing.Charger#charge` are DIFFERENT types, not a package-root leak -> never auto-merged.
+    ph = "extern://java/acme.billing.Charger#charge"
+    real = "extern://java/com.acme.billing.Charger#charge"
+    writer = _FakeWriter([
+        (real, "java://a/charge", None, None, "local", "charge"),
+        (ph, ph, False, None, "external", "charge"),
+    ], labels=("Method",))
+    stats = reconcile_linkages(writer, real_linkages=[real], placeholder_ids=[ph])
+    assert stats.absorbed == 0 and stats.unresolved == [ph] and stats.resolved_near_misses == []
+
+
 def test_exact_match_still_absorbs_via_linkage_key():
     key = "extern://python/acme.core::charge"
     writer = _FakeWriter([

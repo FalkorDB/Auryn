@@ -121,6 +121,20 @@ def _parse_linkage(link: str) -> tuple[str, tuple[str, ...], str] | None:
     return lang, tuple(parts[:-1]), parts[-1]
 
 
+# Languages whose module/qualifier linkage key is DERIVED FROM THE FILE PATH, so a wrapper directory or an
+# on-sys.path package root can leak an extra leading component in -- the only place a suffix mismatch is a
+# layout artifact rather than a genuinely different symbol. Java/C#/C++/Go/Rust key on DECLARED package /
+# namespace names (not the path), where `acme.billing.Charger` vs `com.acme.billing.Charger` are different
+# types, so suffix auto-resolution is NOT applied to them. (JS/TS are candidates once validated.)
+_FILE_PATH_KEYED_LANGS = frozenset({"python"})
+
+
+def _is_module_key(link: str) -> bool:
+    """A module/package linkage key (no `::`/`#` separator) rather than a member/symbol key -- so a module
+    IMPORT can only bind to a module definition, never to a same-named function/member (and vice versa)."""
+    return "::" not in link and "#" not in link
+
+
 def _prefix_mismatch(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
     """True when two qualifier component-tuples differ *only* by leading components -- one is a
     proper suffix of the other, e.g. ``('acme_payments','core')`` vs
@@ -215,12 +229,17 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
                 cands_by_name[str(nm)].append((str(link), str(nid)))
         still_unresolved: list[str] = []
         for ph, p in ph_parsed:
-            if p is None:
+            if p is None or p[0] not in _FILE_PATH_KEYED_LANGS:
+                # Only file-path-derived keys (Python) can suffer a package-root prefix leak; for declared-
+                # name languages (Java/C++/Go/…) a suffix mismatch is a genuinely different symbol -> leave it.
                 still_unresolved.append(ph)
                 continue
             lang, qual, name = p
+            ph_is_module = _is_module_key(ph)
             matches = [(link, nid) for link, nid in cands_by_name.get(name, [])
-                       if (c := _parse_linkage(link)) is not None and c[0] == lang and _prefix_mismatch(qual, c[1])]
+                       if (c := _parse_linkage(link)) is not None and c[0] == lang
+                       and _is_module_key(link) == ph_is_module  # module<->module / symbol<->symbol only
+                       and _prefix_mismatch(qual, c[1])]
             targets = {nid for _, nid in matches}  # distinct definition NODES (an ambiguous key yields 2+)
             if len(targets) == 1:
                 target = next(iter(targets))
