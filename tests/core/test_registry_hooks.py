@@ -366,9 +366,9 @@ def test_uninstall_removes_the_hooks_of_every_registered_repo(monkeypatch, tmp_p
 
 def test_a_hook_we_may_not_write_does_not_end_the_uninstall_sweep(monkeypatch, tmp_path):
     """A read-only post-commit raised out of the loop: the hooks after it kept their block, and
-    `forget` / `uninstall` dropped the repo from the registry all the same -- nothing left to
-    retry from. The other hooks are cleaned first, and the repo stays registered. (The refusal
-    is simulated, so this holds when run as root too.)"""
+    `forget` dropped the repo from the registry all the same -- nothing left to retry from. The
+    other hooks are cleaned first, and the repo stays registered. (The refusal is simulated, so
+    this holds when run as root too.)"""
     from auryn.cli import _deregister_repo
     from auryn.core.install import do_uninstall
 

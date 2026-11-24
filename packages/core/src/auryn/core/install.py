@@ -32,12 +32,13 @@ def default_server_command() -> list[str]:
 
 def do_install(backend: Backend, *, adapters=None, server_command: list[str] | None = None) -> Config:
     """Register with every detected agent and persist the config + manifest. Returns the saved
-    Config (its ``agents`` are exactly those that were registered -- empty if none detected).
+    Config with ``agents`` narrowed to those this run registered (empty if none detected).
 
     Resilient per agent: a detected agent whose registration fails (unreachable CLI, a config
     file we can't safely edit, ...) is logged and skipped so the others still get wired up."""
     adapters = default_adapters() if adapters is None else adapters
     command = server_command or default_server_command()
+    load_config()  # an unreadable config.toml fails here, before any agent is touched
     registrations = []
     for adapter in adapters:
         if not adapter.detect():
@@ -48,16 +49,22 @@ def do_install(backend: Backend, *, adapters=None, server_command: list[str] | N
             logger.warning("Skipped %s: could not register (%s)", adapter.name, e)
     # Preserve everything else the user already configured (resync trigger, disabled hooks,
     # registered repos, embed mode) -- a re-install only updates the backend and the set of
-    # registered agents, it must not silently reset persisted settings.
-    config = replace(load_config(), backend=backend, agents=tuple(registrations))
-    save_config(config)
+    # registered agents, it must not silently reset persisted settings. The manifest also keeps
+    # an agent an earlier run registered and this one didn't (not detected from this shell, or
+    # its registration failed) -- `uninstall` reverses only what the manifest lists.
+    prior = load_config()  # as it is NOW: registering took a while, and an ingest may have saved
+    config = replace(prior, backend=backend, agents=tuple(registrations))
+    names = {r.name for r in registrations}
+    save_config(replace(config, agents=tuple(a for a in prior.agents if a.name not in names) + config.agents))
     return config
 
 
-def do_uninstall(*, purge: bool = False, adapters=None) -> Config:
+def do_uninstall(*, purge: bool = False, force: bool = False, adapters=None) -> Config:
     """Reverse an install: stop the local server, deregister every recorded agent, then either
-    clear the manifest (keep data) or purge ``~/.auryn`` entirely. Returns the prior Config
-    (so the caller can report what was removed)."""
+    clear the manifest (keep data) or purge ``~/.auryn`` entirely. An agent that can't be
+    deregistered stays in the manifest -- and the home dir with it -- to retry from; `force`
+    forgets it all the same (the way out when its CLI is gone for good). Returns the prior Config
+    with ``agents`` narrowed to those deregistered (so the caller can report what was removed)."""
     from auryn.core import hooks
     from auryn.core.server_manager import stop_server
 
@@ -65,22 +72,26 @@ def do_uninstall(*, purge: bool = False, adapters=None) -> Config:
     stop_server()
 
     by_name = {a.name: a for a in (default_adapters() if adapters is None else adapters)}
+    failed = []
     for reg in prior.agents:
         adapter = by_name.get(reg.name)
-        if adapter is not None:
+        try:
+            if adapter is None:  # recorded by another version of Auryn: nothing here can reverse it
+                raise LookupError("this version of Auryn has no adapter for it")
             adapter.deregister(reg)
+        except Exception as e:  # noqa: BLE001 -- e.g. its CLI is gone: the rest still get reversed
+            logger.warning("Could not deregister %s (%s)", reg.name, e)
+            failed.append(reg)
     # The `commit` trigger put a resync block in each registered repo's git hooks. Left behind, the
     # next commit there would run `auryn sync` again -- recreating the home dir we are removing.
-    stranded = []  # repos still carrying a hook of ours: they stay registered, to retry from
-    for repo in prior.repos:
+    for repo in prior.repos:  # they stay registered, so a repo whose hook we can't clean is retried
         try:
             hooks.uninstall(repo.local_dir)
         except Exception as e:  # noqa: BLE001 -- one unwritable hook must not strand the rest
             logger.warning("Could not remove the resync hooks from %s (%s)", repo.local_dir, e)
-            stranded.append(repo)
 
-    if purge:
+    if purge and (force or not failed):
         shutil.rmtree(home_dir(), ignore_errors=True)
-    else:
-        save_config(replace(load_config(), agents=(), repos=tuple(stranded)))  # the rest stays as it is
-    return prior
+    else:  # the config as it is NOW, like do_install
+        save_config(replace(load_config(), agents=() if force else tuple(failed)))
+    return replace(prior, agents=tuple(a for a in prior.agents if a not in failed))

@@ -107,6 +107,8 @@ def load_config() -> Config:
         )
         for a in data.get("install", {}).get("agents", [])
     )
+    if not all(isinstance(a.name, str) for a in agents):  # it keys the manifest: fail here, not mid-install
+        raise ValueError("an [[install.agents]] name is not text")
     trigger = data.get("resync", {}).get("trigger", "commit")
     if trigger not in VALID_TRIGGERS:
         trigger = "commit"
@@ -119,7 +121,7 @@ def load_config() -> Config:
             disabled_hooks=tuple(r.get("disabled_hooks", [])),
         )
         for r in data.get("repo", [])
-        if r.get("local_dir")
+        if r.get("local_dir") and isinstance(r["local_dir"], str)  # a folder: `local_dir = 123` names none
     )
     disabled_hooks = tuple(data.get("hooks", {}).get("disabled", []))
     embed_mode = str(data.get("embeddings", {}).get("mode", "background")).strip().lower()

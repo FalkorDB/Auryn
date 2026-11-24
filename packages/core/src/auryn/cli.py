@@ -450,7 +450,8 @@ def _prompt_backend(backend, host, port, username, password, ssl, assume_yes):
 @click.option("--password", default=None, help="Remote FalkorDB password.")
 @click.option("--ssl", is_flag=True, default=False, help="Connect to the remote FalkorDB over TLS.")
 @click.option("--trigger", type=click.Choice(["manual", "commit", "save"]), default=None,
-              help="How the graph is kept fresh after an edit. Prompted for if omitted (default: commit).")
+              help="How the graph is kept fresh after an edit. Prompted for if omitted (default: the "
+                   "saved setting, else commit).")
 @click.option("--git-info", "git_info", type=click.Choice(["on", "off"]), default=None,
               help="Collect full local Git history and public GitHub metadata whenever a repo is ingested.")
 @click.option("--yes", "-y", is_flag=True, default=False,
@@ -460,20 +461,40 @@ def install(backend, host, port, username, password, ssl, trigger, git_info, yes
     with every detected agent (Claude Code, OpenAI Codex, Antigravity, GitHub Copilot, Cursor,
     Windsurf, Gemini CLI), user-scoped. Writes only to ~/.auryn and the agent's own config —
     never your repo. Re-runnable."""
+    import tomllib
+
+    from auryn.core import watcher
     from auryn.core.app_config import load_config, set_git_info_enabled, set_resync_trigger
+    from auryn.core.home import config_path
     from auryn.core.install import default_server_command, do_install
 
+    try:
+        # Read first: a trigger that isn't passed keeps the saved one (a re-run must not turn a
+        # `save` trigger back into `commit`), and a config.toml we can't read has to stop the
+        # install before any agent is registered against it.
+        saved = load_config()
+    except Exception as e:  # noqa: BLE001 -- invalid TOML, or a section / field of the wrong shape
+        # The type name, and of a TOML error only where it is. Their text can quote the file -- a
+        # URL typed as the port, password and all, or as a table name -- and the repr holds more.
+        reason = type(e).__name__
+        if isinstance(e, tomllib.TOMLDecodeError):  # "... (at line 2, column 23)"
+            reason += f" at {str(e).rpartition(' (at ')[2].removesuffix(')')}"
+        raise click.ClickException(
+            f"{config_path()} can't be read ({reason}). Fix or remove it, then re-run `auryn install`.") from e
     chosen = _prompt_backend(backend, host, port, username, password, ssl, yes)
     if trigger is None:
-        trigger = "commit" if yes else click.prompt(
-            "Keep the graph fresh on", type=click.Choice(["commit", "save", "manual"]), default="commit")
-    if git_info is None:
-        git_info = "off" if yes else ("on" if click.confirm(
-            "Collect full Git history and public GitHub issues, pull requests, releases, and tags?", default=False
+        trigger = saved.resync_trigger if yes else click.prompt(
+            "Keep the graph fresh on", type=click.Choice(["commit", "save", "manual"]),
+            default=saved.resync_trigger)
+    if git_info is None:  # kept as saved too: turning it off purges the history already collected
+        git_info = ("on" if saved.git_info_enabled else "off") if yes else ("on" if click.confirm(
+            "Collect full Git history and public GitHub issues, pull requests, releases, and tags?",
+            default=saved.git_info_enabled,
         ) else "off")
     was_git_info_enabled = load_config().git_info_enabled
     config = do_install(chosen)
     set_resync_trigger(trigger)
+    watcher.ensure_watcher()  # `uninstall` stopped it, and kept the save-triggered repos on record
     set_git_info_enabled(git_info == "on")
     if was_git_info_enabled and git_info == "off":
         _purge_git_info_backend()
@@ -503,12 +524,15 @@ def install(backend, host, port, username, password, ssl, trigger, git_info, yes
 
 @cli.command("uninstall")
 @click.option("--purge", is_flag=True, default=False, help="Also delete ~/.auryn (config + ALL graphs).")
+@click.option("--force", is_flag=True, default=False,
+              help="Finish even when an agent can't be deregistered (its CLI is gone for good): forget it anyway.")
 @click.option("--yes", is_flag=True, default=False, help="Skip the confirmation prompt.")
-def uninstall(purge, yes) -> None:
+def uninstall(purge, force, yes) -> None:
     """Reverse `install`: stop the local server and deregister Auryn from every agent it was
     registered with. Keeps ~/.auryn (your graphs) unless --purge. In your repos, only Auryn's
     resync block comes out of their git hooks."""
     from auryn.core import watcher
+    from auryn.core.app_config import load_config
     from auryn.core.install import do_uninstall
 
     if not yes:
@@ -518,9 +542,19 @@ def uninstall(purge, yes) -> None:
         if not click.confirm(msg, default=True):
             return
     watcher.stop_watcher()
-    prior = do_uninstall(purge=purge)
-    removed = ", ".join(a.name for a in prior.agents) or "(no agents were registered)"
-    click.echo(f"Deregistered from: {removed}")
+    recorded = load_config().agents
+    removed = do_uninstall(purge=purge, force=force).agents
+    failed = ", ".join(a.name for a in recorded if a not in removed)
+    if removed or not failed:
+        click.echo(f"Deregistered from: {', '.join(a.name for a in removed) or '(no agents were registered)'}")
+    if failed and not force:  # they stay on record, so the next run can retry
+        raise click.ClickException(
+            f"Could not deregister from: {failed} (see the warning above). Kept on record"
+            + (", and ~/.auryn with it" if purge else "")
+            + f" -- run `auryn uninstall{' --purge' if purge else ''}` again once that is fixed, or with --force"
+            " to forget it anyway.")
+    if failed:
+        click.echo(f"Forgot without deregistering: {failed} -- remove Auryn from it by hand.", err=True)
     if purge:
         click.echo("Removed ~/.auryn.")
     click.echo("Remove the CLI itself with:  uv tool uninstall auryn")
