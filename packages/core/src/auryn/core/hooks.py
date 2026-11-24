@@ -160,7 +160,9 @@ def install(local_dir, sync_cmd: list[str]) -> list[str]:
             # otherwise end the hook before our (backgrounded) line. The file keeps its mode.
             head, _, body = base.partition("\n") if base.startswith("#!") else ("", "", base)
             path.write_text((head + "\n" if head else "") + block + body, newline="")
-        elif not path.is_symlink():  # a dangling link: its target isn't ours to create
+        elif path.is_symlink():  # a dangling link: its target isn't ours to create
+            continue
+        else:
             path.write_text("#!/bin/sh\n" + block)
             path.chmod(0o755)
         if os.access(path, os.X_OK):  # git skips a non-executable hook: the block is in, but inert

@@ -81,6 +81,9 @@ def test_hooks_install_chain_and_uninstall(tmp_path):
     assert not (d / "post-merge").exists()                 # a hook that was only ours is removed
 
 
+@pytest.mark.skipif(os.name == "nt",
+                    reason="git runs the #!/bin/sh hook through git-for-windows' bundled sh, where the Windows "
+                           "backslash path in it doesn't round-trip (as for test_hook_fires_on_commit)")
 def test_hook_block_runs_even_when_the_users_hook_exits_first(tmp_path):
     """A user hook that ends in `exit 0` (or `exec`) used to end before our appended block ever
     ran. The block goes right after the shebang now, ahead of the user's body."""
@@ -152,6 +155,7 @@ def test_a_block_without_its_end_marker_does_not_take_the_users_lines_with_it(tm
     assert app_config.get_repo(str(repo))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="native Windows has no exec bit: chmod 644 can't switch a hook off there")
 def test_install_leaves_a_non_shell_hook_and_a_disabled_hook_as_they_are(tmp_path):
     """A shell line appended to a Python hook is a SyntaxError that also stops the USER's hook;
     and `chmod 755` on a hook the user had switched off switches it back on. Neither is ours to
