@@ -96,9 +96,10 @@ def _read(path: Path) -> str | None:
     one that isn't text at all (a compiled hook) or that we may not read -- never ours to edit."""
     try:
         with path.open(newline="") as f:
-            return f.read()
+            text = f.read()
     except (UnicodeDecodeError, OSError):
         return None
+    return None if "\0" in text else text  # a compiled hook can decode all the same; text has no NUL
 
 
 def _alias_of(path: Path, d: Path) -> str | None:

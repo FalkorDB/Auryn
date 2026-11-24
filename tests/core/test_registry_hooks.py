@@ -326,13 +326,16 @@ def test_uninstall_leaves_a_hook_without_our_block_byte_for_byte(tmp_path):
     d = hooks.hooks_dir(repo)
     (d / "post-commit").write_text("#!/bin/sh\n")
     (d / "post-merge").write_bytes(b"\x7fELF\xff\xfe compiled hook")
-    before = {n: (d / n).read_bytes() for n in ("post-commit", "post-merge")}
+    (d / "post-checkout").write_bytes(b"\x7fELF\x02\x01\x01\x00 compiled hook")  # decodes as UTF-8 all the same
+    before = {n: (d / n).read_bytes() for n in ("post-commit", "post-merge", "post-checkout")}
 
     hooks.uninstall(repo)
     assert {n: (d / n).read_bytes() for n in before} == before
     assert not hooks.is_installed(repo)  # ...and the status check reads past the compiled hook
 
-    hooks.install(repo, ["true"])  # install skips the compiled hook too, instead of crashing on it
+    # install skips the compiled hooks too, instead of crashing on one or writing into the other
+    hooks.install(repo, ["true"])
+    assert (d / "post-checkout").read_bytes() == before["post-checkout"]
     hooks.uninstall(repo)
     assert (d / "post-merge").read_bytes() == before["post-merge"]
 
