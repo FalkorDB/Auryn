@@ -49,8 +49,10 @@ class ReconcileStats:
     ambiguous: list[str] = None  # linkages with >1 real definer (surfaced, not merged)
     unresolved: list[str] = None  # placeholder linkages left unresolved that expect a definition
     #                               (origin `external`/unknown, not a terminal builtin/libc)
-    near_misses: list[tuple[str, str]] = None  # (placeholder, nearest_def) differing ONLY by a
-    #                               module prefix -- the package-root / layout-mismatch smoking gun
+    near_misses: list[tuple[str, str]] = None  # (placeholder, a near def) differing ONLY by a module
+    #                               prefix but with 2+ candidate defs -- AMBIGUOUS, left unmerged
+    resolved_near_misses: list[tuple[str, str]] = None  # (placeholder, def) auto-resolved by the
+    #                               suffix match -- a UNIQUE layout-mismatch def, folded in
 
     def __post_init__(self) -> None:
         if self.ambiguous is None:
@@ -59,6 +61,8 @@ class ReconcileStats:
             self.unresolved = []
         if self.near_misses is None:
             self.near_misses = []
+        if self.resolved_near_misses is None:
+            self.resolved_near_misses = []
 
 
 def _present(graph, labels) -> list[str]:
@@ -177,35 +181,59 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
                 _absorb(writer, absorbable_id=src, canonical_id=target)
                 stats.absorbed += 1
 
-    # Silent-miss diagnostic (the Gap-2 fix): an unresolved reference whose symbol name matches a
+    # Package-root / project-layout resolution: an unresolved reference whose symbol name matches a
     # real definition emitted in THIS ingest, where the two linkage keys differ ONLY by a leading
-    # module prefix, is almost always a package-root / project-layout bug -- a `src/` or wrapper dir
-    # leaking into the definer's dotted path (see ADR 0004; `ids.dotted_module_path`). The reference
-    # SHOULD have resolved; the exact-string match just missed by a prefix. Surface it, don't merge
-    # (per ADR 0004 decision 6, a loosened match risks false joins -- the fix belongs in the key).
-    # NB: catches a mismatch only when both sides are touched in one ingest (e.g. a whole tree
-    # indexed as one project -- the exact footgun that stalled the audit). A definer ingested in a
-    # *separate* pass from its consumer is a documented follow-up (needs a name-indexed placeholder
-    # seek to stay scan-free), tracked with Gap 1.
+    # module prefix, is a package-root leak -- the SAME file resolves under two dotted identities (a
+    # package root nested under, or put on sys.path beside, its longer file-path spelling, e.g.
+    # `backend.llm_client` vs `plugins.com.esl.feltfixinator.backend.backend.llm_client`). The
+    # reference SHOULD have resolved; the exact-string match just missed by the prefix.
+    #   - EXACTLY ONE canonical def is suffix-compatible -> AUTO-RESOLVE (absorb). The uniqueness gate
+    #     is what makes this safe: it's precisely the false-join risk ADR 0004 decision 6 worried about,
+    #     so a loosened match is admitted ONLY when there is no ambiguity about which def is meant.
+    #   - TWO+ candidates -> a genuine clash; left unresolved + warned, never merged.
+    # NB: resolves only when both sides are touched in one ingest (a whole tree indexed as one project
+    # -- the reported footgun). A definer ingested in a *separate* pass is a follow-up (Gap 1: needs a
+    # name-indexed placeholder seek to stay scan-free).
     if stats.unresolved:
         parsed_canon = [(cl, _parse_linkage(cl)) for cl in canonical_links]
+        still_unresolved: list[str] = []
         for ph in stats.unresolved:
             p = _parse_linkage(ph)
             if p is None:
+                still_unresolved.append(ph)
                 continue
-            for cl, c in parsed_canon:
-                if c is not None and p[0] == c[0] and p[2] == c[2] and _prefix_mismatch(p[1], c[1]):
-                    stats.near_misses.append((ph, cl))
-                    break
+            matches = [cl for cl, c in parsed_canon
+                       if c is not None and p[0] == c[0] and p[2] == c[2] and _prefix_mismatch(p[1], c[1])]
+            if len(matches) == 1:
+                cl = matches[0]
+                target = next(nid for nid, resolved, defined, _ in by_link[cl]
+                              if resolved is not False and defined is not False)
+                for src, resolved, defined, _ in by_link[ph]:
+                    if (resolved is False or defined is False) and src != target:
+                        _absorb(writer, absorbable_id=src, canonical_id=target)
+                        stats.absorbed += 1
+                stats.resolved_near_misses.append((ph, cl))
+            elif matches:
+                stats.near_misses.append((ph, matches[0]))  # 2+ candidate defs -> ambiguous, don't merge
+                still_unresolved.append(ph)
+            else:
+                still_unresolved.append(ph)
+        stats.unresolved = still_unresolved
 
     if stats.ambiguous:
         logger.warning("cross-repo linkage(s) with >1 definition, left unmerged: %s", sorted(set(stats.ambiguous)))
+    if stats.resolved_near_misses:
+        logger.info(
+            "cross-repo: auto-resolved %d reference(s) to a definition that differed only by a module "
+            "prefix (package-root / project-layout mismatch, unique match): %s",
+            len(stats.resolved_near_misses),
+            [f"{ph}  ->  {cl}" for ph, cl in stats.resolved_near_misses],
+        )
     if stats.near_misses:
         logger.warning(
-            "cross-repo resolution MISS: %d reference(s) matched a definition that differs ONLY by a "
-            "module prefix -- likely a package-root / project-layout mismatch (the defining repo's "
-            "dotted path has an extra leading dir, e.g. a `src/`- or hyphen-wrapped root). These did "
-            "NOT resolve and left a dangling `resolved:false` placeholder: %s",
+            "cross-repo resolution MISS: %d reference(s) matched MORE THAN ONE definition differing only "
+            "by a module prefix -- an ambiguous package-root / project-layout mismatch, left unmerged to "
+            "avoid a false join (a `resolved:false` placeholder remains): %s",
             len(stats.near_misses),
             [f"{ph}  ~  {cl}" for ph, cl in stats.near_misses],
         )
@@ -214,7 +242,7 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
             "cross-repo: %d external reference(s) unresolved after reconciliation (no definition in "
             "graph yet)%s",
             len(stats.unresolved),
-            f"; {len(stats.near_misses)} look like a layout mismatch (see warning above)"
+            f"; {len(stats.near_misses)} look like an ambiguous layout mismatch (see warning above)"
             if stats.near_misses else "",
         )
     return stats

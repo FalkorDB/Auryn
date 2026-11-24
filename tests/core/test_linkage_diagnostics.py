@@ -1,11 +1,13 @@
-"""Gap-2 diagnostic: `reconcile_linkages` must no longer *silently* drop a cross-repo reference
-whose only problem is a package-root / project-layout mismatch. When a `resolved:false` placeholder
-matches a real definition emitted in the same ingest whose linkage key differs ONLY by a leading
-module prefix, it is recorded in `near_misses` and logged loudly (it is NOT auto-merged -- per
-ADR 0004 decision 6 the fix belongs in the key, a loosened match would risk false joins).
+"""Cross-repo package-root / project-layout resolution in `reconcile_linkages`. When a `resolved:false`
+placeholder matches a real definition emitted in the same ingest whose linkage key differs ONLY by a
+leading module prefix (the same file resolving under two dotted identities -- a package root nested
+under / on sys.path beside its longer file-path spelling), it is AUTO-RESOLVED when the match is unique
+(exactly one such definition). The uniqueness gate is the safety ADR 0004 decision 6 called for: a
+loosened suffix match is admitted only when there's no ambiguity about which def is meant; with 2+
+candidates it stays a `near_misses` diagnostic, unmerged, to avoid a false join.
 
-These are pure-unit tests over a fake writer -- no live FalkorDB -- so they pin the diagnostic logic
-independent of the graph backend.
+These are pure-unit tests over a fake writer -- no live FalkorDB -- so they pin the logic independent
+of the graph backend.
 """
 
 from __future__ import annotations
@@ -48,19 +50,43 @@ class _FakeWriter:
         return _Result([])
 
 
-def test_package_root_mismatch_is_reported_not_silently_dropped(caplog):
+def test_unique_package_root_mismatch_auto_resolves(caplog):
+    # The reported footgun: `import acme_payments.core` mints a placeholder that differs from the real
+    # definition ONLY by a leading wrapper-dir prefix. Exactly one def matches -> auto-resolve (absorb).
     writer = _FakeWriter([
         (_REAL_KEY, _REAL_ID, None, None, "local"),
         (_PH_KEY, _PH_KEY, False, None, "external"),
     ])
-    with caplog.at_level(logging.WARNING, logger="auryn.core.linkage"):
+    with caplog.at_level(logging.INFO, logger="auryn.core.linkage"):
         stats = reconcile_linkages(writer, real_linkages=[_REAL_KEY], placeholder_ids=[_PH_KEY])
 
-    assert stats.absorbed == 0                       # keys differ -> nothing merged (correct)
-    assert stats.unresolved == [_PH_KEY]             # the reference is flagged unresolved
-    assert stats.near_misses == [(_PH_KEY, _REAL_KEY)]  # ...and diagnosed as a layout mismatch
-    assert writer.writes == []                        # no _absorb attempted
-    assert any("resolution MISS" in r.message and r.levelno == logging.WARNING for r in caplog.records)
+    assert stats.absorbed == 1                                  # the placeholder was folded into the def
+    assert stats.resolved_near_misses == [(_PH_KEY, _REAL_KEY)]  # recorded as an auto-resolved layout fix
+    assert stats.unresolved == []                              # no longer dangling
+    assert stats.near_misses == []                             # not an ambiguous miss
+    assert writer.writes                                       # _absorb ran
+    assert any("auto-resolved" in r.message and r.levelno == logging.INFO for r in caplog.records)
+
+
+def test_ambiguous_prefix_mismatch_is_not_merged(caplog):
+    # Two real defs whose qualifiers BOTH end in the placeholder's `backend.core` tail -> we can't tell
+    # which the reference means, so it stays unresolved + a near-miss warning (no false join).
+    ph = "extern://python/backend.core::charge"
+    real_a = "extern://python/plugins.backend.core::charge"
+    real_b = "extern://python/vendor.wrapped.backend.core::charge"
+    writer = _FakeWriter([
+        (real_a, "python://a/module/plugins.backend.core.charge()", None, None, "local"),
+        (real_b, "python://b/module/vendor.wrapped.backend.core.charge()", None, None, "local"),
+        (ph, ph, False, None, "external"),
+    ])
+    with caplog.at_level(logging.WARNING, logger="auryn.core.linkage"):
+        stats = reconcile_linkages(writer, real_linkages=[real_a, real_b], placeholder_ids=[ph])
+
+    assert stats.absorbed == 0                     # ambiguous -> nothing merged
+    assert stats.resolved_near_misses == []
+    assert stats.unresolved == [ph]                # stays unresolved
+    assert len(stats.near_misses) == 1 and stats.near_misses[0][0] == ph
+    assert any("MORE THAN ONE definition" in r.message and r.levelno == logging.WARNING for r in caplog.records)
 
 
 def test_exact_match_still_absorbs_cleanly():
