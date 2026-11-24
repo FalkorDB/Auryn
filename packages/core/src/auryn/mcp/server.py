@@ -431,7 +431,10 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         LLM context window -- use the traversal tools for anything deeper. `graph` picks which
         graph the id lives in (default: the session default)."""
         g, gname = _read_graph(graph)
-        result = gq.neighbors(g, node_id)
+        # Lean + per-edge-type capped: a hot File now has thousands of CHANGED commits (and Git nodes
+        # carry big text), which would otherwise flood the window and crowd out structural neighbors.
+        # `edge_counts` still reports the true fan-out per type.
+        result = gq.neighbors(g, node_id, lean=True, per_type_cap=50)
         if result is None:
             raise ValueError(_NOT_FOUND.format(node_id=node_id, graph_name=gname))
         return {"graph": gname, **result}
@@ -582,6 +585,8 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
         graph entities (`RETURN e.route, count(*)`) come back too. `graph` picks which graph to
         query (default: the session default)."""
         g, gname = _read_graph(graph)
-        return {"graph": gname, **gq.run_read_query(g, query)}
+        # lean graph-view nodes so `MATCH (c:GitCommit) RETURN c` can't flood the window with
+        # commit messages / changed_files; the tabular `rows` are already lean.
+        return {"graph": gname, **gq.run_read_query(g, query, lean=True)}
 
     return server

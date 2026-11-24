@@ -53,7 +53,8 @@ def test_save_load_roundtrip_with_manifest_and_perms(tmp_path, monkeypatch):
     got = load_config()
     assert got.backend == cfg.backend
     assert got.agents == cfg.agents
-    assert stat.S_IMODE(os.stat(config_path()).st_mode) == 0o600  # may hold a password
+    if os.name == "posix":  # native Windows chmod honors only the read-only bit -> S_IMODE is 0o666, not 0o600
+        assert stat.S_IMODE(os.stat(config_path()).st_mode) == 0o600  # may hold a password
 
 
 # -- hook enable/disable persistence ---------------------------------------------------------
@@ -97,6 +98,19 @@ def test_embed_mode_roundtrip_and_setter(tmp_path, monkeypatch):
     assert load_config().embed_mode == "background"    # back to default -> section omitted again
 
 
+def test_git_info_toggle_roundtrips_and_defaults_off(tmp_path, monkeypatch):
+    from auryn.core.app_config import load_config, set_git_info_enabled
+
+    monkeypatch.setenv("AURYN_HOME", str(tmp_path / "cg"))
+    assert load_config().git_info_enabled is False
+    set_git_info_enabled(True)
+    assert load_config().git_info_enabled is True
+    assert '[git_info]' in (tmp_path / "cg" / "config.toml").read_text()
+    set_git_info_enabled(False)
+    assert load_config().git_info_enabled is False
+    assert "git_info" not in (tmp_path / "cg" / "config.toml").read_text()
+
+
 def test_reinstall_preserves_embed_mode(tmp_path, monkeypatch):
     """Re-running install only updates backend + agents; a persisted embed mode (and the other
     settings) must survive, not silently reset to the default."""
@@ -131,3 +145,24 @@ def test_set_hook_disabled_per_repo_upserts_registration(tmp_path, monkeypatch):
     set_hook_disabled("sample-hook", False, local_dir="/work/acme")
     reg = next(r for r in load_config().repos if r.local_dir == "/work/acme")
     assert reg.disabled_hooks == ()
+
+
+def test_git_info_enabled_requires_a_real_toml_boolean(tmp_path, monkeypatch):
+    from auryn.core.app_config import load_config
+    home = tmp_path / "cg"
+    home.mkdir()
+    monkeypatch.setenv("AURYN_HOME", str(home))
+
+    # A bare `git_info = false` (a value, not a table) must not crash the loader with AttributeError.
+    (home / "config.toml").write_text("git_info = false\n")
+    assert load_config().git_info_enabled is False
+
+    # A string is not a real boolean -> stay disabled; never silently opt in on a truthy string.
+    (home / "config.toml").write_text('[git_info]\nenabled = "false"\n')
+    assert load_config().git_info_enabled is False
+    (home / "config.toml").write_text('[git_info]\nenabled = "true"\n')
+    assert load_config().git_info_enabled is False
+
+    # Only a real TOML boolean `true` enables the feature.
+    (home / "config.toml").write_text("[git_info]\nenabled = true\n")
+    assert load_config().git_info_enabled is True

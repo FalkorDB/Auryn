@@ -199,6 +199,12 @@ def falkordb_connection(tmp_path_factory):
         try:
             from redislite.falkordb_client import FalkorDB as EmbeddedFalkorDB
         except ImportError as e:  # embedded is an optional extra
+            if os.name == "nt":
+                # The embedded backend (redislite/falkordblite) is POSIX-only and there's no native
+                # Windows redis/valkey server, so DB-backed tests can't run on Windows -- skip them
+                # rather than error, so the Windows CI job (and local Windows dev) can still run the
+                # backend-free suite. Point at a server (AURYN_TEST_BACKEND=server) to run them.
+                pytest.skip("embedded FalkorDB is POSIX-only; DB-backed tests are skipped on Windows")
             raise RuntimeError(
                 "Embedded test backend needs the 'embedded' extra. Install it "
                 "(`pip install 'auryn-core[embedded]'`, already in the dev group) or run "

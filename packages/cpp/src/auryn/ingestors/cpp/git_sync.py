@@ -188,6 +188,18 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
         return _fall_back()
 
     locations = resolution.callable_locations(files, proj_id)
+    # DELIBERATELY un-gated (no require_call_site / require_syntactic_call), like Rust -- do NOT naively flip
+    # this to the line-precise gate the way Go/TS/Java did (#802). C++ construction via a DECLARATION --
+    # `Circle c(2.0)` / `Circle d{3.0}`, idiomatic RAII -- parses as a declaration, not a call_expression, so
+    # the fast parser records no call site for it (robustly detecting it is most-vexing-parse territory); yet
+    # scip-clang resolves the constructor call, and that ctor edge is a primary C++ deep win. A line-precise
+    # gate would DROP every stack/braced-construction ctor edge (verified: the fixture's `run()` has
+    # `Circle c(2.0)`, and `run().calls` carries only `compute`, not `Circle`). Preprocessor macros add
+    # nothing to gate against (a macro USE resolves to a macro symbol, not a `().` callable, so it is already
+    # skipped; a macro-body call anchors at the `#define`, unattributed). The cost of staying un-gated is a
+    # spurious edge for a function used as a VALUE (a function pointer / callback), a narrower loss than the
+    # constructor edges a gate would sacrifice -- and it can't be validated end-to-end (no scip-clang in CI).
+    # Gating C++ would first need construction-site capture over declarations AND scip-clang in CI to verify.
     deep = resolve_calls(scip_bytes, locations, emit_self_calls=True)
     if locations and not deep.covered_ids:
         logger.warning("cpp deep pass: scip-clang covered no callables; falling back to tree-sitter")

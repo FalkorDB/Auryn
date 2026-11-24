@@ -27,6 +27,9 @@ subgraph never aborts the whole source.
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterable
@@ -522,6 +525,35 @@ def _ingest_from_source(
         skip=enrichment_skip,
     )
 
+    # Provenance is opt-in and kept in its own labels/IDs so the code delta engine never
+    # owns or removes it. Run the potentially large history/API pass off the ingest path, just
+    # like deep analysis: callers can query the code graph immediately while provenance fills in.
+    from auryn.core.app_config import load_config
+    if load_config().git_info_enabled:
+        if isinstance(source, GitRepoCache):
+            git_repo_path = source._path
+        elif isinstance(source, WorkingTreeSource):
+            git_repo_path = source._root
+        else:
+            git_repo_path = None
+        sib = writer.sibling()
+        # Detach to a subprocess only when a config-based reconnect will reach THIS backend: a
+        # network FalkorDB (client has select_graph), not an ad-hoc --host (embed forced "inline")
+        # or an embedded in-process DB. Otherwise run inline so it still completes.
+        detachable = (embed != "inline" and os.name == "posix"
+                      and hasattr(getattr(getattr(sib, "_graph", None), "client", None), "select_graph"))
+        _spawn_git_info(sib, git_repo_path, source_uri, detachable=detachable)
+    else:
+        # The setting describes graph contents as well as future collection. This also
+        # reconciles a direct config.toml edit on the next ingest.
+        try:
+            from auryn.core.git_info import purge_git_info
+            removed = purge_git_info(writer)
+            if removed:
+                logger.info("Git information disabled; removed %d provenance nodes", removed)
+        except Exception:
+            logger.exception("Git information cleanup failed; code ingestion succeeded")
+
     # Opt-in semantic layer: once every language's graph is settled, build/refresh embeddings so
     # the MCP `search_code` tool works. Off by default; enable with AURYN_EMBED=1 (see
     # embeddings.embedder.embeddings_enabled). By default the heavy compute is handed to the
@@ -758,6 +790,51 @@ def _spawn_deep(writer, source, target_sha, lang, *ctx) -> None:
     thread = threading.Thread(target=_target, name=f"deep-{lang.language}", daemon=True)
     thread.start()
     _deep_threads.append(thread)
+
+
+def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
+                    *, detachable: bool = False, force_remote: bool = False) -> None:
+    """Collect repository provenance OFF the code-ingest critical path.
+
+    On a network-reachable configured backend (`detachable`), spawn a DETACHED `auryn git-info sync`
+    subprocess that OUTLIVES this process -- so a one-shot `auryn ingest` doesn't kill the collection
+    mid-flight (a plain daemon thread dies on interpreter exit). The worker is single-flight per graph,
+    so overlapping triggers never collect twice. Otherwise -- an embedded in-process DB, an ad-hoc
+    `--host`, or a platform without detach -- run it inline (blocking) so it still completes."""
+    if repo_path is None:
+        try:
+            from auryn.core.git_info import remove_git_info_for_source
+            remove_git_info_for_source(writer, source_uri)
+            logger.info("Git information skipped: source is not a Git repository")
+        except Exception:
+            logger.exception("Git information unlink failed; code ingestion succeeded")
+        return
+
+    graph_name = getattr(getattr(writer, "_graph", None), "_name", None)
+    if detachable and graph_name:
+        try:
+            from auryn.core.home import run_dir
+            run_dir().mkdir(parents=True, exist_ok=True)
+            argv = [sys.executable, "-m", "auryn", "git-info", "sync", "--graph", graph_name,
+                    "--force-remote" if force_remote else "--no-force-remote",
+                    "--source-uri", source_uri, str(repo_path)]
+            # `with` closes the PARENT's fd right after Popen returns (the child already dup'd it) --
+            # avoids leaking a descriptor on every detached ingest. The whole spawn is guarded so an
+            # unwritable run dir logs and returns instead of failing the already-written code graph.
+            with open(run_dir() / "git-info.log", "ab") as log:
+                subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                 start_new_session=True, close_fds=True)
+            logger.info("Git information sync spawned (detached) for graph %r", graph_name)
+        except Exception:
+            logger.exception("Git information spawn failed; code ingestion succeeded")
+        return
+
+    try:  # inline (blocking) -- the only way an embedded / ad-hoc-host backend completes reliably
+        from auryn.core.git_info import sync_git_info
+        summary = sync_git_info(writer, repo_path, source_uri=source_uri, force_remote=force_remote)
+        logger.info("Git information synced (inline): %s", summary)
+    except Exception:
+        logger.exception("Git information sync failed; code ingestion succeeded")
 
 
 def deep_threads() -> list[threading.Thread]:

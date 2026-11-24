@@ -32,8 +32,8 @@ def _varint_field(field_num: int, value: int) -> bytes:
     return _varint((field_num << 3) | 0) + _varint(value)
 
 
-def _occ(symbol: str, line0: int, *, is_def: bool = False) -> bytes:
-    packed = _varint(line0) + _varint(0) + _varint(0)  # [line, startCol, endCol]; only line is read
+def _occ(symbol: str, line0: int, *, is_def: bool = False, col: int = 0) -> bytes:
+    packed = _varint(line0) + _varint(col) + _varint(0)  # [line, startCol, endCol]
     body = _len_field(1, packed) + _len_field(2, symbol.encode())
     if is_def:
         body += _varint_field(3, 0x1)  # SYMBOL_ROLE_DEFINITION
@@ -54,9 +54,10 @@ _FILE = "src/m.ts"
 
 
 def _loc(node_id: str, name: str, line_start: int, line_end: int,
-         sites: set[tuple[str, int]] = frozenset()) -> CallableLocation:
+         sites: set[tuple[str, int]] = frozenset(),
+         cols: set[tuple[int, int]] = frozenset()) -> CallableLocation:
     return CallableLocation(node_id, "Function", _FILE, line_start, line_end, name,
-                            frozenset(n for n, _ in sites), frozenset(sites))
+                            frozenset(n for n, _ in sites), frozenset(sites), frozenset(cols))
 
 
 def _edges(locations: list[CallableLocation], occs: list[bytes], **kw) -> set[tuple[str, str]]:
@@ -152,3 +153,58 @@ def test_require_call_site_does_not_record_a_gated_value_reference_as_seen():
 
 def test_resolve_calls_is_empty_without_matching_locations():
     assert resolve_calls(_index(_FILE, [_occ(_sym("x"), 0)]), []).edges == []
+
+
+# -- column-precise gate (call_cols): aliased calls + same-line disambiguation (#802 v2) ----------
+
+def test_column_precise_resolves_an_aliased_call_that_line_precise_cannot():
+    # `import {real as alias}; alias()` -- the fast parse recorded the call as `alias`, scip-ts names the
+    # occurrence `real` at `alias`'s position. (name, line) can never match; (line, col) position does.
+    real = _loc("real", "real", 20, 25)
+    occs = [
+        _occ(_sym("caller"), 0, is_def=True),
+        _occ(_sym("real"), 2, col=5),       # line 3, col 5 -- the aliased call site, symbol named `real`
+        _occ(_sym("real"), 19, is_def=True),
+    ]
+    # column-precise: the fast call site's position (3, 5) matches the occurrence -> edge to the real symbol.
+    with_cols = _loc("caller", "caller", 1, 10, sites={("alias", 3)}, cols={(3, 5, "alias")})
+    assert _edges([with_cols, real], occs, require_call_site=True) == {("caller", "real")}
+    # line-precise only (no columns recorded): (real, 3) is not in called_sites={("alias",3)} -> no edge.
+    no_cols = _loc("caller", "caller", 1, 10, sites={("alias", 3)})
+    assert _edges([no_cols, real], occs, require_call_site=True) == set()
+
+
+def test_column_precise_marks_the_fast_name_seen_so_the_overlay_drops_the_wrong_alias_edge():
+    # An aliased call resolves to `real`, but the fast pass guessed a same-named function `alias` (e.g. in
+    # another module). seen_by_caller must record the FAST name `alias` (not SCIP's `real`), so the overlay
+    # drops that wrong fast edge -- else it survives beside the correct deep edge.
+    real = _loc("real", "real", 20, 25)
+    occs = [
+        _occ(_sym("caller"), 0, is_def=True),
+        _occ(_sym("real"), 2, col=5),       # line 3, col 5 -- the aliased call, symbol named `real`
+        _occ(_sym("real"), 19, is_def=True),
+    ]
+    caller = _loc("caller", "caller", 1, 10, sites={("alias", 3)}, cols={(3, 5, "alias")})
+    deep = resolve_calls(_index(_FILE, occs), [caller, real], require_call_site=True)
+    assert {(e.from_key["id"], e.to_key["id"]) for e in deep.edges} == {("caller", "real")}
+    assert deep.seen_by_caller["caller"] == {"alias"}  # the FAST name, so should_drop retires the alias edge
+
+
+def test_column_precise_splits_a_call_from_a_same_line_value_reference():
+    # `a.run(); return b.run` on one line, where a and b have different types -> two DIFFERENT `run` symbols.
+    # Only the call (a.run, col 5) is a recorded call site; the value reference (b.run, col 20) is not.
+    a_run = _loc("a_run", "run", 20, 21)
+    b_run = _loc("b_run", "run", 30, 31)
+    occs = [
+        _occ(_sym("caller"), 0, is_def=True),
+        _occ(_sym("run", "A/"), 2, col=5),    # line 3, col 5 -- the call a.run()
+        _occ(_sym("run", "B/"), 2, col=20),   # line 3, col 20 -- the value reference b.run
+        _occ(_sym("run", "A/"), 19, is_def=True),
+        _occ(_sym("run", "B/"), 29, is_def=True),
+    ]
+    # column-precise: only (3, 5) is a call site -> the b.run value reference at col 20 is dropped.
+    with_cols = _loc("caller", "caller", 1, 10, sites={("run", 3)}, cols={(3, 5, "run")})
+    assert _edges([with_cols, a_run, b_run], occs, require_call_site=True) == {("caller", "a_run")}
+    # line-precise only: (run, 3) in called_sites passes BOTH refs -> the value reference spuriously resolves.
+    no_cols = _loc("caller", "caller", 1, 10, sites={("run", 3)})
+    assert _edges([no_cols, a_run, b_run], occs, require_call_site=True) == {("caller", "a_run"), ("caller", "b_run")}
