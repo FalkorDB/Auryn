@@ -79,16 +79,21 @@ def _strip_block(text: str) -> str:
     return "".join(out + (block or []))
 
 
-def owns_hooks_dir(local_dir) -> bool:
-    """True when the hooks directory is the repo's own `<git dir>/hooks`, i.e. neither
-    `core.hooksPath` nor a symlink in its place redirects it into the work tree or to a directory
-    other repos share (see the module docstring)."""
+def _own_hooks_dir(local_dir) -> Path:
+    """`<git common dir>/hooks`: where git looks for hooks unless `core.hooksPath` says otherwise."""
     out = subprocess.run(
         ["git", "-C", str(local_dir), "rev-parse", "--git-common-dir"],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
     common = Path(out) if Path(out).is_absolute() else Path(local_dir) / out
-    return hooks_dir(local_dir).resolve() == common.resolve() / "hooks"  # not through a `hooks` symlink
+    return common.resolve() / "hooks"
+
+
+def owns_hooks_dir(local_dir) -> bool:
+    """True when the hooks directory is the repo's own `<git dir>/hooks`, i.e. neither
+    `core.hooksPath` nor a symlink in its place redirects it into the work tree or to a directory
+    other repos share (see the module docstring)."""
+    return hooks_dir(local_dir).resolve() == _own_hooks_dir(local_dir)  # not through a `hooks` symlink
 
 
 def _read(path: Path) -> str | None:
@@ -177,30 +182,34 @@ def uninstall(local_dir) -> None:
     begin marker lost its end marker, so the line under it may still run a sync -- doesn't end the
     sweep: the hooks after it are cleaned too, then its error is raised."""
     try:
-        d = hooks_dir(local_dir)
+        current, own = hooks_dir(local_dir), _own_hooks_dir(local_dir)
     except Exception:
         return
+    # The repo's own hooks dir too when `core.hooksPath` has moved away from it since (husky sets it
+    # on `npm install`): a block left there runs again once the setting goes. Not a shared one.
+    dirs = [current] if own == current.resolve() or own.is_symlink() else [current, own]
     failed = None
-    for name in HOOKS:
-        path = d / name
-        if not path.exists() or _alias_of(path, d):
-            continue
-        text = _read(path)
-        if text is None or _BEGIN not in text:
-            continue
-        stripped = _strip_block(text)
-        if _BEGIN in stripped:  # a begin marker without its end: the user's lines stay, and it is said
-            failed = failed or ValueError(f"{path}: an auryn begin marker without its end marker -- "
-                                          "remove it by hand")
-        if stripped == text:  # no whole block to take out
-            continue
-        try:
-            if stripped.strip() in _BARE:
-                path.unlink()
-            else:
-                path.write_text(stripped, newline="")
-        except OSError as e:
-            failed = failed or e
+    for d in dirs:
+        for name in HOOKS:
+            path = d / name
+            if not path.exists() or _alias_of(path, d):
+                continue
+            text = _read(path)
+            if text is None or _BEGIN not in text:
+                continue
+            stripped = _strip_block(text)
+            if _BEGIN in stripped:  # a begin marker without its end: the user's lines stay, and it is said
+                failed = failed or ValueError(f"{path}: an auryn begin marker without its end marker -- "
+                                              "remove it by hand")
+            if stripped == text:  # no whole block to take out
+                continue
+            try:
+                if stripped.strip() in _BARE:
+                    path.unlink()
+                else:
+                    path.write_text(stripped, newline="")
+            except OSError as e:
+                failed = failed or e
     if failed:
         raise failed
 

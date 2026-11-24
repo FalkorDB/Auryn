@@ -190,6 +190,21 @@ def test_install_refuses_a_hooks_dir_outside_the_repos_git_dir(tmp_path):
     assert status.stdout == ""  # the work tree is untouched
 
 
+def test_uninstall_also_cleans_the_repos_own_hooks_after_core_hookspath_moved_away(tmp_path):
+    """Indexed first, then husky set `core.hooksPath` (its `prepare` script, on `npm install`):
+    uninstall swept only `.husky/_` and left our blocks in `.git/hooks` -- inert until the setting
+    goes, then resyncing again, even after `uninstall --purge`."""
+    repo = _init_repo(tmp_path / "r")
+    own = hooks.hooks_dir(repo)
+    hooks.install(repo, ["true"])
+    _git(repo, "config", "core.hooksPath", ".husky/_")
+
+    hooks.uninstall(repo)
+    _git(repo, "config", "--unset", "core.hooksPath")
+    assert hooks.hooks_dir(repo) == own
+    assert not hooks.is_installed(repo)
+
+
 def test_install_takes_an_older_versions_block_out_of_a_hook_it_now_skips(tmp_path):
     """Upgrading: earlier versions appended the block to ANY hook -- a Python one (a SyntaxError on
     every commit) and one under `core.hooksPath` (a tracked file). Only skipping those on the next
