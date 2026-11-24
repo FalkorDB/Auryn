@@ -154,6 +154,62 @@ def test_jsx_and_plain_js_parse():
     assert f.name == "App" and f.params[0].type == "" and [c.name for c in f.calls] == ["foo"]
 
 
+def test_jsx_component_tags_are_call_sites():
+    # React's rule: a capitalized or member tag is a component (React invokes it); a lowercase tag is an
+    # intrinsic host element, a namespaced tag is XML, a fragment has no name. Closing tags repeat the
+    # opening name -- one element is one call site.
+    rf = _parse(
+        "export function Page() {\n"
+        "  return (<>\n"
+        "    <Layout><Card title=\"x\" /><div /><svg:rect /></Layout>\n"
+        "    <Tabs.Panel /><a.b.Deep /><this.Slot /><Generic<string> v=\"a\" />\n"
+        "  </>);\n"
+        "}\n",
+        "page.tsx",
+    )
+    (f,) = rf.functions
+    calls = {(c.name, c.receiver) for c in f.calls if c.is_jsx}
+    assert calls == {("Layout", None), ("Card", None), ("Panel", "Tabs"), ("Deep", "a.b"),
+                     ("Slot", "this"), ("Generic", None)}
+    assert not any(c.is_new for c in f.calls)
+    card = next(c for c in f.calls if c.name == "Card")
+    assert (card.line, card.col) == (3, 13)  # the tag-name identifier, as for a call's callee
+    panel = next(c for c in f.calls if c.name == "Panel")
+    assert (panel.line, panel.col) == (4, 10)  # a member tag anchors on its property, like `obj.method()`
+    # a truncated member tag (mid-edit) recovers as an ERROR node: nothing recorded, no empty-named call
+    (broken,) = _parse("export function P() { return <Foo. />; }", "p.tsx").functions
+    assert broken.calls == []
+
+
+def test_module_scope_calls_exclude_declared_callables():
+    rf = _parse(
+        'import { render } from "./testing";\n'
+        'export { Other } from "./other";\n'
+        "export function Page() { inPage(); }\n"
+        "export const Row = () => <Cell />;\n"
+        "class Box { draw() { inMethod(); } }\n"
+        'const routes = [{ path: "/", element: <Home /> }];\n'
+        "export const client = makeClient();\n"
+        "export { client as api };\n"
+        "export default memo(Page);\n"
+        "describe('Page', () => { it('renders', () => { render(<Page />); }); });\n",
+        "page.test.tsx",
+    )
+    module = {(c.name, c.is_jsx) for c in rf.module_calls}
+    assert module == {("Home", True), ("makeClient", False), ("memo", False), ("describe", False),
+                      ("it", False), ("render", False), ("Page", True)}
+    # calls inside declared callables stay with their callable, never doubled onto the Module
+    assert [c.name for c in rf.functions[0].calls] == ["inPage"]
+    assert [c.name for c in rf.functions[1].calls] == ["Cell"]
+    assert [c.name for c in rf.classes[0].methods[0].calls] == ["inMethod"]
+
+
+def test_module_scope_export_default_callable_value():
+    # `export default () => ...` is not a declared Function, so its body is module-scope code.
+    rf = _parse("export default () => boot();\nexport default function named() { inner(); }\n")
+    assert [c.name for c in rf.module_calls] == ["boot"]
+
+
 def test_http_client_calls_capture_url_and_method():
     # ADR 0006: HTTP-client calls surface (url, method) for the downstream call->endpoint stitch.
     rf = _parse(

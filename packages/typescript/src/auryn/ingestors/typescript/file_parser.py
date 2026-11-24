@@ -22,6 +22,12 @@ Every node type / field name below was confirmed empirically against tree-sitter
   / generic_type children); interfaces use `extends_type_clause` ([type] children).
 - calls: `call_expression` [function] (identifier | member_expression [object]/[property]) and
   `new_expression` [constructor]; `super(...)` is a `super` node and is ignored.
+- JSX (tsx grammar): `jsx_opening_element` / `jsx_self_closing_element` [name] is an `identifier`
+  (`<Card>`, `<div>`), a `member_expression` (`<Tabs.Panel>`, `<this.Slot>`), or a
+  `jsx_namespace_name` (`<svg:rect>`); a fragment `<>` has no [name]. `jsx_closing_element` repeats
+  the opening name. Component tags are recorded as call sites (RawCall.is_jsx).
+- module scope: statements of `program` outside a declared callable (expression statements, non-function
+  `const` initializers, `export default <expr>` [value]) yield RawFile.module_calls.
 """
 
 from __future__ import annotations
@@ -58,6 +64,11 @@ _CALLEE_EXPR_NODES = {"identifier", "member_expression", "call_expression", "sub
 _CLASS_DECLS = {"class_declaration", "abstract_class_declaration"}
 _FUNC_VALUE_KINDS = {"arrow_function": "ARROW", "function_expression": "FUNCTION_EXPR"}
 _LEXICAL = {"lexical_declaration", "variable_declaration"}
+# Opening/self-closing tags only: a closing tag repeats the opening tag's name (one element, one call site).
+_JSX_ELEMENTS = {"jsx_opening_element", "jsx_self_closing_element"}
+# Top-level declarations whose bodies already belong to a callable (Function / class Method) -- module-scope
+# call collection skips them so a call is never attributed to both the callable and its Module.
+_CALL_OWNING_DECLS = {"import_statement", "function_declaration", *_CLASS_DECLS}
 
 # HTTP-client call detection (ADR 0006). Kept STRICT to avoid false positives + a per-call
 # perf hit: a bare `x.get(...)` is Map/collection access, NOT HTTP -- a verb-named call counts
@@ -386,7 +397,50 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                             http_url, http_method = _http_request(n, nm)
                         out.append(RawCall(name=nm, receiver=recv, is_new=is_new, http_url=http_url,
                                            http_method=http_method, line=line, col=col))
+            elif n.type in _JSX_ELEMENTS:
+                tag = field(n, "name")
+                if _is_component_tag(tag):
+                    nm, recv = _callee(tag)
+                    if tag.type == "member_expression" and recv is None:
+                        recv = txt(field(tag, "object"))  # `<A.B.C>`: still a member tag, never bare
+                    out.append(RawCall(name=nm, receiver=recv, line=_callee_line(tag), col=_callee_col(tag),
+                                       is_jsx=True))
             stack.extend(n.children)
+        return out
+
+    def _is_component_tag(tag) -> bool:
+        """React's rule for a JSX tag: a lowercase identifier (`div`, `my-el`) is an intrinsic host element,
+        anything else names a component -- a capitalized identifier or a member expression (`<Tabs.Panel>`,
+        `<this.Slot>`). Namespaced tags (`<svg:rect>`) and fragments (no name) are never components."""
+        if tag is None:
+            return False
+        if tag.type == "identifier":
+            first = txt(tag)[:1]
+            return bool(first) and not ("a" <= first <= "z")
+        return tag.type == "member_expression"
+
+    def module_scope_calls() -> list:
+        """Call sites in module-scope code (see RawFile.module_calls). Declared callables own their bodies'
+        calls, so a function/class declaration and a `const f = () => ...` value are skipped; a re-export and
+        an import carry no calls."""
+        out: list = []
+        for child in tree.root_node.children:
+            node = child
+            if child.type == "export_statement":
+                if field(child, "source") is not None:
+                    continue
+                node = field(child, "declaration") or field(child, "value")
+                if node is None:
+                    continue
+            if node.type in _CALL_OWNING_DECLS:
+                continue
+            if node.type in _LEXICAL:
+                for d in node.children:
+                    value = field(d, "value") if d.type == "variable_declarator" else None
+                    if value is not None and value.type not in _FUNC_VALUE_KINDS:
+                        out.extend(collect_calls(value))
+                continue
+            out.extend(collect_calls(node))
         return out
 
     def method_from(node) -> RawMethod:
@@ -643,4 +697,5 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
         else:
             dispatch_declaration(child, exported=False)
 
+    rf.module_calls = module_scope_calls()
     return rf

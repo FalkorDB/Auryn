@@ -44,6 +44,10 @@ class RawCall:
     # deep pass's line-precise call-site gate; 0 means "not captured"
     col: int = 0  # 0-based UTF-16 column of the callee identifier (scip-typescript's occurrence encoding), for
     # the deep pass's COLUMN-precise gate -- resolves aliased imports + same-line same-name calls (#802)
+    is_jsx: bool = False
+    """A JSX element (`<Card />`, `<Layout.Header>`): React invokes the component, so it is a call site of
+    the component function. Only component tags are recorded -- a lowercase `<div>` is an intrinsic host
+    element and a fragment has no name. `line`/`col` point at the tag-name identifier, as for a call."""
 
 
 @dataclass
@@ -163,3 +167,9 @@ class RawFile:
     enums: list[RawEnum] = field(default_factory=list)
     type_aliases: list[RawTypeAlias] = field(default_factory=list)
     functions: list[RawFunction] = field(default_factory=list)
+    module_calls: list[RawCall] = field(default_factory=list)
+    """Call sites in module-scope code -- top-level statements, non-function `const` initializers,
+    `export default <expr>`, and the anonymous callbacks inside them (`describe(() => it(...))`,
+    `createRoot(el).render(<App />)`). The Module is their CALLS source, as for Python's top-level code.
+    Bodies of declared callables (function declarations, `const f = () => ...`, class members) are
+    excluded -- they are their own callers."""

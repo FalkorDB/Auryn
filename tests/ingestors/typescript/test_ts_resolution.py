@@ -109,6 +109,54 @@ def test_new_resolves_to_constructor_when_present():
     assert any(t.endswith("Widget.method.constructor(n)") for (_f, t) in calls)
 
 
+def test_jsx_resolves_to_function_and_class_components():
+    _, edges = _resolve({
+        "src/Card.tsx": "export function Card() { return <div />; }",
+        "src/Panel.tsx": "export class Panel { render() { return null; } }",
+        "src/page.tsx": (
+            'import { Card } from "./Card";\n'
+            'import { Panel } from "./Panel";\n'
+            "export function Page() { return <main><Card /><Panel /></main>; }"
+        ),
+    })
+    calls = _edges(edges, "CALLS")
+    card = calls.get(("src/page.tsx.func.Page()", "src/Card.tsx.func.Card()"))
+    assert card is not None and card["resolution"] == "name"
+    # a class component's usage targets its render method (React invokes it), as `new X()` targets X's ctor
+    assert any(f == "src/page.tsx.func.Page()" and t.endswith("Panel.method.render()") for (f, t) in calls)
+    # the intrinsic <main>/<div> resolve to nothing
+    assert len(calls) == 2
+
+
+def test_jsx_member_and_ambiguous_tags_are_left_unresolved():
+    # Emit no edge rather than a wrong one: `<Tabs.Panel>` is a property of a value, not a class method, so
+    # a unique same-named method must not capture it; a component name defined twice is ambiguous.
+    _, edges = _resolve({
+        "src/a.tsx": "export function Dup() { return null; }",
+        "src/b.tsx": "export function Dup() { return null; }",
+        "src/tabs.ts": "export class Registry { Panel(): void {} }",
+        "src/page.tsx": "export function Page() { return <><Dup /><Tabs.Panel /></>; }",
+    })
+    assert not any(f.startswith("src/page.tsx") for (f, _t) in _edges(edges, "CALLS"))
+
+
+def test_module_scope_calls_have_the_module_as_caller():
+    _, edges = _resolve({
+        "src/util.ts": "export function helper(): number { return 1; }",
+        "src/Card.tsx": "export function Card() { return null; }",
+        "src/util.test.tsx": (
+            'import { helper } from "./util";\n'
+            'import { Card } from "./Card";\n'
+            "describe('helper', () => { it('works', () => { helper(); render(<Card />); }); });"
+        ),
+    })
+    calls = _edges(edges, "CALLS")
+    assert ("src/util.test.tsx", "src/util.ts.func.helper()") in calls
+    assert ("src/util.test.tsx", "src/Card.tsx.func.Card()") in calls
+    caller = next(e for e in edges if e.rel_type == "CALLS" and e.from_key["id"].endswith("src/util.test.tsx"))
+    assert caller.from_label == "Module"
+
+
 def test_returns_and_references_to_project_types():
     _, edges = _resolve({
         "src/models.ts": "export class Store {}",

@@ -43,6 +43,25 @@ _BASELINE: dict[str, str] = {
     "src/standalone.ts": "export function solo(): number {\n  return 0;\n}\n",
 }
 
+_CARD = "src/Card.tsx"
+_PAGE = "src/page.tsx"
+_SPEC = "src/util.test.tsx"
+_REACT: dict[str, str] = {
+    _CARD: "export function Card() {\n  return <div />;\n}\n",
+    "src/Panel.tsx": "export class Panel {\n  render() {\n    return null;\n  }\n}\n",
+    _PAGE: (
+        "import { Card } from './Card';\n"
+        "import { Panel } from './Panel';\n\n\n"
+        "export function Page() {\n  return <main><Card /><Panel /></main>;\n}\n"
+    ),
+    _SPEC: (
+        "import { helper } from './util';\n"
+        "import { greet } from './service';\n"
+        "import { Page } from './page';\n\n\n"
+        "describe('helper', () => {\n  it('works', () => {\n    helper(1);\n    render(<Page />);\n  });\n});\n"
+    ),
+}
+
 
 def _write(root: Path, files: dict[str, str]) -> None:
     for rel, content in files.items():
@@ -141,6 +160,26 @@ CASES: list[Case] = [
          lambda r: (r / _UTIL).write_text((r / _UTIL).read_text() + "\n\nexport function zeta(n: number): number {\n  return n;\n}\n"),
          ChangeSet(modified=[_UTIL]),
          extra_baseline={"src/lonely.ts": "import { zeta } from './util';\n\n\nexport function f(): number {\n  return zeta(1);\n}\n"}),
+    # JSX component usage + module-scope callers: a renamed component must retire the page's edge, an
+    # edited page must re-resolve a class component's `render` from the seed index (its file is not
+    # re-emitted), and a module-scope caller must follow a callee whose id changed.
+    Case("jsx_rename_component",
+         lambda r: _edit(r, _CARD, "export function Card(", "export function Tile("),
+         ChangeSet(modified=[_CARD]),
+         extra_baseline=_REACT),
+    Case("jsx_caller_edit_only",
+         lambda r: _edit(r, _PAGE, "<Card /><Panel />", "<Panel /><Card />"),
+         ChangeSet(modified=[_PAGE]),
+         extra_baseline=_REACT),
+    Case("module_scope_callee_signature",
+         lambda r: _edit(r, _UTIL, "export function helper(x: number): number {",
+                         "export function helper(x: number, y: number): number {"),
+         ChangeSet(modified=[_UTIL]),
+         extra_baseline=_REACT),
+    Case("module_scope_caller_edit",
+         lambda r: _edit(r, _SPEC, "helper(1);", "helper(1);\n    greet(2);"),
+         ChangeSet(modified=[_SPEC]),
+         extra_baseline=_REACT),
 ]
 
 

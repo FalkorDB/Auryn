@@ -104,6 +104,7 @@ def _emit_all(files, scope, items) -> None:
     _emit_enums(files, scope, items)
     _emit_type_aliases(files, scope, items)
     _emit_functions(files, scope, items)
+    _register_module_calls(files, scope)
     _emit_imports(files, scope, items)
     _emit_calls(scope, items)
 
@@ -244,6 +245,7 @@ def emit_streaming(plan: StreamPlan, load_fn, proj_id: str):
         _emit_enums([rf], scope, buf)
         _emit_type_aliases([rf], scope, buf)
         _emit_functions([rf], scope, buf)
+        _register_module_calls([rf], scope)
         _emit_imports([rf], scope, buf)
         _emit_calls(scope, buf)
         yield from buf
@@ -380,6 +382,15 @@ def _emit_functions(files, scope: _Scope, items: list) -> None:
             _emit_parameters(fn, fid, "Function", items)
             _emit_type_edges(fn, fid, "Function", scope, items)
             scope.callables.append(_Callable("Function", fid, fn.calls, _receiver_types(fn, None)))
+
+
+def _register_module_calls(files, scope: _Scope) -> None:
+    """Module-scope code (test `describe`/`it` callbacks, `createRoot(..).render(<App />)`, route tables)
+    has no enclosing callable, so the Module itself is the CALLS source -- as in the Python ingestor.
+    Modules are not deep-pass callables (`callable_locations`), so these fast edges are never retired."""
+    for rf in files:
+        if rf.module_calls:
+            scope.callables.append(_Callable("Module", scope.module_ids[rf.path], rf.module_calls, {}))
 
 
 # Node.js built-in modules (and their `node:` forms) -> origin "stdlib"; any other bare specifier
@@ -548,7 +559,9 @@ def _emit_type_edges(callable_obj, owner_id: str, owner_label: str, scope: _Scop
 def _resolve_call(call, receiver_types: dict[str, str], scope: _Scope):
     """(target_label, target_id, extra_props) or None. `new X()` -> X's constructor;
     `foo()` -> a unique project function; `recv.m()` -> a method, preferring the receiver's
-    declared type, else a unique method name."""
+    declared type, else a unique method name. A JSX element is resolved by `_resolve_jsx`."""
+    if call.is_jsx:
+        return _resolve_jsx(call, scope)
     if call.is_new:
         cid = scope.class_by_name.get(call.name)
         if cid is not None:
@@ -571,6 +584,24 @@ def _resolve_call(call, receiver_types: dict[str, str], scope: _Scope):
     hits = scope.method_index.get(call.name)
     if hits and len(hits) == 1:
         return ("Method", hits[0], {})
+    return None
+
+
+def _resolve_jsx(call, scope: _Scope):
+    """`<Card />` -> a unique project function component, else a unique class component's `render`
+    (React invokes it, as `new X()` targets X's constructor). A member tag (`<Tabs.Panel>`) names a
+    property of a value, not a class method, so the fast pass leaves it to the deep pass rather than
+    guess a same-named method."""
+    if call.receiver is not None:
+        return None
+    hits = scope.func_index.get(call.name)
+    if hits and len(hits) == 1:
+        return ("Function", hits[0], {})
+    cid = scope.class_by_name.get(call.name)
+    if cid is not None:
+        render = scope.methods_of_class.get(cid, {}).get("render")
+        if render is not None:
+            return ("Method", render, {})
     return None
 
 
