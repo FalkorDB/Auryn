@@ -910,7 +910,7 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
     import dataclasses
 
     from auryn.core.app_config import get_repo
-    from auryn.core.ingest import ingest_directory, join_deep_phase
+    from auryn.core.ingest import ingest_directory
     from auryn.core.project import default_graph_name, resolve_project_root
     from auryn.core.sync_lock import sync_lock
 
@@ -928,17 +928,15 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
         graph = reg.graph_name if reg and reg.graph_name else default_graph_name(root)
         project = reg.project_name if reg else None
         config = dataclasses.replace(_resolve_connection(host, port, username, password, ssl), graph_name=graph)
-        try:
-            # An explicit --host is an ad-hoc connection the background daemon (which reconnects via
-            # the configured backend) might not match, so embed inline there; otherwise let it
-            # resolve to the default (background).
+        # An explicit --host is an ad-hoc connection the background daemon (which reconnects via
+        # the configured backend) might not match, so embed inline there; otherwise let it
+        # resolve to the default (background). The context manager holds the lock for any `--deep
+        # background` writers (as a finally would) and collects which failed, so a failed background
+        # pass is surfaced like an inline one (#857).
+        with _surfaced_background_deep() as bg:
             report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
                                       deep=deep, auto_install=False, embed=("inline" if host else None))
-        finally:
-            # `--deep background` writers are still this sync: hold the lock for them, and collect
-            # which (if any) failed so a failed background pass is surfaced like an inline one (#857).
-            bg_failed = set(join_deep_phase())
-    if _echo_ingest_report(report, background_failures=bg_failed):
+    if _echo_ingest_report(report, background_failures=bg["failed"]):
         raise SystemExit(1)  # a deep pass failed -> the graph is shallow; signal it, don't exit 0 (#857)
 
 
@@ -1158,6 +1156,15 @@ def _ingest_writer(ctx: click.Context, graph_name: str) -> GraphWriter:
     return GraphWriter(connect(config))
 
 
+def _surfaced_background_deep():
+    """A `--deep background` failure must be surfaced + exit non-zero like an inline one (#857).
+    Thin alias for ingest.deep_failure_scope() (which collects THIS ingest's deep threads race-free
+    and exposes the failed ones on exit) -- kept so the call sites read locally. Use as
+    `with _surfaced_background_deep() as bg: report = ...` then pass bg["failed"] to the report."""
+    from auryn.core import ingest as _ingest
+    return _ingest.deep_failure_scope()
+
+
 def _echo_ingest_report(report, background_failures: "set[str] | None" = None) -> list[str]:
     """A compact end-of-run summary echoed to stdout. The blow-by-blow progress has
     already streamed to stderr via the `auryn.ingest` logger (setup_logging on the
@@ -1169,8 +1176,8 @@ def _echo_ingest_report(report, background_failures: "set[str] | None" = None) -
     an agent or user queries an incomplete graph without knowing (#857).
 
     `background_failures` are languages whose `--deep background` pass failed AFTER the report was
-    built (collected by join_deep_phase()); the report still records them as "background", so the
-    caller passes them in here to be surfaced as failures too."""
+    built (collected by ingest.deep_failure_scope()); the report still records them as "background",
+    so the caller passes them in here to be surfaced as failures too."""
     bg_failed = background_failures or set()
     d = report.to_dict()
     click.echo(f"Ingested {report.project_name!r} ({report.commit_sha[:12]}) in {d['elapsed_seconds']:.2f}s")
@@ -1300,24 +1307,21 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
     try:
         # Its turn among this repo's hook / watcher syncs, which write the same project subgraph
         # (core/sync_lock.py) -- e.g. a deep re-ingest while a commit hook fires.
-        with sync_lock(resolve_project_root(path), queue_one=False):
-            try:
-                report = ingest.ingest_directory(
-                    writer, path, project_name=project_name, solution_name=solution_name,
-                    deep=_effective_deep(deep, ctx.obj.get("host")),
-                    # Explicit --host is an ad-hoc connection the background daemon may not match -> inline.
-                    embed=("inline" if ctx.obj.get("host") else None),
-                    include_dirs=include_dirs, exclude_dirs=exclude_dirs,
-                    include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
-                    enrichment_only=only_hooks, enrichment_skip=skip_hooks,
-                )
-            finally:
-                # Hold the lock for `--deep background` writers, as `sync` does, and collect any that
-                # failed so a failed background pass is surfaced like an inline one (#857).
-                bg_failed = set(ingest.join_deep_phase())
+        # The context manager holds the lock for `--deep background` writers, as `sync` does, and
+        # collects any that failed so a failed background pass is surfaced like an inline one (#857).
+        with sync_lock(resolve_project_root(path), queue_one=False), _surfaced_background_deep() as bg:
+            report = ingest.ingest_directory(
+                writer, path, project_name=project_name, solution_name=solution_name,
+                deep=_effective_deep(deep, ctx.obj.get("host")),
+                # Explicit --host is an ad-hoc connection the background daemon may not match -> inline.
+                embed=("inline" if ctx.obj.get("host") else None),
+                include_dirs=include_dirs, exclude_dirs=exclude_dirs,
+                include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
+                enrichment_only=only_hooks, enrichment_skip=skip_hooks,
+            )
     except ValueError as e:  # missing path / not a directory -- a clean CLI error, not a traceback
         raise click.ClickException(str(e)) from e
-    deep_failed = _echo_ingest_report(report, background_failures=bg_failed)
+    deep_failed = _echo_ingest_report(report, background_failures=bg["failed"])
     _wire_trigger(str(resolve_project_root(path)), graph, project_name, trigger or load_config().resync_trigger)
     if deep_failed:
         raise SystemExit(1)  # deep pass failed -> shallow graph; signal it AFTER wiring the trigger (#857)
@@ -1371,11 +1375,12 @@ def ingest_repo(
         click.echo(f"Cloned {repo_uri} → {dest}")
         graph = ctx.obj["graph_name"] or default_graph_name(dest)
         writer = _ingest_writer(ctx, graph)
-        report = ingest.ingest_directory(writer, str(dest), project_name=project_name,
-                                         solution_name=solution_name,
-                                         deep=_effective_deep(deep, ctx.obj.get("host")),
-                                         embed=("inline" if ctx.obj.get("host") else None), **_filters)
-        deep_failed = _echo_ingest_report(report)
+        with _surfaced_background_deep() as bg:
+            report = ingest.ingest_directory(writer, str(dest), project_name=project_name,
+                                             solution_name=solution_name,
+                                             deep=_effective_deep(deep, ctx.obj.get("host")),
+                                             embed=("inline" if ctx.obj.get("host") else None), **_filters)
+        deep_failed = _echo_ingest_report(report, background_failures=bg["failed"])
         _wire_trigger(str(dest.resolve()), graph, project_name, trigger or load_config().resync_trigger)
         if deep_failed:
             raise SystemExit(1)  # deep pass failed -> shallow graph; signal it (#857)
@@ -1385,14 +1390,15 @@ def ingest_repo(
     graph = ctx.obj["graph_name"] or graph_name_for_repo(repo_uri)
     writer = _ingest_writer(ctx, graph)
     try:
-        report = ingest.ingest_repository(
-            writer, repo_uri, ref=ref, project_name=project_name, solution_name=solution_name,
-            deep=_effective_deep(deep, ctx.obj.get("host")),
-            embed=("inline" if ctx.obj.get("host") else None), **_filters
-        )
+        with _surfaced_background_deep() as bg:
+            report = ingest.ingest_repository(
+                writer, repo_uri, ref=ref, project_name=project_name, solution_name=solution_name,
+                deep=_effective_deep(deep, ctx.obj.get("host")),
+                embed=("inline" if ctx.obj.get("host") else None), **_filters
+            )
     except (ValueError, git.GitCommandError) as e:  # bad ref / unreachable repo -> clean CLI error
         raise click.ClickException(str(e)) from e
-    deep_failed = _echo_ingest_report(report)
+    deep_failed = _echo_ingest_report(report, background_failures=bg["failed"])
     local_dir = str(resolve_project_root(repo_uri)) if hooks.is_git_repo(repo_uri) else None
     _wire_trigger(local_dir, graph, project_name, trigger or load_config().resync_trigger)
     if deep_failed:

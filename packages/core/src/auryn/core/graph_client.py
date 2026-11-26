@@ -402,11 +402,11 @@ class GraphWriter:
 
         The back-fill must succeed before the index may stand as its done-marker: a timed-out relabel
         is rolled back by FalkorDB but the already-created index is NOT, so if we left the index in
-        place a failed back-fill would look complete forever (`created` False on every retry) and
-        pre-existing nodes would stay invisible to by-id lookups. So on a back-fill failure we drop
-        the index again (and warn) -- the next ingest re-creates and re-attempts it. We don't re-raise:
-        the relabel is a read-path optimisation for pre-:Entity-era nodes, so a failure shouldn't abort
-        an otherwise-good ingest, only retry next time (#857 review)."""
+        place a failed back-fill would look complete forever (`created` False on every retry). That is
+        not merely a slow lookup -- every read filters on the label (`MATCH (n:Entity {id: ...})` in
+        graph_queries), so an un-relabelled node DISAPPEARS from results. So on a back-fill failure we
+        drop the index again (so the next ingest re-creates and re-attempts it) and re-raise rather
+        than serve a silently incomplete graph (#857 review)."""
         created = False
         try:
             self._graph.create_node_range_index(SHARED_NODE_LABEL, "id")
@@ -418,15 +418,11 @@ class GraphWriter:
                 # Pre-existing nodes (from before the shared label) get it now; new/empty graphs no-op.
                 self._write(f"MATCH (n) WHERE n.id IS NOT NULL SET n:{SHARED_NODE_LABEL}")
             except Exception:
-                logger.warning(
-                    "Back-fill of the shared :%s label did not complete (dropping the index so the next "
-                    "ingest retries it; by-id lookups on pre-existing nodes may be slow until then)",
-                    SHARED_NODE_LABEL, exc_info=True,
-                )
                 try:
                     self._graph.drop_node_range_index(SHARED_NODE_LABEL, "id")
                 except ResponseError:
                     pass  # best-effort rollback; a surviving index just means the next run retries the relabel
+                raise
 
     def _create_range_index(self, label: str, prop: str) -> None:
         try:

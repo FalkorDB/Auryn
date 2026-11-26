@@ -138,18 +138,27 @@ def test_ingest_dir_takes_its_turn_with_the_repos_syncs(tmp_path, monkeypatch):
         yield True
         events.append("unlock")
 
+    from auryn.core import ingest as ingest_mod
+
+    def fake_ingest(*a, **k):
+        events.append("ingest")
+        # A `--deep background` pass registers a daemon thread into the active deep_failure_scope();
+        # the scope must join it (so the lock outlasts it) before the lock releases.
+        t = threading.Thread(target=lambda: events.append("deep"))
+        ingest_mod._tls.collector.append(t)
+        t.start()
+
     monkeypatch.setattr(sync_lock_mod, "sync_lock", recorded)
     monkeypatch.setattr("auryn.cli._ingest_writer", lambda ctx, graph: None)
-    monkeypatch.setattr("auryn.core.ingest.ingest_directory", lambda *a, **k: events.append("ingest"))
-    monkeypatch.setattr("auryn.core.ingest.join_deep_phase", lambda: (events.append("join"), [])[1])  # returns [] (no failed bg langs)
+    monkeypatch.setattr("auryn.core.ingest.ingest_directory", fake_ingest)
     monkeypatch.setattr("auryn.cli._echo_ingest_report", lambda report, background_failures=None: [])
     monkeypatch.setattr("auryn.cli._wire_trigger", lambda *a, **k: None)
 
     res = CliRunner().invoke(cli, ["ingest", "dir", str(tmp_path)])
 
     assert res.exit_code == 0, res.output
-    # "join": a `--deep background` pass still writes the subgraph, so the lock outlasts it
-    assert events == [("lock", resolve_project_root(str(tmp_path)), False), "ingest", "join", "unlock"]
+    # "deep" before "unlock": a `--deep background` pass still writes the subgraph, so the lock outlasts it
+    assert events == [("lock", resolve_project_root(str(tmp_path)), False), "ingest", "deep", "unlock"]
 
 
 @pytest.mark.parametrize("ingest_fails", [False, True])
@@ -168,8 +177,15 @@ def test_sync_holds_the_lock_until_a_background_deep_pass_is_done(tmp_path, monk
         finally:
             events.append("unlock")
 
+    from auryn.core import ingest as ingest_mod
+
     def ingest_directory(*a, **k):
         events.append("ingest")
+        # The background deep thread keeps running after the fast pass returns/raises; the scope must
+        # join it (lock outlasts it) regardless -- so register it before any failure.
+        t = threading.Thread(target=lambda: events.append("deep"))
+        ingest_mod._tls.collector.append(t)
+        t.start()
         if ingest_fails:
             raise RuntimeError("ingest failed")
 
@@ -177,10 +193,9 @@ def test_sync_holds_the_lock_until_a_background_deep_pass_is_done(tmp_path, monk
     monkeypatch.setattr("auryn.cli._resolve_connection", lambda *a, **k: FalkorDBConfig())
     monkeypatch.setattr("auryn.cli.connect", lambda config: None)
     monkeypatch.setattr("auryn.core.ingest.ingest_directory", ingest_directory)
-    monkeypatch.setattr("auryn.core.ingest.join_deep_phase", lambda: (events.append("join"), [])[1])  # returns [] (no failed bg langs)
     monkeypatch.setattr("auryn.cli._echo_ingest_report", lambda report, background_failures=None: [])
 
     res = CliRunner().invoke(cli, ["sync", str(tmp_path), "--deep", "background"])
 
     assert isinstance(res.exception, RuntimeError) if ingest_fails else res.exit_code == 0, res.output
-    assert events == ["ingest", "join", "unlock"]
+    assert events == ["ingest", "deep", "unlock"]

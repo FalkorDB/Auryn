@@ -72,10 +72,12 @@ def test_deep_pass_exception_leaves_error_status_and_a_shallow_graph(graph, tmp_
     assert _echo_ingest_report(report) == ["python"]   # ...and the CLI surfaces + signals it
 
 
-def test_background_deep_failure_is_reported_by_join(graph, tmp_path, monkeypatch):
+def test_background_deep_failure_is_surfaced_by_the_scope(graph, tmp_path, monkeypatch):
     # #857 review: a `--deep background` pass that fails must still be surfaced. The report is built
-    # (deep_status="background") before the thread finishes, so join_deep_phase() reports the failure
-    # and the CLI folds it in -- otherwise the command exits 0 on a silently shallow graph.
+    # (deep_status="background") before the thread finishes; deep_failure_scope() collects THIS
+    # ingest's deep threads, joins them on exit, and exposes the failures -- so the CLI exits non-zero
+    # instead of exiting 0 on a silently shallow graph. Thread-local + caller-owned, so a concurrent
+    # ingest or the embed-after-deep waiter can't consume or mis-attribute the signal.
     from auryn.ingestors.python import git_sync as py_git_sync
 
     def _timeout(*args, **kwargs):
@@ -86,10 +88,21 @@ def test_background_deep_failure_is_reported_by_join(graph, tmp_path, monkeypatc
     root.mkdir()
     (root / "a.py").write_text("def f():\n    return 1\n")
 
-    report = ingest.ingest_directory(GraphWriter(graph), str(root), cache_root=tmp_path / "cache", deep="background")
-    py = next(lang for lang in report.languages if lang.language == "python")
-    assert py.deep_status == "background"            # the report can't yet know the thread's fate...
+    with ingest.deep_failure_scope() as bg:
+        report = ingest.ingest_directory(GraphWriter(graph), str(root),
+                                         cache_root=tmp_path / "cache", deep="background")
+        py = next(lang for lang in report.languages if lang.language == "python")
+        assert py.deep_status == "background"         # inside the scope the thread may still be running
 
-    failed = ingest.join_deep_phase()                # ...join awaits it and reports the failure
-    assert failed == ["python"]
-    assert _echo_ingest_report(report, background_failures=set(failed)) == ["python"]
+    assert bg["failed"] == {"python"}                 # on exit the scope joined + surfaced the failure
+    assert _echo_ingest_report(report, background_failures=bg["failed"]) == ["python"]
+
+
+def test_background_deep_success_surfaces_nothing(graph, tmp_path):
+    # A clean `--deep background` pass leaves the scope's failure set empty -> no false FAILED/exit.
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "a.py").write_text("def f():\n    return g()\n\n\ndef g():\n    return 1\n")
+    with ingest.deep_failure_scope() as bg:
+        ingest.ingest_directory(GraphWriter(graph), str(root), cache_root=tmp_path / "cache", deep="background")
+    assert bg["failed"] == set()

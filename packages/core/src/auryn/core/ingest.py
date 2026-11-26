@@ -26,6 +26,7 @@ subgraph never aborts the whole source.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import subprocess
@@ -73,13 +74,17 @@ Source = GitRepoCache | LocalDirectorySource
 DEEP_MODES = ("inline", "background", "async", "off")
 
 # Background deep passes started by this process (daemon threads). join_deep_phase() awaits
-# them -- optional for a server, used by tests and any caller that must not exit early.
+# them -- optional for a server, used by tests and any caller that must not exit early. Each thread
+# carries its own `.deep_outcome` {"lang","error"} so a caller can tell which of ITS passes failed
+# (deep_failures()) without a shared mutable list that a concurrent ingest or the embed-waiter could
+# consume -- see _spawn_deep / #857.
 _deep_threads: list[threading.Thread] = []
 
-# Parallel per-thread outcome records ({"lang","error","thread"}) for those background passes, so
-# join_deep_phase() can report which ones FAILED (the report, built before the threads finish, can't
-# -- see _spawn_deep / #857).
-_deep_outcomes: list[dict] = []
+# Thread-local collector for deep_failure_scope(): while a scope is active on THIS thread, every deep
+# thread _spawn_deep starts (synchronously, on this thread) is appended here, so the scope joins and
+# reads exactly its own ingest's passes -- race-free across concurrent ingests, and immune to the
+# embed-waiter pruning the shared _deep_threads list (#857).
+_tls = threading.local()
 
 
 def _build_filter(include_dirs, exclude_dirs, include_suffixes, exclude_suffixes):
@@ -786,22 +791,26 @@ def _run_deep_phase(
 
 
 def _spawn_deep(writer, source, target_sha, lang, *ctx) -> None:
-    """Start (and track) a daemon thread running a language's deep upgrade in the
-    background. Exceptions inside are contained by _run_phase (logged, not raised), but the
-    (result, error) outcome is recorded against the thread so join_deep_phase() can report a failed
-    background pass -- otherwise a `--deep background` timeout would leave the graph shallow while the
-    command still exited 0, the exact silent failure #857 is about."""
-    outcome: dict[str, object] = {"lang": lang.language, "error": None, "thread": None}
+    """Start (and track) a daemon thread running a language's deep upgrade in the background.
+    Exceptions inside are contained by _run_phase (logged, not raised), and its (result, error)
+    outcome is stored ON the thread (`.deep_outcome`) so a caller can see which of ITS background
+    passes FAILED via deep_failures() -- otherwise a `--deep background` timeout would leave the
+    graph shallow while the command still exited 0, the exact silent failure #857 is about. Keeping
+    the outcome on the thread (not a shared list) means a concurrent ingest's join, or the
+    embed-after-deep waiter, can't consume or mis-attribute it."""
+    outcome: dict[str, str | None] = {"lang": lang.language, "error": None}
 
     def _target() -> None:
         _, error = _run_phase(writer, source, target_sha, lang, lang.deep_sync, "deep(background)", *ctx)
         outcome["error"] = error
 
     thread = threading.Thread(target=_target, name=f"deep-{lang.language}", daemon=True)
-    outcome["thread"] = thread
+    thread.deep_outcome = outcome  # type: ignore[attr-defined]
+    collector = getattr(_tls, "collector", None)  # an active deep_failure_scope() on this thread
+    if collector is not None:
+        collector.append(thread)
     thread.start()
     _deep_threads.append(thread)
-    _deep_outcomes.append(outcome)
 
 
 def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
@@ -855,26 +864,53 @@ def deep_threads() -> list[threading.Thread]:
     return list(_deep_threads)
 
 
-def join_deep_phase(timeout: float | None = None) -> list[str]:
-    """Block until the background deep passes started by this process finish, and RETURN the
-    languages whose background deep pass FAILED (so a caller can surface them + exit non-zero, as the
-    inline path does -- #857). Optional for a long-lived server (the daemon threads upgrade the graph
-    on their own); used by tests and by any caller that must not exit before the deep graph is ready.
-
-    Finished outcomes (success or failure) are consumed here so a later join doesn't re-report them;
-    still-running ones are kept for a subsequent join."""
+def join_deep_phase(timeout: float | None = None) -> None:
+    """Block until the background deep passes started by this process finish. Optional for a
+    long-lived server (the daemon threads upgrade the graph on their own); used by tests and
+    by any caller that must not exit before the deep graph is ready. Pairs with deep_failures() to
+    tell which (if any) failed -- this only waits (and is safe to call from several places, e.g. the
+    embed-after-deep waiter, without consuming that signal)."""
     for thread in list(_deep_threads):
         thread.join(timeout)
     _deep_threads[:] = [t for t in _deep_threads if t.is_alive()]
-    failed: list[str] = []
-    still_running: list[dict] = []
-    for outcome in _deep_outcomes:
-        if outcome["thread"].is_alive():  # didn't finish within `timeout` -> leave it tracked
-            still_running.append(outcome)
-        elif outcome["error"] is not None:
-            failed.append(str(outcome["lang"]))
-    _deep_outcomes[:] = still_running
+
+
+def deep_failures(threads: list[threading.Thread]) -> list[str]:
+    """The languages whose background deep pass FAILED, among `threads`. Reads the outcome each
+    thread carries; call AFTER joining so every outcome is final. Non-consuming -- the caller owns
+    the list, so repeated or concurrent readers don't race (#857)."""
+    failed = [
+        t.deep_outcome["lang"]  # type: ignore[attr-defined]
+        for t in threads
+        if getattr(t, "deep_outcome", None) and t.deep_outcome.get("error") is not None  # type: ignore[attr-defined]
+    ]
     return sorted(set(failed))
+
+
+@contextlib.contextmanager
+def deep_failure_scope():
+    """Surface `--deep background` failures of the ingest run INSIDE this scope. While active, every
+    deep thread spawned on this thread is collected (see _tls); on exit the scope joins exactly those
+    threads (holding any caller lock for them, as a bare join_deep_phase() would) and fills the
+    yielded holder's "failed" with their failed languages. Thread-local + caller-owned, so it is
+    race-free across concurrent ingests and the embed-after-deep waiter can't consume the signal --
+    the robust replacement for diffing the shared thread list (#857).
+
+        with deep_failure_scope() as bg:
+            report = ingest_directory(...)
+        _echo_ingest_report(report, background_failures=bg["failed"])
+    """
+    collected: list[threading.Thread] = []
+    prev = getattr(_tls, "collector", None)
+    _tls.collector = collected
+    holder: dict[str, set[str]] = {"failed": set()}
+    try:
+        yield holder
+    finally:
+        _tls.collector = prev
+        for thread in collected:
+            thread.join()
+        holder["failed"] = set(deep_failures(collected))
 
 
 def _graph_has_prefix(writer: GraphWriter, id_prefix: str) -> bool:
