@@ -1474,19 +1474,22 @@ def quickstart(path: str | None, db_path: str | None, graph_name: str, project_n
 
     writer = GraphWriter(client.select_graph(graph_name))
     try:
-        report = ingest.ingest_directory(
-            writer, str(root), project_name=project_name,
-            # Serverless/embedded DB lives in THIS process -- a detached daemon (deep=async / background
-            # embed) couldn't reach it, so deepen AND embed inline here rather than enqueuing a job that
-            # would find nothing.
-            deep=("inline" if deep == "async" else deep),
-            embed="inline",
-            include_dirs=include_dirs, exclude_dirs=exclude_dirs,
-            include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
-        )
+        # Surface a failed `--deep background` pass too (warn only -- quickstart goes on to serve the
+        # graph rather than exit non-zero like the ingest/sync commands do). See #857.
+        with _surfaced_background_deep() as bg:
+            report = ingest.ingest_directory(
+                writer, str(root), project_name=project_name,
+                # Serverless/embedded DB lives in THIS process -- a detached daemon (deep=async /
+                # background embed) couldn't reach it, so deepen AND embed inline here rather than
+                # enqueuing a job that would find nothing.
+                deep=("inline" if deep == "async" else deep),
+                embed="inline",
+                include_dirs=include_dirs, exclude_dirs=exclude_dirs,
+                include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
+            )
     except ValueError as e:  # nothing ingestable / bad path -> clean CLI error
         raise click.ClickException(str(e)) from e
-    _echo_ingest_report(report)
+    _echo_ingest_report(report, background_failures=bg["failed"])
 
     url = f"http://{host}:{port}"
     click.echo(f"Serving graph viewer on {url}  (graph: {graph_name})")

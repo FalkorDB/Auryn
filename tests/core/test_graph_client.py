@@ -727,3 +727,53 @@ def test_set_if_is_a_guarded_compare_and_set(graph):
     # guard FAILS (commit moved) -> no-op; returns False, value unchanged
     assert w.set_if("Project", "x", "depth", "fast", "commit_sha", "B") is False
     assert w.get_property("Project", {"id": "x"}, "depth") == "deep"
+
+
+def test_entity_backfill_is_retryable_after_failure(graph, monkeypatch):
+    # #857 review: the :Entity relabel is load-bearing (reads filter MATCH (n:Entity {id})), so its
+    # done-marker index must be created ONLY after the relabel succeeds -- a failed relabel must
+    # leave NO index, so the next run retries it instead of treating it as done.
+    from auryn.core.graph_client import SHARED_NODE_LABEL
+
+    # A pre-:Entity node: create via the RAW graph so the fixture's CREATE-stamp doesn't add the label.
+    graph._g.query("CREATE (:Foo {id: 'pre'})")
+    writer = GraphWriter(graph)
+
+    def entity_index_present() -> bool:
+        rows = graph._g.query(
+            "CALL db.indexes() YIELD label, entitytype RETURN label, entitytype"
+        ).result_set
+        return any(r[0] == SHARED_NODE_LABEL and r[1] == "NODE" for r in rows)
+
+    def has_entity_label() -> bool:
+        return graph._g.query(
+            "MATCH (n:Foo {id: 'pre'}) RETURN labels(n)"
+        ).result_set[0][0].count(SHARED_NODE_LABEL) > 0
+
+    # 1) the relabel fails -> no marker index, node still unlabelled, so a later run WILL retry
+    orig_write = writer._write
+    monkeypatch.setattr(writer, "_write",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("Query timed out")))
+    with pytest.raises(RuntimeError):
+        writer._ensure_shared_node_index()
+    assert not entity_index_present()
+    assert not has_entity_label()
+
+    # 2) retry (relabel succeeds) -> node relabelled AND the marker index now exists
+    monkeypatch.setattr(writer, "_write", orig_write)
+    writer._ensure_shared_node_index()
+    assert has_entity_label()
+    assert entity_index_present()
+
+    # 3) idempotent: a third run is a no-op (index present -> returns early, no error)
+    writer._ensure_shared_node_index()
+    assert entity_index_present()
+
+
+def test_invalidate_embeddings_best_effort_swallows_write_errors(graph, monkeypatch):
+    # In a `finally` after a partial write, a secondary invalidation failure must be logged, not
+    # raised -- re-raising would mask the original write error (#857 review).
+    writer = GraphWriter(graph)
+    monkeypatch.setattr(writer, "invalidate_embeddings",
+                        lambda items: (_ for _ in ()).throw(RuntimeError("server down")))
+    writer._invalidate_embeddings_best_effort([("Function", "x")])  # must NOT raise

@@ -396,33 +396,32 @@ class GraphWriter:
     def _ensure_shared_node_index(self) -> None:
         """Create the range index on the system-wide :Entity(id) that makes a label-less by-id
         lookup an index seek (see SHARED_NODE_LABEL). New graphs get the label at write time; a
-        graph written before this existed is back-filled ONCE -- tied to the index not existing yet,
-        so the one-time full-node relabel runs exactly once per graph and never again (the relabel is
-        a no-op on an empty new graph).
+        graph written before this existed is back-filled ONCE -- the one-time full-node relabel runs
+        exactly once per graph and never again (it is a no-op on an empty new graph).
 
-        The back-fill must succeed before the index may stand as its done-marker: a timed-out relabel
-        is rolled back by FalkorDB but the already-created index is NOT, so if we left the index in
-        place a failed back-fill would look complete forever (`created` False on every retry). That is
-        not merely a slow lookup -- every read filters on the label (`MATCH (n:Entity {id: ...})` in
-        graph_queries), so an un-relabelled node DISAPPEARS from results. So on a back-fill failure we
-        drop the index again (so the next ingest re-creates and re-attempts it) and re-raise rather
-        than serve a silently incomplete graph (#857 review)."""
-        created = False
+        The index is created ONLY AFTER the back-fill succeeds, so index-existence is a RELIABLE
+        done-marker: the relabel runs first, and the marker index is laid down only once it finishes.
+        A timed-out/failed relabel therefore leaves no index, and the next ingest retries it -- never
+        the "index exists but relabel never ran" trap, which matters because every read filters on the
+        label (`MATCH (n:Entity {id: ...})` in graph_queries), so an un-relabelled node would be
+        INVISIBLE, not merely slow (#857 review)."""
         try:
-            self._graph.create_node_range_index(SHARED_NODE_LABEL, "id")
-            created = True
+            rows = self._graph.ro_query(
+                "CALL db.indexes() YIELD label, entitytype RETURN label, entitytype"
+            ).result_set
+        except RedisError:
+            rows = None  # empty/not-yet-created graph key -> no pre-existing nodes to relabel
+        if rows is not None and any(r[0] == SHARED_NODE_LABEL and r[1] == "NODE" for r in rows):
+            return  # the index is present -> a prior run's back-fill already succeeded
+        if rows is not None:
+            # Graph key exists: relabel any pre-existing (pre-:Entity) nodes BEFORE the marker index.
+            # A failure here raises (no index created) so the next ingest retries, rather than leaving
+            # the graph silently missing those nodes from indexed reads.
+            self._write(f"MATCH (n) WHERE n.id IS NOT NULL SET n:{SHARED_NODE_LABEL}")
+        try:
+            self._graph.create_node_range_index(SHARED_NODE_LABEL, "id")  # the durable done-marker
         except ResponseError:
-            pass  # already exists -> already back-filled (the relabel below succeeded on a prior run)
-        if created:
-            try:
-                # Pre-existing nodes (from before the shared label) get it now; new/empty graphs no-op.
-                self._write(f"MATCH (n) WHERE n.id IS NOT NULL SET n:{SHARED_NODE_LABEL}")
-            except Exception:
-                try:
-                    self._graph.drop_node_range_index(SHARED_NODE_LABEL, "id")
-                except ResponseError:
-                    pass  # best-effort rollback; a surviving index just means the next run retries the relabel
-                raise
+            pass  # raced with a concurrent writer that created it first -> fine
 
     def _create_range_index(self, label: str, prop: str) -> None:
         try:
@@ -863,11 +862,19 @@ class GraphWriter:
             if markers:
                 self.merge_nodes([unstamped(n) for n in markers])
             if delta.nodes_to_upsert:
-                self.merge_nodes([n for n in delta.nodes_to_upsert if SYNC_MARKER not in n.properties])
-                # Content-changed nodes keep their now-stale embedding through the merge (it isn't
-                # in the ingestor's property set) -- clear it so the worker re-embeds. New nodes
-                # in this set have no embedding, so clearing them is a no-op.
-                self.invalidate_embeddings((n.label, n.key["id"]) for n in delta.nodes_to_upsert)
+                try:
+                    self.merge_nodes([n for n in delta.nodes_to_upsert if SYNC_MARKER not in n.properties])
+                finally:
+                    # Content-changed nodes keep their now-stale embedding through the merge (it isn't
+                    # in the ingestor's property set) -- clear it so the worker re-embeds. New nodes
+                    # in this set have no embedding, so clearing them is a no-op. In a `finally` so a
+                    # partial (split-retry) merge that commits some nodes then raises still clears
+                    # their stale embeddings -- otherwise a committed node keeps a new _fingerprint
+                    # but an old embedding, which the next sync (fingerprint unchanged) never refreshes
+                    # (#857 review). Over-clearing a rolled-back node just re-embeds it: harmless.
+                    self._invalidate_embeddings_best_effort(
+                        (n.label, n.key["id"]) for n in delta.nodes_to_upsert
+                    )
             if delta.edges_to_upsert:
                 self.merge_edges(delta.edges_to_upsert)
             if delta.edges_to_remove:
@@ -949,6 +956,16 @@ class GraphWriter:
         pairs = [(label, node_id) for label, node_id in items if label in EMBEDDABLE_LABELS]
         if pairs:
             self.clear_embeddings(pairs)
+
+    def _invalidate_embeddings_best_effort(self, items) -> None:
+        """invalidate_embeddings for a `finally` clause: it runs while another exception may already
+        be propagating (a partial/split write that failed), so its own failure is logged, not raised
+        -- re-raising here would mask the original write error (#857 review)."""
+        try:
+            self.invalidate_embeddings(items)
+        except Exception:  # noqa: BLE001
+            logger.warning("Clearing stale embeddings after a write failure did not complete; the "
+                           "embed worker may keep a stale vector until the node next changes", exc_info=True)
 
     def knn_search(
         self, query_vec: list[float], k: int, *, return_properties: tuple[str, ...] = ()

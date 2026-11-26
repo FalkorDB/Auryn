@@ -809,8 +809,17 @@ def _spawn_deep(writer, source, target_sha, lang, *ctx) -> None:
     collector = getattr(_tls, "collector", None)  # an active deep_failure_scope() on this thread
     if collector is not None:
         collector.append(thread)
-    thread.start()
+    # Register in the shared list BEFORE start(): a concurrent join_deep_phase() (e.g. the
+    # embed-after-deep waiter) snapshots this list, so a thread started first could be missed and the
+    # waiter would embed while the deep pass is still mutating the graph. Clean up if start() fails.
     _deep_threads.append(thread)
+    try:
+        thread.start()
+    except BaseException:
+        _deep_threads.remove(thread)
+        if collector is not None:
+            collector.remove(thread)
+        raise
 
 
 def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
