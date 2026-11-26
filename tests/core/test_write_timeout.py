@@ -24,17 +24,29 @@ class _FakeResult:
 class _RecordingGraph:
     """Minimal falkordb Graph stand-in. Records every (cypher, params, timeout). A write that
     `RETURN count(...)`s is answered with its row count so merge_edges' matched-count check passes.
-    If `timeout_over` is set, any batch whose row list exceeds it raises `Query timed out` (the
-    #857 failure), letting us prove the split-and-retry converges."""
+    Models two real FalkorDB behaviours:
+      * `timeout_over`: any batch whose row list exceeds it raises `Query timed out` (the #857
+        failure) -- so the split-and-retry can be proven to converge.
+      * `timeout_max`: GRAPH.CONFIG reports it, and -- like real FalkorDB -- a query whose per-query
+        `timeout` EXCEEDS a nonzero `timeout_max` is REJECTED (not clamped) with an error that does
+        NOT contain 'timed out'. So a fix that didn't clamp would fail every write here."""
 
-    def __init__(self, timeout_over=None, error="Query timed out"):
+    def __init__(self, timeout_over=None, error="Query timed out", timeout_max=0):
         self.calls: list[tuple[str, dict, object]] = []
         self.timeout_over = timeout_over
         self.error = error
+        self.timeout_max = timeout_max
+
+    def execute_command(self, *args):
+        if args[:2] == ("GRAPH.CONFIG", "GET") and args[2] == "TIMEOUT_MAX":
+            return ["TIMEOUT_MAX", self.timeout_max]
+        return "OK"
 
     def query(self, cypher, params=None, timeout=None):
         params = params or {}
         self.calls.append((cypher, params, timeout))
+        if self.timeout_max and timeout is not None and timeout > self.timeout_max:
+            raise ResponseError("The query TIMEOUT parameter value cannot exceed the TIMEOUT_MAX")
         rows = params.get("rows") if isinstance(params.get("rows"), list) else params.get("ids")
         rows = rows if isinstance(rows, list) else []
         if self.timeout_over is not None and len(rows) > self.timeout_over:
@@ -61,6 +73,23 @@ def test_batched_writes_carry_the_generous_timeout():
     w.merge_edges([GraphEdge("CALLS", "Function", {"id": "a"}, "Function", {"id": "b"}, {"line": 1})])
     assert g.calls
     assert all(timeout == _WRITE_QUERY_TIMEOUT_MS for _, _, timeout in g.calls)  # never the 1s default
+
+
+def test_write_timeout_is_clamped_to_a_configured_timeout_max():
+    # #857 review: FalkorDB REJECTS a per-query timeout above a nonzero TIMEOUT_MAX (not clamps), and
+    # the error lacks 'timed out', so an unclamped 30s would fail every write. We must clamp to 1000.
+    g = _RecordingGraph(timeout_max=1000)
+    w = GraphWriter(g)
+    w.merge_edges([GraphEdge("CALLS", "Function", {"id": "a"}, "Function", {"id": "b"}, {"line": 1})])
+    assert g.calls and all(timeout == 1000 for _, _, timeout in g.calls)  # not the 30s default -> no rejection
+
+
+def test_unclamped_timeout_would_be_rejected_by_timeout_max():
+    # Guards the test model: prove the fake rejects an over-max timeout, so the clamp test above is
+    # actually exercising rejection avoidance and not a no-op.
+    g = _RecordingGraph(timeout_max=1000)
+    with pytest.raises(ResponseError):
+        g.query("MERGE (n:N {id:1})", {}, timeout=30000)
 
 
 def test_single_statement_writes_also_carry_it():

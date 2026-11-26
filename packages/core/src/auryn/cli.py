@@ -935,8 +935,10 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
             report = ingest_directory(GraphWriter(connect(config)), str(root), project_name=project,
                                       deep=deep, auto_install=False, embed=("inline" if host else None))
         finally:
-            join_deep_phase()  # `--deep background` writers are still this sync: hold the lock for them
-    if _echo_ingest_report(report):
+            # `--deep background` writers are still this sync: hold the lock for them, and collect
+            # which (if any) failed so a failed background pass is surfaced like an inline one (#857).
+            bg_failed = set(join_deep_phase())
+    if _echo_ingest_report(report, background_failures=bg_failed):
         raise SystemExit(1)  # a deep pass failed -> the graph is shallow; signal it, don't exit 0 (#857)
 
 
@@ -1156,7 +1158,7 @@ def _ingest_writer(ctx: click.Context, graph_name: str) -> GraphWriter:
     return GraphWriter(connect(config))
 
 
-def _echo_ingest_report(report) -> list[str]:
+def _echo_ingest_report(report, background_failures: "set[str] | None" = None) -> list[str]:
     """A compact end-of-run summary echoed to stdout. The blow-by-blow progress has
     already streamed to stderr via the `auryn.ingest` logger (setup_logging on the
     top-level group), so this is just the final tally.
@@ -1164,7 +1166,12 @@ def _echo_ingest_report(report) -> list[str]:
     Returns the languages whose DEEP (semantic) pass FAILED. A deep failure leaves a SHALLOW
     graph (`depth=fast`) that otherwise looks fine in the summary, so it is surfaced loudly here
     (and the caller exits non-zero) -- otherwise a timed-out/erroring deep pass is invisible and
-    an agent or user queries an incomplete graph without knowing (#857)."""
+    an agent or user queries an incomplete graph without knowing (#857).
+
+    `background_failures` are languages whose `--deep background` pass failed AFTER the report was
+    built (collected by join_deep_phase()); the report still records them as "background", so the
+    caller passes them in here to be surfaced as failures too."""
+    bg_failed = background_failures or set()
     d = report.to_dict()
     click.echo(f"Ingested {report.project_name!r} ({report.commit_sha[:12]}) in {d['elapsed_seconds']:.2f}s")
     deep_failed: list[str] = []
@@ -1178,7 +1185,7 @@ def _echo_ingest_report(report) -> list[str]:
             f"({lang['files_parsed']} parsed, {lang['files_cached']} cached)"
         )
         ds = lang.get("deep_status")
-        if ds == "error":
+        if ds == "error" or lang["language"] in bg_failed:
             deep_failed.append(lang["language"])
             line += "  [deep: FAILED -> shallow]"
         elif ds and ds != "inline":  # inline success is the norm; surface async/background/off/skipped
@@ -1202,9 +1209,10 @@ def _echo_ingest_report(report) -> list[str]:
             fg="yellow", err=True,
         )
         click.secho(
-            "  Auryn already retries timed-out writes with a long per-query timeout and smaller "
-            "batches; a persistent FalkorDB 'Query timed out' here means the server is overloaded or "
-            "stuck -- reduce concurrent load or raise its timeout (GRAPH.CONFIG SET TIMEOUT 0), then "
+            "  Auryn already gives writes a long per-query timeout (clamped to the server's "
+            "TIMEOUT_MAX) and splits-and-retries a timed-out batch, so a persistent FalkorDB 'Query "
+            "timed out' here means the server is overloaded or stuck -- reduce concurrent load, or if "
+            "a low TIMEOUT_MAX is pinning the budget raise it (GRAPH.CONFIG SET TIMEOUT_MAX 0), then "
             "re-ingest.",
             fg="yellow", err=True,
         )
@@ -1304,10 +1312,12 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
                     enrichment_only=only_hooks, enrichment_skip=skip_hooks,
                 )
             finally:
-                ingest.join_deep_phase()  # `--deep background` writers: hold the lock for them, as `sync` does
+                # Hold the lock for `--deep background` writers, as `sync` does, and collect any that
+                # failed so a failed background pass is surfaced like an inline one (#857).
+                bg_failed = set(ingest.join_deep_phase())
     except ValueError as e:  # missing path / not a directory -- a clean CLI error, not a traceback
         raise click.ClickException(str(e)) from e
-    deep_failed = _echo_ingest_report(report)
+    deep_failed = _echo_ingest_report(report, background_failures=bg_failed)
     _wire_trigger(str(resolve_project_root(path)), graph, project_name, trigger or load_config().resync_trigger)
     if deep_failed:
         raise SystemExit(1)  # deep pass failed -> shallow graph; signal it AFTER wiring the trigger (#857)

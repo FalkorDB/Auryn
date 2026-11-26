@@ -70,3 +70,26 @@ def test_deep_pass_exception_leaves_error_status_and_a_shallow_graph(graph, tmp_
     assert py.deep_status == "error"   # the deep failure is captured (and will exit non-zero in the CLI)...
     assert py.result is not None       # ...while the fast graph still landed (shallow but usable)
     assert _echo_ingest_report(report) == ["python"]   # ...and the CLI surfaces + signals it
+
+
+def test_background_deep_failure_is_reported_by_join(graph, tmp_path, monkeypatch):
+    # #857 review: a `--deep background` pass that fails must still be surfaced. The report is built
+    # (deep_status="background") before the thread finishes, so join_deep_phase() reports the failure
+    # and the CLI folds it in -- otherwise the command exits 0 on a silently shallow graph.
+    from auryn.ingestors.python import git_sync as py_git_sync
+
+    def _timeout(*args, **kwargs):
+        raise RuntimeError("Query timed out")
+
+    monkeypatch.setattr(py_git_sync, "jedi_language_sync", _timeout)
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "a.py").write_text("def f():\n    return 1\n")
+
+    report = ingest.ingest_directory(GraphWriter(graph), str(root), cache_root=tmp_path / "cache", deep="background")
+    py = next(lang for lang in report.languages if lang.language == "python")
+    assert py.deep_status == "background"            # the report can't yet know the thread's fate...
+
+    failed = ingest.join_deep_phase()                # ...join awaits it and reports the failure
+    assert failed == ["python"]
+    assert _echo_ingest_report(report, background_failures=set(failed)) == ["python"]

@@ -76,6 +76,11 @@ DEEP_MODES = ("inline", "background", "async", "off")
 # them -- optional for a server, used by tests and any caller that must not exit early.
 _deep_threads: list[threading.Thread] = []
 
+# Parallel per-thread outcome records ({"lang","error","thread"}) for those background passes, so
+# join_deep_phase() can report which ones FAILED (the report, built before the threads finish, can't
+# -- see _spawn_deep / #857).
+_deep_outcomes: list[dict] = []
+
 
 def _build_filter(include_dirs, exclude_dirs, include_suffixes, exclude_suffixes):
     """Assemble the optional allow/deny SourceFilter and log it when non-empty."""
@@ -782,14 +787,21 @@ def _run_deep_phase(
 
 def _spawn_deep(writer, source, target_sha, lang, *ctx) -> None:
     """Start (and track) a daemon thread running a language's deep upgrade in the
-    background. Exceptions inside are contained by _run_phase (logged, not raised)."""
+    background. Exceptions inside are contained by _run_phase (logged, not raised), but the
+    (result, error) outcome is recorded against the thread so join_deep_phase() can report a failed
+    background pass -- otherwise a `--deep background` timeout would leave the graph shallow while the
+    command still exited 0, the exact silent failure #857 is about."""
+    outcome: dict[str, object] = {"lang": lang.language, "error": None, "thread": None}
 
     def _target() -> None:
-        _run_phase(writer, source, target_sha, lang, lang.deep_sync, "deep(background)", *ctx)
+        _, error = _run_phase(writer, source, target_sha, lang, lang.deep_sync, "deep(background)", *ctx)
+        outcome["error"] = error
 
     thread = threading.Thread(target=_target, name=f"deep-{lang.language}", daemon=True)
+    outcome["thread"] = thread
     thread.start()
     _deep_threads.append(thread)
+    _deep_outcomes.append(outcome)
 
 
 def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
@@ -843,13 +855,26 @@ def deep_threads() -> list[threading.Thread]:
     return list(_deep_threads)
 
 
-def join_deep_phase(timeout: float | None = None) -> None:
-    """Block until the background deep passes started by this process finish. Optional for a
-    long-lived server (the daemon threads upgrade the graph on their own); used by tests and
-    by any caller that must not exit before the deep graph is ready."""
+def join_deep_phase(timeout: float | None = None) -> list[str]:
+    """Block until the background deep passes started by this process finish, and RETURN the
+    languages whose background deep pass FAILED (so a caller can surface them + exit non-zero, as the
+    inline path does -- #857). Optional for a long-lived server (the daemon threads upgrade the graph
+    on their own); used by tests and by any caller that must not exit before the deep graph is ready.
+
+    Finished outcomes (success or failure) are consumed here so a later join doesn't re-report them;
+    still-running ones are kept for a subsequent join."""
     for thread in list(_deep_threads):
         thread.join(timeout)
     _deep_threads[:] = [t for t in _deep_threads if t.is_alive()]
+    failed: list[str] = []
+    still_running: list[dict] = []
+    for outcome in _deep_outcomes:
+        if outcome["thread"].is_alive():  # didn't finish within `timeout` -> leave it tracked
+            still_running.append(outcome)
+        elif outcome["error"] is not None:
+            failed.append(str(outcome["lang"]))
+    _deep_outcomes[:] = still_running
+    return sorted(set(failed))
 
 
 def _graph_has_prefix(writer: GraphWriter, id_prefix: str) -> bool:

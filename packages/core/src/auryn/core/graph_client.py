@@ -142,14 +142,39 @@ Chunked (rather than one query for an arbitrarily large list) to keep any single
 request/response small regardless of how big a sync's delta is."""
 
 _WRITE_QUERY_TIMEOUT_MS = 30_000
-"""Per-query timeout every write carries, overriding FalkorDB's server-wide default (the
+"""Per-query timeout every write aims for, overriding FalkorDB's server-wide default (the
 `falkordb/falkordb` image ships `TIMEOUT 1000`, i.e. 1s). A single large write batch -- the deep
 (semantic) pass of a big repo lands tens of thousands of inferred-type / resolved-call edges -- can
 exceed 1s, and the write would then die mid-pass with `Query timed out`, leaving a silently shallow
 graph (#857). The read path already overrides the same 1s default (see _SUBGRAPH_QUERY_TIMEOUT_MS);
-this is its write-side counterpart. A per-query timeout that FalkorDB accepts on the reads is
-accepted here too; where a server pins TIMEOUT_MAX below a batch's need, _write_rows() additionally
-splits-and-retries so the pass still completes rather than erroring."""
+this is its write-side counterpart.
+
+The deprecated `TIMEOUT` config is a DEFAULT -- a per-query timeout above it is honoured upward, so
+this simply wins. `TIMEOUT_MAX`, however, is a HARD ceiling: FalkorDB REJECTS (does not clamp) a
+per-query timeout above a nonzero `TIMEOUT_MAX`, with an error that does NOT say "timed out", so it
+would bypass the split-retry and fail every write. _effective_write_timeout_ms() therefore clamps to
+`TIMEOUT_MAX` when one is set, and _write_rows() splits-and-retries a batch that then can't fit in
+the allowed budget -- so writes survive BOTH a low default and a low hard max."""
+
+
+def _config_int(resp) -> int | None:
+    """Parse a `GRAPH.CONFIG GET <name>` reply -- `[name, value]` (tolerating bytes / a nested
+    `[[name, value]]`) -- into the int value, or None if it can't be read."""
+    if isinstance(resp, (list, tuple)):
+        if len(resp) == 2 and not isinstance(resp[1], (list, tuple)):
+            value = resp[1]
+        elif resp and isinstance(resp[0], (list, tuple)) and len(resp[0]) == 2:
+            value = resp[0][1]
+        else:
+            return None
+    else:
+        value = resp
+    if isinstance(value, bytes):
+        value = value.decode()
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _chunked(items: list, size: int) -> Iterator[list]:
@@ -373,16 +398,35 @@ class GraphWriter:
         lookup an index seek (see SHARED_NODE_LABEL). New graphs get the label at write time; a
         graph written before this existed is back-filled ONCE -- tied to the index not existing yet,
         so the one-time full-node relabel runs exactly once per graph and never again (the relabel is
-        a no-op on an empty new graph)."""
+        a no-op on an empty new graph).
+
+        The back-fill must succeed before the index may stand as its done-marker: a timed-out relabel
+        is rolled back by FalkorDB but the already-created index is NOT, so if we left the index in
+        place a failed back-fill would look complete forever (`created` False on every retry) and
+        pre-existing nodes would stay invisible to by-id lookups. So on a back-fill failure we drop
+        the index again (and warn) -- the next ingest re-creates and re-attempts it. We don't re-raise:
+        the relabel is a read-path optimisation for pre-:Entity-era nodes, so a failure shouldn't abort
+        an otherwise-good ingest, only retry next time (#857 review)."""
         created = False
         try:
             self._graph.create_node_range_index(SHARED_NODE_LABEL, "id")
             created = True
         except ResponseError:
-            pass  # already exists -> already back-filled
+            pass  # already exists -> already back-filled (the relabel below succeeded on a prior run)
         if created:
-            # Pre-existing nodes (from before the shared label) get it now; new/empty graphs no-op.
-            self._write(f"MATCH (n) WHERE n.id IS NOT NULL SET n:{SHARED_NODE_LABEL}")
+            try:
+                # Pre-existing nodes (from before the shared label) get it now; new/empty graphs no-op.
+                self._write(f"MATCH (n) WHERE n.id IS NOT NULL SET n:{SHARED_NODE_LABEL}")
+            except Exception:
+                logger.warning(
+                    "Back-fill of the shared :%s label did not complete (dropping the index so the next "
+                    "ingest retries it; by-id lookups on pre-existing nodes may be slow until then)",
+                    SHARED_NODE_LABEL, exc_info=True,
+                )
+                try:
+                    self._graph.drop_node_range_index(SHARED_NODE_LABEL, "id")
+                except ResponseError:
+                    pass  # best-effort rollback; a surviving index just means the next run retries the relabel
 
     def _create_range_index(self, label: str, prop: str) -> None:
         try:
@@ -465,12 +509,33 @@ class GraphWriter:
             time.sleep(max(0.0, min(pause, deadline - time.monotonic())))  # never past the deadline
             pause = min(pause * 2, _INDEX_POLL_MAX_INTERVAL_S)
 
+    def _effective_write_timeout_ms(self) -> int:
+        """The per-query write timeout to actually submit: _WRITE_QUERY_TIMEOUT_MS, clamped to the
+        server's `TIMEOUT_MAX` if one is configured (nonzero). A value above a nonzero `TIMEOUT_MAX`
+        is REJECTED by FalkorDB, not clamped, so submitting 30s on such a server would fail every
+        write; clamping keeps every write valid and leaves _write_rows() to split a batch that can't
+        fit the allowed budget. Cached per writer -- the config doesn't change mid-ingest. Falls back
+        to the full value if the config can't be read (older servers lack `TIMEOUT_MAX`, and lacking
+        it they also don't reject an over-max value)."""
+        cached = getattr(self, "_write_timeout_ms_cache", None)
+        if cached is not None:
+            return cached
+        timeout = _WRITE_QUERY_TIMEOUT_MS
+        try:
+            limit = _config_int(self._graph.execute_command("GRAPH.CONFIG", "GET", "TIMEOUT_MAX"))
+            if limit and limit > 0:
+                timeout = min(timeout, limit)
+        except Exception:  # noqa: BLE001 -- config unreadable -> keep the default; no TIMEOUT_MAX => no rejection
+            pass
+        self._write_timeout_ms_cache = timeout
+        return timeout
+
     def _write(self, cypher: str, params: dict | None = None):
-        """Every write funnels through here so it carries a generous per-query timeout
-        (_WRITE_QUERY_TIMEOUT_MS) rather than inheriting FalkorDB's 1s server default, which a large
-        batch easily exceeds -- the failure mode in #857, where a deep pass died mid-write with
-        `Query timed out` and left a silently shallow graph."""
-        return self._graph.query(cypher, params or {}, timeout=_WRITE_QUERY_TIMEOUT_MS)
+        """Every write funnels through here so it carries a generous per-query timeout (see
+        _WRITE_QUERY_TIMEOUT_MS / _effective_write_timeout_ms) rather than inheriting FalkorDB's 1s
+        server default, which a large batch easily exceeds -- the failure mode in #857, where a deep
+        pass died mid-write with `Query timed out` and left a silently shallow graph."""
+        return self._graph.query(cypher, params or {}, timeout=self._effective_write_timeout_ms())
 
     def _write_rows(self, cypher: str, rows: list, param: str = "rows") -> int:
         """Run an `UNWIND $<param> AS ...` batched write (param defaults to `rows`) and return the

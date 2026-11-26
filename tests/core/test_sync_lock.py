@@ -141,8 +141,8 @@ def test_ingest_dir_takes_its_turn_with_the_repos_syncs(tmp_path, monkeypatch):
     monkeypatch.setattr(sync_lock_mod, "sync_lock", recorded)
     monkeypatch.setattr("auryn.cli._ingest_writer", lambda ctx, graph: None)
     monkeypatch.setattr("auryn.core.ingest.ingest_directory", lambda *a, **k: events.append("ingest"))
-    monkeypatch.setattr("auryn.core.ingest.join_deep_phase", lambda: events.append("join"))
-    monkeypatch.setattr("auryn.cli._echo_ingest_report", lambda report: None)
+    monkeypatch.setattr("auryn.core.ingest.join_deep_phase", lambda: (events.append("join"), [])[1])  # returns [] (no failed bg langs)
+    monkeypatch.setattr("auryn.cli._echo_ingest_report", lambda report, background_failures=None: [])
     monkeypatch.setattr("auryn.cli._wire_trigger", lambda *a, **k: None)
 
     res = CliRunner().invoke(cli, ["ingest", "dir", str(tmp_path)])
@@ -177,8 +177,8 @@ def test_sync_holds_the_lock_until_a_background_deep_pass_is_done(tmp_path, monk
     monkeypatch.setattr("auryn.cli._resolve_connection", lambda *a, **k: FalkorDBConfig())
     monkeypatch.setattr("auryn.cli.connect", lambda config: None)
     monkeypatch.setattr("auryn.core.ingest.ingest_directory", ingest_directory)
-    monkeypatch.setattr("auryn.core.ingest.join_deep_phase", lambda: events.append("join"))
-    monkeypatch.setattr("auryn.cli._echo_ingest_report", lambda report: None)
+    monkeypatch.setattr("auryn.core.ingest.join_deep_phase", lambda: (events.append("join"), [])[1])  # returns [] (no failed bg langs)
+    monkeypatch.setattr("auryn.cli._echo_ingest_report", lambda report, background_failures=None: [])
 
     res = CliRunner().invoke(cli, ["sync", str(tmp_path), "--deep", "background"])
 
