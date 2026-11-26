@@ -217,51 +217,62 @@ def stream_apply(
         marker_seen = False  # whether the target has yielded that node yet, changed or not
         batch: list[GraphNode] = []
         updated_pairs: list[tuple[str, str]] = []  # (label, id) of content-changed nodes
-        for item in make_target():
-            if not isinstance(item, GraphNode):
-                continue
-            props = item.properties
-            marker_seen |= SYNC_MARKER in props
-            if "linkage_key" in props:  # cross-repo linkage (see linkage.collect_linkages)
-                if props.get("resolved") is False:
-                    placeholders.append(str(item.key["id"]))
+        try:
+            for item in make_target():
+                if not isinstance(item, GraphNode):
+                    continue
+                props = item.properties
+                marker_seen |= SYNC_MARKER in props
+                if "linkage_key" in props:  # cross-repo linkage (see linkage.collect_linkages)
+                    if props.get("resolved") is False:
+                        placeholders.append(str(item.key["id"]))
+                    else:
+                        reals.append(str(props["linkage_key"]))
+                prev = node_fps.pop(node_key(item), _MISSING)
+                if prev is _MISSING:
+                    stats.nodes_added += 1
+                elif prev != fingerprint(props):
+                    stats.nodes_updated += 1
+                    # Content changed -> its (worker-written) embedding is now stale; queue it to be
+                    # cleared so the embed worker recomputes. New nodes have none, so only updates.
+                    updated_pairs.append((item.label, str(item.key["id"])))
                 else:
-                    reals.append(str(props["linkage_key"]))
-            prev = node_fps.pop(node_key(item), _MISSING)
-            if prev is _MISSING:
-                stats.nodes_added += 1
-            elif prev != fingerprint(props):
-                stats.nodes_updated += 1
-                # Content changed -> its (worker-written) embedding is now stale; queue it to be
-                # cleared so the embed worker recomputes. New nodes have none, so only updates.
-                updated_pairs.append((item.label, str(item.key["id"])))
-            else:
-                continue  # unchanged -- already popped, so it won't be counted a removal
-            if SYNC_MARKER in props:
-                # Clear the stamp right now, before anything else is written, and hold the real
-                # one back until everything is applied (see SYNC_MARKER). Most engines' targets
-                # LEAD with their Project node, so this is the first write of the sync.
-                marker = item
-                writer.merge_nodes([unstamped(item)])
-                continue
-            batch.append(item)
-            if len(batch) >= _STREAM_BATCH_SIZE:
-                if not marker_seen:
-                    # A target that yields its Project node later (compose, k8s): fetch it now, so
-                    # the stamp the graph holds is cleared before this first batch is written.
-                    marker_seen = True
-                    late = next(
-                        (n for n in make_target() if isinstance(n, GraphNode) and SYNC_MARKER in n.properties), None
-                    )
-                    if late is not None and node_key(late) in node_fps:
-                        marker = late
-                        writer.merge_nodes([unstamped(late)])
+                    continue  # unchanged -- already popped, so it won't be counted a removal
+                if SYNC_MARKER in props:
+                    # Clear the stamp right now, before anything else is written, and hold the real
+                    # one back until everything is applied (see SYNC_MARKER). Most engines' targets
+                    # LEAD with their Project node, so this is the first write of the sync.
+                    marker = item
+                    writer.merge_nodes([unstamped(item)])
+                    continue
+                batch.append(item)
+                if len(batch) >= _STREAM_BATCH_SIZE:
+                    if not marker_seen:
+                        # A target that yields its Project node later (compose, k8s): fetch it now, so
+                        # the stamp the graph holds is cleared before this first batch is written.
+                        marker_seen = True
+                        late = next(
+                            (n for n in make_target() if isinstance(n, GraphNode) and SYNC_MARKER in n.properties), None
+                        )
+                        if late is not None and node_key(late) in node_fps:
+                            marker = late
+                            writer.merge_nodes([unstamped(late)])
+                    writer.merge_nodes(batch)
+                    batch.clear()
+            if batch:
                 writer.merge_nodes(batch)
-                batch.clear()
-        if batch:
-            writer.merge_nodes(batch)
-        if updated_pairs:
-            writer.invalidate_embeddings(updated_pairs)
+        except BaseException:
+            # A partial (split-retry) write committed some nodes before raising; clear their stale
+            # embeddings best-effort (don't mask the original error) so no committed node keeps a new
+            # _fingerprint with an old embedding the next sync won't refresh. Then re-raise (#857).
+            if updated_pairs:
+                writer._invalidate_embeddings_best_effort(updated_pairs)
+            raise
+        else:
+            # Success: clear stale embeddings and let a failure here SURFACE -- swallowing it would
+            # likewise strand a new fingerprint with an old vector that the next sync never refreshes.
+            if updated_pairs:
+                writer.invalidate_embeddings(updated_pairs)
 
         # Pass 2 -- edges, once every node above is guaranteed to exist.
         edge_batch: list[GraphEdge] = []
