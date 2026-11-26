@@ -141,6 +141,16 @@ exists (5000 individual MERGE queries: ~2.9s; one batched UNWIND MERGE: ~0.02s).
 Chunked (rather than one query for an arbitrarily large list) to keep any single
 request/response small regardless of how big a sync's delta is."""
 
+_WRITE_QUERY_TIMEOUT_MS = 30_000
+"""Per-query timeout every write carries, overriding FalkorDB's server-wide default (the
+`falkordb/falkordb` image ships `TIMEOUT 1000`, i.e. 1s). A single large write batch -- the deep
+(semantic) pass of a big repo lands tens of thousands of inferred-type / resolved-call edges -- can
+exceed 1s, and the write would then die mid-pass with `Query timed out`, leaving a silently shallow
+graph (#857). The read path already overrides the same 1s default (see _SUBGRAPH_QUERY_TIMEOUT_MS);
+this is its write-side counterpart. A per-query timeout that FalkorDB accepts on the reads is
+accepted here too; where a server pins TIMEOUT_MAX below a batch's need, _write_rows() additionally
+splits-and-retries so the pass still completes rather than erroring."""
+
 
 def _chunked(items: list, size: int) -> Iterator[list]:
     for i in range(0, len(items), size):
@@ -372,7 +382,7 @@ class GraphWriter:
             pass  # already exists -> already back-filled
         if created:
             # Pre-existing nodes (from before the shared label) get it now; new/empty graphs no-op.
-            self._graph.query(f"MATCH (n) WHERE n.id IS NOT NULL SET n:{SHARED_NODE_LABEL}")
+            self._write(f"MATCH (n) WHERE n.id IS NOT NULL SET n:{SHARED_NODE_LABEL}")
 
     def _create_range_index(self, label: str, prop: str) -> None:
         try:
@@ -455,11 +465,41 @@ class GraphWriter:
             time.sleep(max(0.0, min(pause, deadline - time.monotonic())))  # never past the deadline
             pause = min(pause * 2, _INDEX_POLL_MAX_INTERVAL_S)
 
+    def _write(self, cypher: str, params: dict | None = None):
+        """Every write funnels through here so it carries a generous per-query timeout
+        (_WRITE_QUERY_TIMEOUT_MS) rather than inheriting FalkorDB's 1s server default, which a large
+        batch easily exceeds -- the failure mode in #857, where a deep pass died mid-write with
+        `Query timed out` and left a silently shallow graph."""
+        return self._graph.query(cypher, params or {}, timeout=_WRITE_QUERY_TIMEOUT_MS)
+
+    def _write_rows(self, cypher: str, rows: list, param: str = "rows") -> int:
+        """Run an `UNWIND $<param> AS ...` batched write (param defaults to `rows`) and return the
+        scalar it RETURNs summed across rows (0 when the query returns nothing -- e.g. a MERGE/DELETE
+        with no RETURN). If the batch still times out despite the generous per-query timeout (a
+        server pinned to a low TIMEOUT_MAX, or a pathologically dense batch), split it in half and
+        retry each half, down to a single row, so the pass completes instead of failing (#857). A
+        lone row that still times out is a genuine server problem and is re-raised."""
+        try:
+            result = self._write(cypher, {param: rows})
+            return result.result_set[0][0] if result.result_set else 0
+        except ResponseError as exc:
+            if len(rows) <= 1 or "timed out" not in str(exc).lower():
+                raise
+            mid = len(rows) // 2
+            logger.warning(
+                "batched write of %d rows timed out; splitting into %d + %d and retrying (#857)",
+                len(rows), mid, len(rows) - mid,
+            )
+            return (self._write_rows(cypher, rows[:mid], param)
+                    + self._write_rows(cypher, rows[mid:], param))
+
     def query(self, cypher: str, params: dict | None = None):
         """Escape hatch for passes that need arbitrary Cypher (reads, or targeted
         deletes) beyond the structured merge/delta helpers -- e.g. a graph-enrichment
-        ingestor resolving nodes and recomputing its own derived layer."""
-        return self._graph.query(cypher, params or {})
+        ingestor resolving nodes and recomputing its own derived layer. Carries the same generous
+        write timeout (a legitimately slow read or targeted delete shouldn't hit the 1s default
+        either); a runaway query is still bounded by _WRITE_QUERY_TIMEOUT_MS."""
+        return self._write(cypher, params)
 
     def ro_query(self, cypher: str, params: dict | None = None):
         """Read-only Cypher (rejected by FalkorDB if it contains a write clause)."""
@@ -480,7 +520,7 @@ class GraphWriter:
         while the (background/async) deep pass ran leaves depth at "fast" instead of a stale deep claim --
         closing the read-then-decide TOCTOU in the depth short-circuit. `prop`/`guard_prop` are
         format-interpolated, so this is for trusted internal property names only, never user input."""
-        result = self._graph.query(
+        result = self._write(
             f"MATCH (n:{label} {{id: $id}}) WHERE n.{guard_prop} = $gv SET n.{prop} = $v RETURN count(n)",
             {"id": node_id, "gv": guard_value, "v": value},
         )
@@ -500,7 +540,7 @@ class GraphWriter:
         params.update(extra)
 
         query = f"MERGE (n:{node.label} {{{key_clause}}}){set_clause}"
-        self._graph.query(query, params)
+        self._write(query, params)
 
     def merge_edge(self, edge: GraphEdge) -> None:
         from_params = {f"from_{k}": v for k, v in edge.from_key.items()}
@@ -518,7 +558,7 @@ class GraphWriter:
             f"MERGE (a)-[r:{edge.rel_type}]->(b){set_clause} "
             "RETURN count(a)"
         )
-        result = self._graph.query(query, params)
+        result = self._write(query, params)
         if result.result_set[0][0] == 0:
             # MATCH found neither/either endpoint -- MERGE silently no-ops in that case
             # rather than erroring, which would otherwise hide bugs like a wrong label
@@ -563,7 +603,7 @@ class GraphWriter:
                 f"UNWIND $rows AS row MERGE (n:{label} {{{key_clause}}}) "
                 f"SET n:{SHARED_NODE_LABEL}, n += row.plain{_intern_clause('n', rows)}"
             )
-            self._graph.query(query, {"rows": rows})
+            self._write_rows(query, rows)
 
     def merge_edges(self, edges: list[GraphEdge]) -> None:
         """Batched equivalent of merge_edge -- groups by (rel_type, from_label,
@@ -600,8 +640,7 @@ class GraphWriter:
                 f"MERGE (a)-[r:{rel_type}]->(b) SET r += row.plain{_intern_clause('r', rows)} "
                 "RETURN count(r)"
             )
-            result = self._graph.query(query, {"rows": rows})
-            matched = result.result_set[0][0]
+            matched = self._write_rows(query, rows)
             if matched < len(chunk):
                 logger.warning(
                     "merge_edges: %d of %d %s edges (%s -> %s) had a missing endpoint and were skipped",
@@ -625,7 +664,7 @@ class GraphWriter:
 
     def delete_node(self, label: str, key: dict) -> None:
         key_clause = ", ".join(f"{k}: ${k}" for k in key)
-        self._graph.query(f"MATCH (n:{label} {{{key_clause}}}) DETACH DELETE n", dict(key))
+        self._write(f"MATCH (n:{label} {{{key_clause}}}) DETACH DELETE n", dict(key))
 
     def delete_edge(self, rel_type: str, from_label: str, from_key: dict, to_label: str, to_key: dict) -> None:
         from_params = {f"from_{k}": v for k, v in from_key.items()}
@@ -633,7 +672,7 @@ class GraphWriter:
         from_clause = ", ".join(f"{k}: $from_{k}" for k in from_key)
         to_clause = ", ".join(f"{k}: $to_{k}" for k in to_key)
         query = f"MATCH (a:{from_label} {{{from_clause}}})-[r:{rel_type}]->(b:{to_label} {{{to_clause}}}) DELETE r"
-        self._graph.query(query, {**from_params, **to_params})
+        self._write(query, {**from_params, **to_params})
 
     def delete_nodes(self, items: list[tuple[str, dict]]) -> None:
         """Batched equivalent of delete_node -- groups by label, one UNWIND-based
@@ -646,7 +685,7 @@ class GraphWriter:
             key_clause = ", ".join(f"{k}: row.{k}" for k in key_cols)
             for chunk in _chunked(keys, _WRITE_BATCH_SIZE):
                 query = f"UNWIND $rows AS row MATCH (n:{label} {{{key_clause}}}) DETACH DELETE n"
-                self._graph.query(query, {"rows": chunk})
+                self._write_rows(query, chunk)
 
     def delete_edges(self, items: list[tuple[str, str, dict, str, dict]]) -> None:
         """Batched equivalent of delete_edge -- groups by (rel_type, from_label,
@@ -666,7 +705,7 @@ class GraphWriter:
                     f"MATCH (a:{from_label} {{{from_clause}}})-[r:{rel_type}]->(b:{to_label} {{{to_clause}}}) "
                     "DELETE r"
                 )
-                self._graph.query(query, {"rows": rows})
+                self._write_rows(query, rows)
 
     def read_fingerprints(self, id_prefix: str, node_labels: list[str]) -> tuple[dict[NodeKey, str], dict[EdgeKey, str]]:
         """The live graph's current (key -> fingerprint) for every node/edge (both
@@ -812,7 +851,7 @@ class GraphWriter:
                     "WHERE coalesce(n._fingerprint, '') = row.fp "
                     f"SET n:{self.SHARED_EMBEDDING_LABEL}, n.{self.EMBEDDING_PROPERTY} = vecf32(row.vec)"
                 )
-                self._graph.query(query, {"rows": rows})
+                self._write_rows(query, rows)
 
     def clear_embeddings(self, items: list[tuple[str, str]]) -> None:
         """Remove the vector + marker label from nodes so the embed worker re-embeds them -- used
@@ -827,13 +866,13 @@ class GraphWriter:
                     f"UNWIND $ids AS id MATCH (n:{kind_label} {{id: id}}) "
                     f"REMOVE n:{self.SHARED_EMBEDDING_LABEL}, n.{self.EMBEDDING_PROPERTY}"
                 )
-                self._graph.query(query, {"ids": chunk})
+                self._write_rows(query, chunk, param="ids")
 
     def clear_all_embeddings(self) -> None:
         """Remove every vector + the shared marker label from the graph -- the data half of a model
         switch (pair with drop_vector_index, which removes the index half). The embed worker then
         recomputes every node from scratch under the new model's dimension."""
-        self._graph.query(
+        self._write(
             f"MATCH (n:{self.SHARED_EMBEDDING_LABEL}) "
             f"REMOVE n:{self.SHARED_EMBEDDING_LABEL}, n.{self.EMBEDDING_PROPERTY}"
         )
