@@ -409,8 +409,10 @@ class GraphWriter:
             rows = self._graph.ro_query(
                 "CALL db.indexes() YIELD label, entitytype RETURN label, entitytype"
             ).result_set
-        except RedisError:
-            rows = None  # empty/not-yet-created graph key -> no pre-existing nodes to relabel
+        except ResponseError as e:
+            if "empty" not in str(e).lower():
+                raise  # a real/transient error -> propagate; never mark done without relabeling
+            rows = None  # genuinely empty graph key -> no pre-existing nodes to relabel
         if rows is not None and any(r[0] == SHARED_NODE_LABEL and r[1] == "NODE" for r in rows):
             return  # the index is present -> a prior run's back-fill already succeeded
         if rows is not None:
@@ -862,19 +864,20 @@ class GraphWriter:
             if markers:
                 self.merge_nodes([unstamped(n) for n in markers])
             if delta.nodes_to_upsert:
+                # Content-changed nodes keep their now-stale embedding through the merge (it isn't in
+                # the ingestor's property set) -- clear it so the worker re-embeds. New nodes have none.
+                stale = [(n.label, n.key["id"]) for n in delta.nodes_to_upsert]
                 try:
                     self.merge_nodes([n for n in delta.nodes_to_upsert if SYNC_MARKER not in n.properties])
-                finally:
-                    # Content-changed nodes keep their now-stale embedding through the merge (it isn't
-                    # in the ingestor's property set) -- clear it so the worker re-embeds. New nodes
-                    # in this set have no embedding, so clearing them is a no-op. In a `finally` so a
-                    # partial (split-retry) merge that commits some nodes then raises still clears
-                    # their stale embeddings -- otherwise a committed node keeps a new _fingerprint
-                    # but an old embedding, which the next sync (fingerprint unchanged) never refreshes
-                    # (#857 review). Over-clearing a rolled-back node just re-embeds it: harmless.
-                    self._invalidate_embeddings_best_effort(
-                        (n.label, n.key["id"]) for n in delta.nodes_to_upsert
-                    )
+                except BaseException:
+                    # Partial (split-retry) merge committed some nodes before raising: clear their
+                    # stale embeddings best-effort (don't mask the original error), then re-raise (#857).
+                    self._invalidate_embeddings_best_effort(stale)
+                    raise
+                else:
+                    # Success: clear stale embeddings and let a failure here SURFACE, else a committed
+                    # new fingerprint keeps an old vector the next (unchanged-fingerprint) sync never refreshes.
+                    self.invalidate_embeddings(stale)
             if delta.edges_to_upsert:
                 self.merge_edges(delta.edges_to_upsert)
             if delta.edges_to_remove:

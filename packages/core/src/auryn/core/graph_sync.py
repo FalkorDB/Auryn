@@ -261,13 +261,18 @@ def stream_apply(
                     batch.clear()
             if batch:
                 writer.merge_nodes(batch)
-        finally:
-            # In a `finally` so a partial (split-retry) write that commits some nodes before raising
-            # still clears their stale embeddings -- a committed node otherwise keeps a new _fingerprint
-            # but an old embedding the next sync (fingerprint unchanged) never refreshes (#857 review).
-            # Over-clearing a rolled-back node just re-embeds it: harmless.
+        except BaseException:
+            # A partial (split-retry) write committed some nodes before raising; clear their stale
+            # embeddings best-effort (don't mask the original error) so no committed node keeps a new
+            # _fingerprint with an old embedding the next sync won't refresh. Then re-raise (#857).
             if updated_pairs:
                 writer._invalidate_embeddings_best_effort(updated_pairs)
+            raise
+        else:
+            # Success: clear stale embeddings and let a failure here SURFACE -- swallowing it would
+            # likewise strand a new fingerprint with an old vector that the next sync never refreshes.
+            if updated_pairs:
+                writer.invalidate_embeddings(updated_pairs)
 
         # Pass 2 -- edges, once every node above is guaranteed to exist.
         edge_batch: list[GraphEdge] = []

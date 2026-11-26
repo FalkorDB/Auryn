@@ -79,6 +79,10 @@ DEEP_MODES = ("inline", "background", "async", "off")
 # (deep_failures()) without a shared mutable list that a concurrent ingest or the embed-waiter could
 # consume -- see _spawn_deep / #857.
 _deep_threads: list[threading.Thread] = []
+# Guards _deep_threads so a spawn's publish+start is atomic with join_deep_phase()'s snapshot+prune
+# -- otherwise a concurrent join could prune a just-appended, not-yet-started thread (is_alive() is
+# False) or try to join an unstarted one (RuntimeError), losing track of a running deep writer (#857).
+_deep_lock = threading.Lock()
 
 # Thread-local collector for deep_failure_scope(): while a scope is active on THIS thread, every deep
 # thread _spawn_deep starts (synchronously, on this thread) is appended here, so the scope joins and
@@ -806,20 +810,20 @@ def _spawn_deep(writer, source, target_sha, lang, *ctx) -> None:
 
     thread = threading.Thread(target=_target, name=f"deep-{lang.language}", daemon=True)
     thread.deep_outcome = outcome  # type: ignore[attr-defined]
-    collector = getattr(_tls, "collector", None)  # an active deep_failure_scope() on this thread
+    collector = getattr(_tls, "collector", None)  # an active deep_failure_scope() on this thread (local)
     if collector is not None:
         collector.append(thread)
-    # Register in the shared list BEFORE start(): a concurrent join_deep_phase() (e.g. the
-    # embed-after-deep waiter) snapshots this list, so a thread started first could be missed and the
-    # waiter would embed while the deep pass is still mutating the graph. Clean up if start() fails.
-    _deep_threads.append(thread)
-    try:
-        thread.start()
-    except BaseException:
-        _deep_threads.remove(thread)
-        if collector is not None:
-            collector.remove(thread)
-        raise
+    # Publish + start under the lock so join_deep_phase()'s snapshot never catches this thread
+    # registered-but-unstarted (which it could prune as not-alive, or fail to join). Clean up on error.
+    with _deep_lock:
+        _deep_threads.append(thread)
+        try:
+            thread.start()
+        except BaseException:
+            _deep_threads.remove(thread)
+            if collector is not None:
+                collector.remove(thread)
+            raise
 
 
 def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
@@ -870,7 +874,8 @@ def _spawn_git_info(writer: GraphWriter, repo_path: str | None, source_uri: str,
 def deep_threads() -> list[threading.Thread]:
     """The background deep passes this process has started and not yet joined -- so a caller can
     tell the ones its own ingest started from another repo's (see mcp/server.py)."""
-    return list(_deep_threads)
+    with _deep_lock:
+        return list(_deep_threads)
 
 
 def join_deep_phase(timeout: float | None = None) -> None:
@@ -879,9 +884,12 @@ def join_deep_phase(timeout: float | None = None) -> None:
     by any caller that must not exit before the deep graph is ready. Pairs with deep_failures() to
     tell which (if any) failed -- this only waits (and is safe to call from several places, e.g. the
     embed-after-deep waiter, without consuming that signal)."""
-    for thread in list(_deep_threads):
-        thread.join(timeout)
-    _deep_threads[:] = [t for t in _deep_threads if t.is_alive()]
+    with _deep_lock:  # snapshot under the lock (consistent with _spawn_deep's publish+start)
+        snapshot = list(_deep_threads)
+    for thread in snapshot:
+        thread.join(timeout)  # join OUTSIDE the lock so a spawn isn't blocked for the whole wait
+    with _deep_lock:
+        _deep_threads[:] = [t for t in _deep_threads if t.is_alive()]
 
 
 def deep_failures(threads: list[threading.Thread]) -> list[str]:
