@@ -19,8 +19,12 @@ No-orphan guarantees (the daemon must never linger):
    only exists while there is work.
 2. **flock run-lock.** Held for the daemon's whole life, so a second daemon can't start (and the
    OS drops the lock automatically on any death -- even a crash -- so single-flight self-heals).
+   Deleting the lock file (wiping AURYN_HOME) would let the next ingest lock a new one beside a
+   live daemon, so a daemon whose lock file is gone or replaced exits at its next poll.
 3. **Reparent + reap.** Spawned detached and never `wait()`-ed, so on the producer's exit it
    reparents to init and is reaped -- never a zombie.
+4. **`auryn stop`.** Stops the daemon before the local FalkorDB; a daemon left running would start
+   the server again through `ensure_server()` for its next queued request.
 
 CONNECTION. Background embedding only runs against the *configured* backend (the shared local
 daemon or a configured remote), so the daemon reconnects independently via
@@ -156,7 +160,7 @@ def ensure_embed_daemon() -> bool:
 
 def stop_embed_daemon() -> bool:
     """Signal a running embed daemon to stop (it also idle-exits on its own). Returns False if
-    nothing was running. Mainly for tests and a clean `auryn` teardown."""
+    nothing was running. `auryn stop` calls it before stopping the local FalkorDB."""
     pid = _read_pid()
     if not _pid_alive(pid):
         with contextlib.suppress(OSError):
@@ -196,10 +200,11 @@ def run_embed_daemon() -> None:
     stop = _install_signal_handlers()
     embed_pid_path().write_text(str(os.getpid()))
     try:
-        _drain_loop(stop)
+        _drain_loop(stop, lock_file)
     finally:
-        with contextlib.suppress(OSError):
-            embed_pid_path().unlink()
+        if _read_pid() == os.getpid():  # a daemon that lost its lock file leaves the new one's pidfile
+            with contextlib.suppress(OSError):
+                embed_pid_path().unlink()
         with contextlib.suppress(Exception):
             fcntl.flock(lock_file, fcntl.LOCK_UN)
         lock_file.close()
@@ -215,6 +220,18 @@ def _install_signal_handlers() -> dict:
     return stop
 
 
+def _holds_lock_file(lock_file) -> bool:
+    """Whether `lock_file` is still the file at `embed_lock_path()`. Wiping AURYN_HOME under a live
+    daemon deletes it, and the next ingest then locks a new file and starts a second daemon on the
+    same queue -- so a daemon whose lock file is gone or replaced no longer owns the queue."""
+    try:
+        on_disk = os.stat(embed_lock_path())
+    except OSError:
+        return False
+    held = os.fstat(lock_file.fileno())
+    return (on_disk.st_dev, on_disk.st_ino) == (held.st_dev, held.st_ino)
+
+
 def _recover_inflight() -> None:
     """Reclaim requests a previous daemon crashed mid-embed on. `_process_request` claims a request
     by renaming `<g>.json` -> `<g>.inflight`; if the daemon then dies, the drain loop (which scans
@@ -226,8 +243,16 @@ def _recover_inflight() -> None:
             os.replace(inflight, inflight.with_suffix(".json"))
 
 
-def _drain_loop(stop: dict) -> None:
+def _drain_loop(stop: dict, lock_file=None) -> None:
     from auryn.core.embeddings import get_embedder
+
+    def done() -> bool:
+        if stop["flag"]:
+            return True
+        if lock_file is not None and not _holds_lock_file(lock_file):
+            logger.warning("Embed daemon lock file %s was removed or replaced; exiting", embed_lock_path())
+            return True
+        return False
 
     _recover_inflight()  # re-queue anything a prior daemon crashed on before we start draining
     # One embedder per model id, loaded on first use and reused -- requests carry their model so a
@@ -244,7 +269,7 @@ def _drain_loop(stop: dict) -> None:
     idle_since: float | None = None
 
     logger.info("Embed daemon up (poll=%.1fs idle-grace=%.1fs)", _POLL_SECONDS, _IDLE_GRACE_SECONDS)
-    while not stop["flag"]:
+    while not done():
         requests = sorted(embed_requests_dir().glob("*.json"))
         if not requests:
             if idle_since is None:
@@ -256,7 +281,7 @@ def _drain_loop(stop: dict) -> None:
 
         idle_since = None
         for req in requests:
-            if stop["flag"]:
+            if done():
                 return
             client = _process_request(req, embedder_for, client, attempts)
         time.sleep(_POLL_SECONDS)  # breathe between passes so a failing+requeued request can't hot-spin

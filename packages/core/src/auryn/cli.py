@@ -388,9 +388,19 @@ def serve(port: int | None, db_path: str | None) -> None:
 
 @cli.command("stop")
 def stop() -> None:
-    """Stop the local bundled FalkorDB daemon if it's running (no-op for a remote backend)."""
+    """Stop the local bundled FalkorDB daemon if it's running (no-op for a remote backend).
+
+    The background deepen and embed daemons stop first: they reconnect through ensure_server(),
+    so one left running would start the local FalkorDB again for its next queued request."""
+    from auryn.core.deepen.daemon import stop_deepen_daemon
+    from auryn.core.embeddings.daemon import stop_embed_daemon
     from auryn.core.server_manager import stop_server
 
+    # Deepen before embed: a deep pass re-runs the ingest, which queues an embed request.
+    if stop_deepen_daemon():
+        click.echo("Stopped the background deepen daemon.")
+    if stop_embed_daemon():
+        click.echo("Stopped the background embed daemon.")
     click.echo("Stopped the local FalkorDB." if stop_server() else "No local FalkorDB running.")
 
 

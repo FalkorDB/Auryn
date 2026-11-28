@@ -197,6 +197,40 @@ def test_run_deepen_daemon_is_single_flight():
         held.close()
 
 
+def test_holds_lock_file_until_it_is_removed_or_replaced():
+    deepen_lock_path().parent.mkdir(parents=True, exist_ok=True)
+    with open(deepen_lock_path(), "w") as held:
+        assert daemon._holds_lock_file(held)
+        deepen_lock_path().unlink()
+        assert not daemon._holds_lock_file(held)
+        deepen_lock_path().write_text("")  # a new file at the same path: another daemon's lock
+        assert not daemon._holds_lock_file(held)
+
+
+@pytest.mark.skipif(fcntl is None, reason="POSIX fcntl required for the run-lock")
+def test_run_deepen_daemon_exits_when_a_second_daemon_takes_its_lock_path(monkeypatch, tmp_path):
+    """Regression: wiping AURYN_HOME under a live daemon deleted its lock file, so the next ingest
+    started a second daemon while the first kept draining the same queue. The first now exits at
+    its next poll and leaves the pidfile the second one wrote."""
+    monkeypatch.setattr(daemon, "_IDLE_GRACE_SECONDS", 999.0)  # would never idle-exit
+    monkeypatch.setattr(daemon, "_POLL_SECONDS", 0.01)
+    done = threading.Event()
+    threading.Thread(target=lambda: (daemon.run_deepen_daemon(), done.set()), daemon=True).start()
+    deadline = time.monotonic() + 3.0
+    while not deepen_pid_path().exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert deepen_pid_path().exists(), "daemon did not start"
+
+    # The second daemon's pidfile and lock file, each moved in whole (pidfile first, as the second
+    # daemon writes it before this one can notice the new lock).
+    (tmp_path / "second.pid").write_text("4242")
+    (tmp_path / "second.lock").write_text("")
+    (tmp_path / "second.pid").replace(deepen_pid_path())
+    (tmp_path / "second.lock").replace(deepen_lock_path())
+    assert done.wait(timeout=3.0), "daemon kept running after its lock file was replaced"
+    assert deepen_pid_path().read_text() == "4242"
+
+
 def test_repos_sharing_a_graph_keep_separate_requests(tmp_path):
     # MCP can index several repos into ONE graph; each must keep its own pending deep request so one
     # doesn't overwrite another's (coalescing is per (graph, project), not per graph).

@@ -19,7 +19,8 @@ upgrades the graph to `depth="deep"`. That makes a duplicate or replayed request
 already-deep graph short-circuits both phases), and a working tree that moved meanwhile self-heals.
 
 No-orphan guarantees mirror the embed daemon: idle-exit after `IDLE_GRACE`, an fcntl single-flight
-run-lock the OS drops on any death, and detached-never-waited spawning (reparent + reap).
+run-lock the OS drops on any death, detached-never-waited spawning (reparent + reap), an exit once
+the lock file is gone or replaced, and `auryn stop` stopping it before the local FalkorDB.
 
 CONNECTION. Like the embed daemon, this runs only against the *configured* backend (the shared local
 daemon or a configured remote) via `ensure_server(load_backend())` -- ad-hoc connections an external
@@ -157,7 +158,7 @@ def ensure_deepen_daemon() -> bool:
 
 def stop_deepen_daemon() -> bool:
     """Signal a running deepen daemon to stop (it also idle-exits on its own). Returns False if nothing
-    was running. Mainly for tests and a clean teardown."""
+    was running. `auryn stop` calls it before stopping the local FalkorDB."""
     pid = _read_pid()
     if not _pid_alive(pid):
         with contextlib.suppress(OSError):
@@ -197,10 +198,11 @@ def run_deepen_daemon() -> None:
     stop = _install_signal_handlers()
     deepen_pid_path().write_text(str(os.getpid()))
     try:
-        _drain_loop(stop)
+        _drain_loop(stop, lock_file)
     finally:
-        with contextlib.suppress(OSError):
-            deepen_pid_path().unlink()
+        if _read_pid() == os.getpid():  # a daemon that lost its lock file leaves the new one's pidfile
+            with contextlib.suppress(OSError):
+                deepen_pid_path().unlink()
         with contextlib.suppress(Exception):
             fcntl.flock(lock_file, fcntl.LOCK_UN)
         lock_file.close()
@@ -216,6 +218,18 @@ def _install_signal_handlers() -> dict:
     return stop
 
 
+def _holds_lock_file(lock_file) -> bool:
+    """Whether `lock_file` is still the file at `deepen_lock_path()`. Wiping AURYN_HOME under a live
+    daemon deletes it, and the next ingest then locks a new file and starts a second daemon on the
+    same queue -- so a daemon whose lock file is gone or replaced no longer owns the queue."""
+    try:
+        on_disk = os.stat(deepen_lock_path())
+    except OSError:
+        return False
+    held = os.fstat(lock_file.fileno())
+    return (on_disk.st_dev, on_disk.st_ino) == (held.st_dev, held.st_ino)
+
+
 def _recover_inflight() -> None:
     """Reclaim requests a previous daemon crashed mid-deepen on. `_process_request` claims a request by
     renaming `<g>.json` -> `<g>.inflight`; if the daemon then dies, the drain loop (which scans only
@@ -226,14 +240,22 @@ def _recover_inflight() -> None:
             os.replace(inflight, inflight.with_suffix(".json"))
 
 
-def _drain_loop(stop: dict) -> None:
+def _drain_loop(stop: dict, lock_file=None) -> None:
+    def done() -> bool:
+        if stop["flag"]:
+            return True
+        if lock_file is not None and not _holds_lock_file(lock_file):
+            logger.warning("Deepen daemon lock file %s was removed or replaced; exiting", deepen_lock_path())
+            return True
+        return False
+
     _recover_inflight()  # re-queue anything a prior daemon crashed on before we start draining
     attempts: dict[str, int] = {}
     client = None  # resolved lazily; cached across requests, dropped on a connection error
     idle_since: float | None = None
 
     logger.info("Deepen daemon up (poll=%.1fs idle-grace=%.1fs)", _POLL_SECONDS, _IDLE_GRACE_SECONDS)
-    while not stop["flag"]:
+    while not done():
         requests = sorted(deepen_requests_dir().glob("*.json"))
         if not requests:
             if idle_since is None:
@@ -245,7 +267,7 @@ def _drain_loop(stop: dict) -> None:
 
         idle_since = None
         for req in requests:
-            if stop["flag"]:
+            if done():
                 return
             client = _process_request(req, client, attempts)
         time.sleep(_POLL_SECONDS)  # breathe between passes so a failing+requeued request can't hot-spin
