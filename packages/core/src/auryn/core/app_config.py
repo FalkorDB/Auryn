@@ -16,10 +16,34 @@ before ``install`` has ever run. Reading uses stdlib ``tomllib``; writing uses `
 
 from __future__ import annotations
 
+import contextlib
 import tomllib
 from dataclasses import dataclass, field, replace
 
 from auryn.core.home import config_path
+
+try:
+    import fcntl
+except ImportError:  # native Windows -- config RMW stays unserialized there (as it was before)
+    fcntl = None
+
+
+@contextlib.contextmanager
+def _config_lock():
+    """Serialize read-modify-write updates to config.toml so two concurrent updaters -- e.g. a schema
+    migration bumping the version while a commit hook's register_repo runs -- can't clobber each
+    other's change (load A, load B, save A, save B loses B). fcntl-based; best-effort on Windows."""
+    if fcntl is None:
+        yield
+        return
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(path.name + ".lock"), "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
@@ -74,6 +98,11 @@ class Config:
     disabled_hooks: tuple[str, ...] = ()  # post hooks turned off machine-wide (see core/registry.py)
     embed_mode: str = "background"  # inline | background | off -- how the always-on embed runs (see embedder.embed_mode)
     git_info_enabled: bool = False  # collect local git history and public GitHub metadata on ingest
+    # Graph-schema generation this machine last ingested under (graph_model.GRAPH_SCHEMA_VERSION).
+    # 0 means "never stamped" (pre-#851, or a fresh install). When it trails the running Auryn's
+    # version, local graphs are schema-incompatible and get migrated (see schema_migration). Purely
+    # a version marker -- the graph itself is never inspected to decide this.
+    schema_version: int = 0
 
 
 def _parse_backend(section: dict) -> Backend:
@@ -132,9 +161,13 @@ def load_config() -> Config:
     # is truthy under bool() and would silently opt IN. Require a real TOML boolean `true` in a table.
     gi = data.get("git_info", {})
     git_info_enabled = isinstance(gi, dict) and gi.get("enabled") is True
+    try:
+        schema_version = int(data.get("schema_version", 0))
+    except (TypeError, ValueError, OverflowError):
+        schema_version = 0  # a stray value (text, inf, …) must never break an ingest
     return Config(backend=backend, agents=agents, resync_trigger=trigger, repos=repos,
                   disabled_hooks=disabled_hooks, embed_mode=embed_mode,
-                  git_info_enabled=git_info_enabled)
+                  git_info_enabled=git_info_enabled, schema_version=schema_version)
 
 
 def load_backend() -> Backend:
@@ -181,6 +214,8 @@ def save_config(config: Config) -> None:
         doc["embeddings"] = {"mode": config.embed_mode}  # only persist a non-default mode
     if config.git_info_enabled:
         doc["git_info"] = {"enabled": True}
+    if config.schema_version:
+        doc["schema_version"] = config.schema_version
     if config.repos:
         doc["repo"] = [
             {k: v for k, v in {
@@ -211,6 +246,14 @@ def set_resync_trigger(trigger: str) -> None:
     save_config(replace(load_config(), resync_trigger=trigger))
 
 
+def set_schema_version(version: int) -> None:
+    """Persist the graph-schema generation this machine has ingested under (see
+    graph_model.GRAPH_SCHEMA_VERSION / schema_migration). Locked read-modify-write so it touches only
+    that one field without clobbering a concurrently-written registry entry (and vice versa)."""
+    with _config_lock():
+        save_config(replace(load_config(), schema_version=int(version)))
+
+
 def set_embed_mode(mode: str) -> None:
     """Persist how auto-embed runs: ``inline`` (synchronous, blocks the ingest), ``background``
     (hand to the detached embed daemon; the default), or ``off``. Durable in ~/.auryn/config.toml;
@@ -228,22 +271,22 @@ def set_git_info_enabled(enabled: bool) -> None:
 
 
 def register_repo(reg: RepoRegistration) -> None:
-    """Upsert a repo registration (replacing any existing entry for the same local_dir)."""
-    from dataclasses import replace
-
-    cfg = load_config()
-    kept = tuple(r for r in cfg.repos if r.local_dir != reg.local_dir)
-    save_config(replace(cfg, repos=kept + (reg,)))
+    """Upsert a repo registration (replacing any existing entry for the same local_dir). Locked
+    read-modify-write so a concurrent config update (e.g. a schema migration) isn't clobbered."""
+    with _config_lock():
+        cfg = load_config()
+        kept = tuple(r for r in cfg.repos if r.local_dir != reg.local_dir)
+        save_config(replace(cfg, repos=kept + (reg,)))
 
 
 def unregister_repo(local_dir: str) -> RepoRegistration | None:
-    """Remove and return a repo registration by local_dir (None if it wasn't registered)."""
-    from dataclasses import replace
-
-    cfg = load_config()
-    match = next((r for r in cfg.repos if r.local_dir == local_dir), None)
-    if match is not None:
-        save_config(replace(cfg, repos=tuple(r for r in cfg.repos if r.local_dir != local_dir)))
+    """Remove and return a repo registration by local_dir (None if it wasn't registered). Locked
+    read-modify-write so a concurrent config update isn't clobbered."""
+    with _config_lock():
+        cfg = load_config()
+        match = next((r for r in cfg.repos if r.local_dir == local_dir), None)
+        if match is not None:
+            save_config(replace(cfg, repos=tuple(r for r in cfg.repos if r.local_dir != local_dir)))
     return match
 
 

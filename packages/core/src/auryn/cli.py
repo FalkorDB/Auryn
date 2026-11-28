@@ -130,6 +130,85 @@ def _purge_git_info_backend() -> int:
     return sum(purge_git_info(GraphWriter(client.select_graph(name))) for name in client.list_graphs())
 
 
+def _migrate_schema_if_stale(host, port, username, password, ssl) -> None:
+    """If this machine last ingested under a schema-incompatible older Auryn (#851), migrate before
+    the normal ingest/sync proceeds. Local DB (no --host + local backend): delete each registered
+    graph and re-ingest every registered repo from scratch -- a one-time clean rebuild that keeps the
+    disk hooks and registry. Remote/shared DB (any --host, or a remote backend): never destroyed,
+    only warned about. Detection is a pure version comparison (schema_migration); no graph is scanned."""
+    from pathlib import Path
+    from auryn.core.app_config import load_backend
+    from auryn.core.project import default_graph_name, resolve_project_root
+    from auryn.core.schema_migration import migrate_schema_if_stale
+
+    is_local = host is None and load_backend().mode == "local"
+
+    def _graph_for(repo) -> str:
+        return repo.graph_name or default_graph_name(resolve_project_root(repo.local_dir))
+
+    def local_migrate(repos) -> bool:
+        """Delete + re-ingest each registered repo; return True iff every graph it ATTEMPTED rebuilt
+        cleanly (only then does the caller advance the schema stamp). A graph is rebuilt only when
+        EVERY repo targeting it has a live source dir -- otherwise deleting it would lose the subgraph
+        of a repo it can't rebuild (so a shared graph with a missing source, or a path that's gone or
+        isn't a directory, is left untouched and warned about, never destroyed). A real deletion
+        failure propagates (aborting before more graphs are cleared); a per-language fast/deep error or
+        a language that doesn't come back (its ingestor was uninstalled) marks the rebuild incomplete."""
+        from auryn.core import ingest as ingest_mod, lifecycle
+
+        client = connect_client(_resolve_connection(host, port, username, password, ssl))
+        # is_dir (not exists): a registered path that's a regular file isn't ingestable either.
+        by_graph: dict[str, list] = {}
+        unrebuildable: dict[str, list[str]] = {}  # graph -> the missing sources that forbid destroying it
+        for r in repos:
+            g = _graph_for(r)
+            if Path(r.local_dir).is_dir():
+                by_graph.setdefault(g, []).append(r)
+            else:
+                unrebuildable.setdefault(g, []).append(r.local_dir)
+
+        existing = set(client.list_graphs())
+        all_ok = True
+        for gname in sorted(set(by_graph) | set(unrebuildable)):
+            if gname in unrebuildable:
+                # A repo targeting this graph has no live source -> rebuilding would drop its data.
+                click.secho(f"  schema migration: NOT rebuilding graph {gname!r} -- registered source(s) "
+                            f"{', '.join(unrebuildable[gname])} are gone/not a dir; left untouched "
+                            f"(`auryn forget` the dead one, or restore it and re-ingest)", fg="yellow", err=True)
+                continue
+            # Capture the graph's current languages BEFORE deleting, so a language that fails to come
+            # back (e.g. its ingestor was uninstalled since) is caught rather than silently dropped.
+            old_langs: set[str] = set()
+            if gname in existing:
+                try:
+                    old_langs = {lang for proj in lifecycle._projects_in(client.select_graph(gname)).values()
+                                for lang in proj.get("langs", ())}
+                except Exception:  # noqa: BLE001 -- best-effort; a read failure just skips the language check
+                    old_langs = set()
+                client.select_graph(gname).delete()  # a transient failure propagates -> aborts the migration
+            built: set[str] = set()
+            for repo in by_graph[gname]:
+                report = ingest_mod.ingest_directory(
+                    GraphWriter(client.select_graph(gname)), str(Path(repo.local_dir)),
+                    project_name=repo.project_name,
+                )
+                built |= {lr.language for lr in report.languages if lr.result is not None}
+                bad = [lr.language for lr in report.languages if lr.error or lr.deep_status == "error"]
+                if bad:
+                    all_ok = False
+                    click.secho(f"  schema migration: {repo.local_dir} rebuilt with errors in {', '.join(bad)}",
+                                fg="yellow", err=True)
+            dropped = old_langs - built
+            if dropped:
+                all_ok = False
+                click.secho(f"  schema migration: graph {gname!r} did not rebuild language(s) "
+                            f"{', '.join(sorted(dropped))} (ingestor unavailable?) -- not marking migrated",
+                            fg="yellow", err=True)
+        return all_ok
+
+    migrate_schema_if_stale(is_local=is_local, local_migrate=local_migrate)
+
+
 @cli.command("view")
 @click.option("--host", default="127.0.0.1", show_default=True, help="Host the viewer's web server binds to.")
 @click.option("--port", default=8080, show_default=True, type=int, help="Port the viewer's web server binds to.")
@@ -914,6 +993,7 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
     from auryn.core.project import default_graph_name, resolve_project_root
     from auryn.core.sync_lock import sync_lock
 
+    _migrate_schema_if_stale(host, port, username, password, ssl)  # #851: one-time re-ingest across a schema upgrade
     root = resolve_project_root(path)
     # One sync per repo at a time: the git hooks fire a burst of these (a rebase starts one per
     # commit) and overlapping syncs of one project corrupt its subgraph. See core/sync_lock.py.
@@ -1316,6 +1396,8 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
     if workers is not None:
         os.environ["AURYN_PARSE_WORKERS"] = str(workers)  # one knob for every language's parse pool
     _validate_hook_names(only_hooks + skip_hooks)
+    o = ctx.obj
+    _migrate_schema_if_stale(o["host"], o["port"], o["username"], o["password"], o["ssl"])  # #851
     graph = ctx.obj["graph_name"] or default_graph_name(resolve_project_root(path))
     writer = _ingest_writer(ctx, graph)
     try:
@@ -1374,6 +1456,8 @@ def ingest_repo(
     if workers is not None:
         os.environ["AURYN_PARSE_WORKERS"] = str(workers)  # one knob for every language's parse pool
     _validate_hook_names(only_hooks + skip_hooks)
+    o = ctx.obj
+    _migrate_schema_if_stale(o["host"], o["port"], o["username"], o["password"], o["ssl"])  # #851
     _filters = dict(include_dirs=include_dirs, exclude_dirs=exclude_dirs,
                     include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
                     enrichment_only=only_hooks, enrichment_skip=skip_hooks)
