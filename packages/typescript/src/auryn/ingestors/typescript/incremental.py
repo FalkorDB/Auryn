@@ -165,7 +165,8 @@ TS_SPEC = ScopedSpec(
     file_suffixes=tuple(_FILE_SUFFIXES),
     excluded_dir_names=frozenset(_EXCLUDED_DIR_NAMES),
     symbol_ref_rels=_SYMBOL_REF_RELS,
-    lateral_rels=_SYMBOL_REF_RELS + ("IMPORTS",),
+    # CALLS_API (ADR 0006) is source-owned like a call: a file that drops a fetch() must diff its edge away.
+    lateral_rels=_SYMBOL_REF_RELS + ("IMPORTS", "CALLS_API"),
     containment_rels=_CONTAINMENT_RELS,
     targetable_labels=("Class", "Interface", "Enum", "TypeAlias", "Function", "Method"),
     import_rel="IMPORTS",

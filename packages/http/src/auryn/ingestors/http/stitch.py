@@ -48,6 +48,10 @@ def stitch(writer: GraphWriter) -> dict | None:
 
     writer.setup_schema(NODE_SCHEMAS)
     _clear_prior_layer(writer)
+    # GC before resolving: with this hook's own EXPOSES edges cleared, an endpoint whose callers are
+    # all gone has no referrer left. After resolving, the edge this pass re-adds to its handler would
+    # keep it alive on every later run.
+    orphans_removed = _gc_orphan_endpoints(writer)
 
     placeholders = writer.ro_query(
         "MATCH (e:APIEndpoint {provenance:'http-derived'}) RETURN e.id, e.route, e.http_method"
@@ -80,7 +84,6 @@ def stitch(writer: GraphWriter) -> dict | None:
     _recompute_resolved(writer)
     invokes = _build_invokes_edges(writer)
     writer.merge_edges(invokes)
-    orphans_removed = _gc_orphan_endpoints(writer)
 
     report = {
         "placeholders": len(placeholders),
@@ -150,7 +153,8 @@ def _gc_orphan_endpoints(writer: GraphWriter) -> int:
     project's id-prefix, so a project resync can't reclaim it -- this does. Scoped to `extern://http/`
     so it never touches a project-scoped endpoint another ingestor owns (e.g. pyframework's
     `Function`-exposed routes). An endpoint that is merely uncalled (declared, or Ingress-served, with
-    no caller) keeps its EXPOSES/SERVES and is NOT an orphan."""
+    no caller) keeps its EXPOSES/SERVES and is NOT an orphan. Runs right after `_clear_prior_layer`,
+    so an EXPOSES edge seen here is a declared one, never this hook's own."""
     orphans = writer.ro_query(
         "MATCH (e:APIEndpoint) WHERE e.id STARTS WITH 'extern://http/' "
         "AND NOT ()-[:EXPOSES_ENDPOINT]->(e) AND NOT ()-[:CALLS_API]->(e) AND NOT ()-[:SERVES]->(e) "
