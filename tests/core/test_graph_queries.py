@@ -548,6 +548,59 @@ class TestTraceCrossesHttpSeam:
         assert {f["name"] for f in result["functions"]} == {"LogChange", "DeepHelper"}
 
 
+class TestTraceOrmMappedTables:
+    """trace_entrypoint follows the ORM stitch's Class -MAPS_TO-> Table from the models in its
+    closure into `tables_mapped`. Regression: ORM-backed code used to report no tables at all,
+    because the trace collected them from READS/WRITES edges only."""
+
+    def _seed_orm_service(self, graph):
+        # place_order constructs Order (no __init__: CALLS -> the Class) and Payment (its own
+        # __init__: CALLS -> the Method); Customer maps to a table but nothing in the closure uses it.
+        graph.query(
+            """
+            CREATE (f:Function {id:'python://app/module/service.func.place_order', name:'place_order'}),
+                   (o:Class    {id:'python://app/module/models.class.order', name:'Order'}),
+                   (p:Class    {id:'python://app/module/models.class.payment', name:'Payment'}),
+                   (pinit:Method {id:'python://app/module/models.class.payment.method.__init__', name:'__init__'}),
+                   (c:Class    {id:'python://app/module/models.class.customer', name:'Customer'}),
+                   (t1:Table  {id:'sql://db/table/orders', name:'orders'}),
+                   (k1:Column {id:'sql://db/table/orders/column/id', name:'id'}),
+                   (t2:Table  {id:'sql://db/table/payments', name:'payments'}),
+                   (t3:Table  {id:'sql://db/table/customers', name:'customers'})
+            CREATE (f)-[:CALLS]->(o), (f)-[:CALLS]->(pinit), (p)-[:HAS_METHOD]->(pinit),
+                   (o)-[:MAPS_TO]->(t1), (o)-[:MAPS_TO]->(k1), (p)-[:MAPS_TO]->(t2), (c)-[:MAPS_TO]->(t3)
+            """
+        )
+
+    def test_models_in_the_closure_report_their_tables(self, graph):
+        self._seed_orm_service(graph)
+
+        result = gq.trace_entrypoint(graph, "python://app/module/service.func.place_order")
+
+        # Order through the Class, Payment through its __init__; not the unused Customer's table,
+        # and never a mapped Column.
+        assert {t["name"] for t in result["tables_mapped"]} == {"orders", "payments"}
+        # MAPS_TO carries no read/write direction, so neither directed list guesses one.
+        assert result["tables_read"] == [] and result["tables_written"] == []
+        assert result["truncated"] is False
+
+    def test_truncated_flag_set_when_mapped_limit_hit(self, graph):
+        # One model mapped to the same table name in two schemas: one closure node, two tables.
+        graph.query(
+            """
+            CREATE (f:Function {id:'f', name:'save'}), (o:Class {id:'o', name:'Order'}),
+                   (t1:Table {id:'oracle://db.ORDERS', name:'ORDERS'}),
+                   (t2:Table {id:'postgresql://db.orders', name:'orders'})
+            CREATE (f)-[:CALLS]->(o), (o)-[:MAPS_TO]->(t1), (o)-[:MAPS_TO]->(t2)
+            """
+        )
+
+        result = gq.trace_entrypoint(graph, "f", limit=1)
+
+        assert result["truncated"] is True
+        assert len(result["tables_mapped"]) == 1
+
+
 class TestRunReadQueryTabular:
     """run_read_query returns `columns`/`rows` for result data that isn't a graph entity
     (projected properties, aggregations), while still returning graph nodes/edges for the canvas."""

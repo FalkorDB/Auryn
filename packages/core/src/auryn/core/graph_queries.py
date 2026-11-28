@@ -648,8 +648,8 @@ def impact_of(
 
 _VALIDATIONS_NOT_EXTRACTED_NOTE = (
     "Validation/branch-condition extraction doesn't exist in the current PL/SQL or C# "
-    "ingestors -- this closure covers CALLS reachability and READS/WRITES table usage "
-    "only. See CONTRIBUTING.md / README.md for the current schema."
+    "ingestors -- this closure covers CALLS reachability, READS/WRITES table usage and "
+    "the tables its ORM models map to only. See CONTRIBUTING.md / README.md for the current schema."
 )
 
 
@@ -726,6 +726,14 @@ def trace_entrypoint(
     rows returned per section as a safety net against a runaway query, and
     `truncated` says so if it did.
 
+    `tables_mapped` is every Table an ORM model in the closure maps to (the
+    ORM stitch's Class -MAPS_TO-> Table): the closure reaches a model when it
+    constructs it (a CALLS edge to the Class, or to its `__init__`) or calls
+    one of its methods. MAPS_TO says which table a model stands for, not
+    whether the code reads or writes it, so these tables get their own list
+    rather than a guessed place in `tables_read`/`tables_written` -- a table
+    that also has a READS/WRITES edge from the closure is in both.
+
     `validations` is always None today: no current ingestor extracts validation
     or branch-condition logic, so this cannot yet return that dimension --
     reported explicitly (with `validations_note` explaining why) rather than
@@ -774,15 +782,31 @@ def trace_entrypoint(
     for table, rel_type in table_rows[:limit]:
         (tables_read if rel_type == "READS" else tables_written).append(serialize_node_min(table))
 
+    # An ORM model in the closure -- the Class itself (a constructor call) or one of its methods
+    # (`__init__` included) -- reaches the Table the ORM stitch mapped it to. Zero HAS_METHOD hops
+    # is the Class node itself.
+    mapped_rows = graph.ro_query(
+        """
+        UNWIND $ids AS fid
+        MATCH (n:Entity {id: fid})<-[:HAS_METHOD*0..1]-(:Class)-[:MAPS_TO]->(t:Table)
+        RETURN DISTINCT t
+        LIMIT $limit
+        """,
+        {"ids": closure_ids, "limit": limit + 1},
+    ).result_set
+    mapped_truncated = len(mapped_rows) > limit
+    tables_mapped = [serialize_node_min(row[0]) for row in mapped_rows[:limit]]
+
     return {
         "entry": entry,
         "functions": functions,
         "tables_read": tables_read,
         "tables_written": tables_written,
+        "tables_mapped": tables_mapped,
         "validations": None,
         "validations_note": _VALIDATIONS_NOT_EXTRACTED_NOTE,
         "max_depth": max_depth,
-        "truncated": functions_truncated or tables_truncated,
+        "truncated": functions_truncated or tables_truncated or mapped_truncated,
     }
 
 

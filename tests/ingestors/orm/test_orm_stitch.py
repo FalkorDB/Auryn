@@ -4,6 +4,7 @@ code->database ("project A -> project B") connection. Needs FalkorDB (the confte
 
 from __future__ import annotations
 
+from auryn.core import graph_queries as gq
 from auryn.core import ingest
 from auryn.core.graph_client import GraphWriter
 from auryn.core.graph_model import GraphEdge, GraphNode
@@ -199,3 +200,38 @@ def test_stitch_is_idempotent(graph, tmp_path):
     stitch(writer)  # a second run rebuilds its own layer -- no duplicates
     second = graph.query("MATCH (:Class)-[r:MAPS_TO]->() RETURN count(r)").result_set[0][0]
     assert first == second and first > 0
+
+
+def test_trace_entrypoint_reports_the_tables_its_models_map_to(graph, tmp_path):
+    """End to end over the real Python ingestor: a constructor call reaches a model with no
+    `__init__` through its Class node and a model with one through that Method, and the trace
+    lists both models' tables in `tables_mapped` (not in tables_read/tables_written)."""
+    (tmp_path / "models.py").write_text(
+        "from sqlalchemy import Column, Integer, String\n"
+        "from sqlalchemy.orm import declarative_base\n\n"
+        "Base = declarative_base()\n\n\n"
+        "class Order(Base):\n"
+        '    __tablename__ = "orders"\n'
+        "    id = Column(String, primary_key=True)\n\n\n"
+        "class Payment(Base):\n"
+        '    __tablename__ = "payments"\n'
+        "    id = Column(String, primary_key=True)\n\n"
+        "    def __init__(self, id):\n"
+        "        self.id = id\n"
+    )
+    (tmp_path / "service.py").write_text(
+        "from models import Order, Payment\n\n\n"
+        "def place_order(order_id, payment_id):\n"
+        "    return Order(id=order_id), Payment(payment_id)\n"
+    )
+    ingest.ingest_directory(GraphWriter(graph), str(tmp_path), project_name="app")
+    writer = GraphWriter(graph)
+    _seed_scoped_table(writer, "postgresql://app.public", "orders", ["id"])
+    _seed_scoped_table(writer, "postgresql://app.public", "payments", ["id"])
+    assert stitch(writer) is not None
+
+    entry_id = graph.query("MATCH (f:Function {name:'place_order'}) RETURN f.id").result_set[0][0]
+    result = gq.trace_entrypoint(graph, entry_id)
+
+    assert sorted(t["name"] for t in result["tables_mapped"]) == ["orders", "payments"]
+    assert result["tables_read"] == [] and result["tables_written"] == []
