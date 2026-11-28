@@ -28,6 +28,25 @@ _PARALLEL_MIN_FILES = 8
 _INFLIGHT_PER_WORKER = 3
 
 
+def resolve_workers(requested: int | None = None) -> int:
+    """The effective parse-pool size, unified across every ingestor. Precedence: an explicit
+    `requested` (a command's --workers / config.workers) wins; else the `AURYN_PARSE_WORKERS`
+    environment variable -- the one knob `auryn ingest --workers` sets for the whole run, honoured by
+    EVERY pool-based parser (python, c#, pl/sql, oraschema); else `os.cpu_count()`. Always >= 1; a
+    non-positive or unparseable value in either source falls through to the next."""
+    if requested and requested > 0:
+        return requested
+    env = os.environ.get("AURYN_PARSE_WORKERS", "").strip()
+    if env:
+        try:
+            n = int(env)
+            if n > 0:
+                return n
+        except ValueError:
+            pass  # a stray value must never break an ingest; fall through to the CPU count
+    return os.cpu_count() or 1
+
+
 def make_process_pool(
     workers: int,
     *,
@@ -114,7 +133,7 @@ def parse_blobs_ordered(
 
     entries = list(entries)
     n = len(entries)
-    workers = workers or os.cpu_count() or 1
+    workers = resolve_workers(workers)  # honour AURYN_PARSE_WORKERS when the caller didn't specify
 
     if workers <= 1 or n <= min_parallel_files or progress.verbose_enabled():
         results: list | None = None if sink is not None else []

@@ -32,7 +32,7 @@ import click
 from auryn.core.base_ingestor import BaseIngestor
 from auryn.core.graph_client import GraphWriter, connect
 from auryn.core.graph_model import GraphEdge, GraphNode
-from auryn.core.parallel import make_process_pool
+from auryn.core.parallel import make_process_pool, resolve_workers
 from auryn.core.registry import register_ingestor
 from auryn.ingestors.oraschema import metadata, resolution
 from auryn.ingestors.oraschema.config import OBJECT_FILE_SUFFIXES, OraSchemaConfig
@@ -287,8 +287,7 @@ class OraSchemaIngestor(BaseIngestor):
         overhead never exceeds the parse it's meant to speed up."""
         if file_count < _PARALLEL_THRESHOLD:
             return 1
-        requested = self._config.workers or (os.cpu_count() or 1)
-        return max(1, requested)
+        return max(1, resolve_workers(self._config.workers))
 
     def _parse_inline(self, files: list[Path], root: Path):
         """Sequential best-effort parse -- one worker, no pool. Still honours the per-file cap."""

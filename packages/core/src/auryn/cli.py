@@ -1273,6 +1273,15 @@ _DEEP_OPTION = click.option(
          "thread (long-lived processes only -- a one-shot CLI would kill it; prefer async).",
 )
 
+# Unified parse-pool size for the whole run. Sets AURYN_PARSE_WORKERS (see core.parallel.resolve_workers),
+# which EVERY pool-based parser honours (Python, C#, PL/SQL, oraschema) -- so one knob caps parallelism
+# across all languages an ingest touches. Default (unset) = os.cpu_count(). Useful to spare CPU/RAM on a
+# shared box (the Jedi/Roslyn deep pass starts one worker per core).
+_WORKERS_OPTION = click.option(
+    "--workers", type=int, default=None,
+    help="Parse-pool size (all languages). Default: CPU count. Lower it to spare CPU/RAM on a shared box.",
+)
+
 
 def _effective_deep(deep: str, host: str | None) -> str:
     """`deep="async"` hands the pass to a detached daemon that reconnects to the CONFIGURED backend;
@@ -1290,17 +1299,22 @@ def _effective_deep(deep: str, host: str | None) -> str:
 @_filter_options
 @_hook_options
 @_DEEP_OPTION
+@_WORKERS_OPTION
 @click.pass_context
 def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution_name: str | None,
                trigger: str | None, include_dirs, exclude_dirs, include_suffixes, exclude_suffixes,
-               only_hooks, skip_hooks, deep: str) -> None:
+               only_hooks, skip_hooks, deep: str, workers: int | None) -> None:
     """Ingest every supported file under a local directory PATH, recursively (all
     nested subfolders) -- no git required."""
+    import os
+
     from auryn.core import ingest
     from auryn.core.app_config import load_config
     from auryn.core.project import default_graph_name, resolve_project_root
     from auryn.core.sync_lock import sync_lock
 
+    if workers is not None:
+        os.environ["AURYN_PARSE_WORKERS"] = str(workers)  # one knob for every language's parse pool
     _validate_hook_names(only_hooks + skip_hooks)
     graph = ctx.obj["graph_name"] or default_graph_name(resolve_project_root(path))
     writer = _ingest_writer(ctx, graph)
@@ -1337,11 +1351,12 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
 @_filter_options
 @_hook_options
 @_DEEP_OPTION
+@_WORKERS_OPTION
 @click.pass_context
 def ingest_repo(
     ctx: click.Context, repo_uri: str, ref: str | None, project_name: str | None, solution_name: str | None,
     trigger: str | None, include_dirs, exclude_dirs, include_suffixes, exclude_suffixes,
-    only_hooks, skip_hooks, deep: str
+    only_hooks, skip_hooks, deep: str, workers: int | None
 ) -> None:
     """Ingest a git repository REPO_URI at --ref. A REMOTE URI is `git clone`d into the current
     directory (like `git clone`), then that working copy is ingested — so save/commit triggers
@@ -1356,6 +1371,8 @@ def ingest_repo(
     from auryn.core.app_config import load_config
     from auryn.core.project import default_graph_name, graph_name_for_repo, resolve_project_root
 
+    if workers is not None:
+        os.environ["AURYN_PARSE_WORKERS"] = str(workers)  # one knob for every language's parse pool
     _validate_hook_names(only_hooks + skip_hooks)
     _filters = dict(include_dirs=include_dirs, exclude_dirs=exclude_dirs,
                     include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,

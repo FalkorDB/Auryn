@@ -32,6 +32,7 @@ from auryn.core.git_source import GitRepoCache, cache_home, repos_cache_dir
 from auryn.core.graph_client import GraphWriter
 from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.core.graph_sync import stream_apply
+from auryn.core.parallel import resolve_workers
 from auryn.core.registry import LanguageIngestResult
 from auryn.ingestors.plsql import resolution
 from auryn.ingestors.plsql.config import PLSQL_FILE_SUFFIXES, GitPLSQLProjectConfig, project_id
@@ -55,16 +56,6 @@ older shape would unpickle into the new class missing fields and blow up at use.
 version is part of the cache directory name, so a bump simply starts a fresh cache
 (old dirs are ignored, harmless) rather than crashing on a stale entry -- and
 _load_cached additionally treats any unreadable/foreign pickle as a miss."""
-
-
-def _parse_workers() -> int:
-    """Parse-pool size. Default: CPU count. `AURYN_PARSE_WORKERS` caps it -- lower it on a
-    memory-constrained box: each parse worker holds its own ANTLR prediction cache (recycled
-    every N files, but still per-worker), so peak parse memory scales with the worker count."""
-    env = os.environ.get("AURYN_PARSE_WORKERS", "").strip()
-    if env.isdigit() and int(env) > 0:
-        return int(env)
-    return os.cpu_count() or 1
 
 
 def _max_file_bytes() -> int:
@@ -125,7 +116,7 @@ def sync_at(
     if current_sha == target_sha:
         return SyncStats(commit_sha=target_sha, elapsed_seconds=time.monotonic() - started)
 
-    workers = config.workers or _parse_workers()
+    workers = resolve_workers(config.workers)
     parse_cache_dir = (cache_root or cache_home()) / f"parse_cache_plsql.v{_PARSE_CACHE_VERSION}"
 
     # Parse-and-cache every file (streaming: parsed files are cached and dropped, never
