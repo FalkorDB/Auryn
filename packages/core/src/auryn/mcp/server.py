@@ -358,12 +358,17 @@ def create_server(client: FalkorDB, graph_name: str, *, embed: str | None = None
     @tool(read_only, "read")
     def locate(name: str, kind: str | None = None, limit: int = 20, graph: str | None = None) -> dict[str, Any]:
         """Find symbols by name (case-insensitive substring), optionally filtered by `kind`
-        (a node label: "Function", "Method", "Class", "Module", "APIEndpoint", "Table", ...).
+        (a node label, any case: "Function", "Method", "Class", "Module", "APIEndpoint", "Table",
+        ...). Best match first: an exact name, then a name starting with `name`, then the rest.
         Returns each match's `id`, `label`, `name`, and properties -- feed a result's `id`
-        into the other tools. This is name search, not semantic/vector search. `graph` picks which
-        graph to search (default: the session default)."""
+        into the other tools. This is name search, not semantic/vector search. A `kind` the graph
+        doesn't have returns no results and a `hint` listing the kinds it does have. `graph`
+        picks which graph to search (default: the session default)."""
         g, gname = _read_graph(graph)
-        return {"graph": gname, "name": name, "kind": kind, "results": gq.search_nodes(g, kind, name, limit)}
+        out = {"graph": gname, "name": name, "kind": kind, "results": gq.search_nodes(g, kind, name, limit)}
+        if kind is not None and not out["results"] and gq.resolve_kind(g, kind) is None:
+            out["hint"] = f"no node kind {kind!r} in this graph -- its kinds: {', '.join(gq.node_kinds(g))}"
+        return out
 
     @tool(read_only, "read")
     def search_code(query: str, k: int = 10, mode: str = "hybrid", graph: str | None = None) -> dict[str, Any]:

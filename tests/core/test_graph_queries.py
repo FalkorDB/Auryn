@@ -386,6 +386,56 @@ class TestDetectCommunities:
         assert gq.detect_communities(graph)["communities"] == gq.detect_communities(graph)["communities"]
 
 
+class TestSearchNodesRanking:
+    """`locate`'s ranking. Regression: results came back in storage order, so `charge` was listed
+    after `charges` and `submit_charge`, and `limit=2` left the exact match out."""
+
+    def _seed(self, graph):
+        # stored in the order the Harbor graph holds them: the exact match last
+        graph.query(
+            """
+            CREATE (:Function {id: 'python://pay/charges', name: 'charges'}),
+                   (:Function {id: 'python://pay/submit_charge', name: 'submit_charge'}),
+                   (:Function {id: 'extern://python/pay::charge', name: 'charge', resolved: false}),
+                   (:Table {id: 'sql://db/CHARGE_LOG', name: 'CHARGE_LOG'}),
+                   (:Function {id: 'python://pay/charge', name: 'charge'})
+            """
+        )
+
+    def test_exact_then_prefix_then_substring(self, graph):
+        self._seed(graph)
+
+        ids = [n["id"] for n in gq.search_nodes(graph, None, "Charge", 10)]
+
+        assert ids == [
+            "python://pay/charge",          # exact, a real definition before its placeholder
+            "extern://python/pay::charge",
+            "python://pay/charges",         # prefix, shorter first
+            "sql://db/CHARGE_LOG",
+            "python://pay/submit_charge",   # substring
+        ]
+
+    def test_limit_keeps_the_exact_match(self, graph):
+        self._seed(graph)
+
+        assert [n["id"] for n in gq.search_nodes(graph, None, "charge", 1)] == ["python://pay/charge"]
+
+    def test_kind_matches_in_any_case(self, graph):
+        self._seed(graph)
+
+        assert [n["id"] for n in gq.search_nodes(graph, "table", "charge", 10)] == ["sql://db/CHARGE_LOG"]
+
+    @pytest.mark.parametrize("kind", ["Entity", "Embeddable", "Trigger", "Nope"])
+    def test_system_labels_and_unknown_kinds_find_nothing(self, graph, kind):
+        self._seed(graph)
+        graph.query("MATCH (n:Function {id: 'python://pay/charge'}) SET n:Embeddable")
+        graph.create_node_range_index("Trigger", "id")  # a label with an index but no nodes
+
+        assert gq.search_nodes(graph, kind, "charge", 10) == []
+        assert gq.resolve_kind(graph, kind) is None
+        assert gq.node_kinds(graph) == ["Function", "Table"]
+
+
 def test_returned_entities_never_include_embedding(graph):
     """The `embedding` vector is stored on nodes for semantic search but must never ride along
     on a returned entity (any serialization path: lean list results + full/raw-cypher nodes)."""
