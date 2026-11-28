@@ -23,7 +23,7 @@ from pathlib import Path
 
 from auryn.core import progress
 from auryn.core.git_source import DEFAULT_CACHE_ROOT, GitRepoCache, cache_home, repos_cache_dir
-from auryn.core.parallel import make_process_pool
+from auryn.core.parallel import make_process_pool, resolve_workers
 from auryn.core.graph_client import GraphWriter
 from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.core.graph_sync import stream_apply
@@ -268,7 +268,7 @@ def _treesitter_sync_at(
     proj_id: str,
     started: float,
 ) -> SyncStats:
-    workers = config.workers or os.cpu_count() or 1
+    workers = resolve_workers(config.workers)
     parse_cache_dir = (cache_root or cache_home()) / f"parse_cache_csharp.v{_PARSE_CACHE_VERSION}"
     raw_files, files_parsed, files_cached = _build_raw_files(repo, target_sha, parse_cache_dir, workers)
 

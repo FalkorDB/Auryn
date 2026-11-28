@@ -28,7 +28,7 @@ from pathlib import Path
 
 from auryn.core import progress
 from auryn.core.git_source import GitRepoCache, repos_cache_dir
-from auryn.core.parallel import make_process_pool
+from auryn.core.parallel import make_process_pool, resolve_workers
 from auryn.core.graph_client import GraphWriter
 from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.core.graph_sync import stream_apply
@@ -287,7 +287,7 @@ def _ast_sync_at(writer, config, source, target_sha, ref, proj_id, started) -> S
         return _apply(writer, proj_id, make_target, target_sha, started,
                       files_parsed=len(entries), broken=plan.broken)
 
-    workers = config.workers or os.cpu_count() or 1
+    workers = resolve_workers(config.workers)
     with phase("parse"):
         modules = _parse_modules(entries, source, pkg_dirs, workers)
     broken = sorted(m.path for m in modules if not m.parse_ok)
