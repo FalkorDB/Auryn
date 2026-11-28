@@ -199,7 +199,9 @@ def wire_trigger(
 
     if trigger == "commit":
         if hooks.is_git_repo(local_dir):
-            hooks.install(local_dir, [sys.executable, "-m", "auryn", "sync", local_dir])
+            # `.`, not `local_dir`: linked worktrees share one hooks directory, so the hook resyncs
+            # the work tree git runs it in, if it is registered (see commit_resync_targets).
+            hooks.install(local_dir, [sys.executable, "-m", "auryn", "sync", "--if-registered", "."])
             status["hooks_installed"] = True
         else:
             status["hooks_installed"] = False
@@ -209,3 +211,60 @@ def wire_trigger(
 
         status["watcher_running"] = bool(watcher.ensure_watcher())
     return status
+
+
+def commit_resync_targets(work_tree) -> list[str]:
+    """The registered repos a git hook running in `work_tree` resyncs: those with the `commit`
+    trigger that are `work_tree` itself or a directory inside it, but not inside a work tree nested
+    in it (a linked worktree placed there, a submodule), which commits through hooks of its own.
+
+    Linked worktrees of one repo share its hooks directory, so the hook can't name the repo it
+    resyncs: whichever worktree was ingested last would own it, and a commit in any other would
+    resync that one. Git runs a hook from the top of the committing work tree, so the hook passes
+    `.` and this picks what is registered there -- nothing for a worktree nobody ingested (`git
+    worktree add` alone runs post-checkout in the new one). No git call: git hands its hooks a
+    GIT_DIR, which would answer for the committing repo whatever directory it was asked about."""
+    from pathlib import Path
+
+    from auryn.core.app_config import load_config
+
+    cfg = load_config()
+    top = Path(work_tree).resolve()
+    return [r.local_dir for r in cfg.repos
+            if (r.trigger or cfg.resync_trigger) == "commit"
+            and _in_work_tree(Path(r.local_dir).resolve(), top)]
+
+
+def _in_work_tree(path, top) -> bool:
+    """Whether `path` is `top` or below it with no `.git` of its own on the way down."""
+    while path != top:
+        if top not in path.parents or (path / ".git").exists():
+            return False
+        path = path.parent
+    return True
+
+
+def unwire_commit_hooks(local_dir) -> bool:
+    """Take the resync block out of `local_dir`'s git hooks, unless another repo registered with
+    the `commit` trigger runs the same hooks -- a linked worktree of the same repo, a directory
+    registered inside the same work tree -- and still needs it. Returns whether it came out."""
+    import subprocess
+
+    from auryn.core import hooks
+    from auryn.core.app_config import load_config
+
+    try:
+        shared = hooks.hooks_dir(local_dir).resolve()
+    except (OSError, subprocess.CalledProcessError):  # gone, or no longer a git repo: nothing to take out
+        return False
+    cfg = load_config()
+    for r in cfg.repos:
+        if r.local_dir == str(local_dir) or (r.trigger or cfg.resync_trigger) != "commit":
+            continue
+        try:
+            if hooks.hooks_dir(r.local_dir).resolve() == shared:
+                return False
+        except (OSError, subprocess.CalledProcessError):
+            continue
+    hooks.uninstall(local_dir)
+    return True

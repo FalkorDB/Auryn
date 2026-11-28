@@ -160,7 +160,9 @@ For a one-off run, use `ingest`'s `--skip-hook`/`--only-hook` instead of persist
 Resync a repo's graph **incrementally** — the target of the commit hook / save watcher (ADR 0002).
 Reads the git diff + graph blast radius; re-parses only what changed. Post [hooks](#hooks) run at
 the tail (honouring install-wide/per-repo disables). `--deep off|inline|background`
-(default `off` = the fast freshness path) + connection options.
+(default `off` = the fast freshness path) + connection options. `--if-registered` resyncs only
+what is registered with the `commit` trigger at the path or inside its work tree, and nothing
+otherwise — the form the git hooks run, so a linked worktree nobody ingested gets no graph.
 
 ### `git-info sync [<path>]`
 For a repository verified as **public** on GitHub, collect all reachable commits, contributors, local

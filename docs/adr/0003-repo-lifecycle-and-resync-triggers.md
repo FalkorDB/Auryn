@@ -83,8 +83,11 @@ matching mechanism for that repo (per-ingest `--trigger` override allowed):
 
 - **`commit` → git hooks (no daemon).** Install `post-commit`/`post-checkout`/`post-merge`/
   `post-rewrite` in `.git/hooks/`, chained inside guard markers (never overwrite; removed on
-  `forget`/`uninstall`). Each runs `auryn sync <repo>` → incremental resync
-  (`ingest_repository(ref=HEAD)`), detached so a commit isn't slowed.
+  `forget`/`uninstall`). Each runs `auryn sync --if-registered .` → incremental resync
+  (`ingest_repository(ref=HEAD)`), detached so a commit isn't slowed. Linked worktrees of a repo
+  share its hooks, so the hook resyncs the worktree git runs it in (`.` is its top level), and
+  only what is registered there with this trigger — a worktree nobody ingested gets no graph.
+  `forget` leaves the hooks in place while another registered worktree still runs them.
 - **`save` → one watcher daemon** (managed under `~/.auryn/run/`, like the FalkorDB
   daemon; `watchdog`, pulled in only when `save` is chosen). Watches every save-triggered repo's
   working dir (excluding `.git`/vendored/build dirs, filtered to ingested suffixes), debounces
