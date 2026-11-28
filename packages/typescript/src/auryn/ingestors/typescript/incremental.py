@@ -53,17 +53,23 @@ def _ts_project_node(project_name, repo_uri, proj_id, target_sha, ref) -> GraphN
 
 def _ts_referenced_names(rf) -> set[str]:
     """A generous superset of the simple names a file references cross-file: call
-    names/receivers (+ `constructor` for `new X()`), heritage names, and every type ref.
-    Over-collecting is safe; the equivalence oracle catches any under-collection."""
+    names/receivers (+ `constructor` for `new X()`, `render` for a JSX element), heritage names,
+    module-scope calls, and every type ref. Over-collecting is safe; the equivalence oracle catches
+    any under-collection."""
     names: set[str] = set()
 
-    def callable_(c) -> None:
-        for call in c.calls:
+    def calls_(calls) -> None:
+        for call in calls:
             names.add(call.name)
             if call.receiver:
                 names.add(call.receiver)
             if getattr(call, "is_new", False):
                 names.add("constructor")
+            if getattr(call, "is_jsx", False):
+                names.add("render")
+
+    def callable_(c) -> None:
+        calls_(c.calls)
         names.update(c.return_type_refs)
         for p in c.params:
             names.update(p.type_refs)
@@ -85,6 +91,7 @@ def _ts_referenced_names(rf) -> set[str]:
             callable_(m)
     for ta in rf.type_aliases:
         names.update(ta.type_refs)
+    calls_(getattr(rf, "module_calls", []))
     return names
 
 

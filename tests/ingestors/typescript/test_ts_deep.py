@@ -310,3 +310,32 @@ def test_deep_inline_resolves_calls_end_to_end(graph, tmp_path):
         "MATCH (:Function {name:'getHelper'})-[:CALLS]->(:Function {name:'helper'}) RETURN count(*)"
     ).result_set
     assert val == [[0]]
+
+
+@pytest.mark.skipif(not _scip_typescript_available(),
+                    reason="requires a working scip-typescript (npm i -g @sourcegraph/scip-typescript)")
+def test_deep_inline_resolves_jsx_components_end_to_end(graph, tmp_path):
+    # Two `Card` components make the name pass ambiguous (no edge); the compiler knows which one the page
+    # imported, so the deep pass emits exactly that edge. The module-scope caller (no enclosing callable,
+    # not a deep callable) keeps its fast edge through the overlay.
+    proj = tmp_path / "tsxprobe"
+    (proj / "src" / "admin").mkdir(parents=True)
+    (proj / "tsconfig.json").write_text('{"compilerOptions": {"jsx": "preserve", "strict": false}, "include": ["src"]}')
+    (proj / "src" / "Card.tsx").write_text("export function Card() {\n  return null;\n}\n")
+    (proj / "src" / "admin" / "Card.tsx").write_text("export function Card() {\n  return null;\n}\n")
+    (proj / "src" / "Page.tsx").write_text(
+        "import { Card } from './Card';\n\nexport function Page() {\n  return <section><Card /></section>;\n}\n"
+    )
+    (proj / "src" / "main.tsx").write_text("import { Page } from './Page';\n\nmount(<Page />);\n")
+    report = ingest.ingest_directory(GraphWriter(graph), str(proj), project_name="tsx", deep="inline")
+
+    ts = next(r for r in report.languages if r.language == "typescript")
+    assert ts.deep_status == "inline" and _depth(graph, "tsx") == "deep"
+    hits = graph.query(
+        "MATCH (:Function {name:'Page'})-[c:CALLS]->(t:Function {name:'Card'}) RETURN t.id, c.resolution"
+    ).result_set
+    assert [(tid.endswith("/module/src/Card.tsx.func.Card()"), res) for tid, res in hits] == [(True, "resolved")]
+    mod = graph.query(
+        "MATCH (:Module {path:'src/main.tsx'})-[c:CALLS]->(:Function {name:'Page'}) RETURN c.resolution"
+    ).result_set
+    assert mod == [["name"]]

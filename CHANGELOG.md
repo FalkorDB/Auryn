@@ -6,6 +6,15 @@ All notable changes to Auryn are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **TypeScript/JavaScript: React component usage and module-scope calls are `CALLS` edges.** A JSX
+  element (`<Card />`, `<Tabs.Panel>`) is recorded as a call site of the component -- a function
+  component, or a class component's `render` -- so `callers`/`impact` on a component are no longer
+  empty. Code with no enclosing callable (test `describe`/`it` callbacks, `createRoot(..).render(<App />)`,
+  route tables, `export default memo(Page)`) calls from its `Module`, as Python's top-level code
+  already does. Member tags and ambiguous names are left to the deep pass, which resolves JSX
+  occurrences like any other call. The TS parse cache moves to v5 (one-time reparse).
+
 ### Changed
 - Relicensed the project from the Server Side Public License (SSPL-1.0) to the
   **MIT License**. MIT covers Auryn's own code in the repository and all subsequent

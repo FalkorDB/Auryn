@@ -72,7 +72,7 @@ without re-reading the file.
 |---|---|---|
 | `HAS_*` | container → contained | Structural backbone: `HAS_PACKAGE`, `HAS_TYPE`, `HAS_METHOD`, `HAS_PARAMETER`, `HAS_FIELD`, … |
 | `DEFINED_IN` | type → `File` | Provenance of where a type is declared. |
-| **`CALLS`** | callable → callable | **Always carries a `resolution` property** (see below). |
+| **`CALLS`** | callable → callable | **Always carries a `resolution` property** (see below). Module-scope code with no enclosing callable (Python top-level statements, TS/JS top-level statements and test callbacks) calls from its `Module`. A TS/JS JSX element is a call of its component. |
 | **`EXTENDS`** | class→class, interface→interface | Inheritance. |
 | **`IMPLEMENTS`** | class → interface | Interface conformance. |
 | **`DEPENDS_ON`** | member → type | A type reference (parameter/return/field type, construction site). |
