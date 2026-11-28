@@ -130,6 +130,12 @@ def request_deepen(graph_name: str, local_dir: str, project_name: str | None = N
         payload["project_name"] = project_name
     if embed:
         payload["embed"] = embed
+    # Carry the producer's parse-pool size (the --workers it set via AURYN_PARSE_WORKERS) in the
+    # request, so a long-lived daemon that was started under a different env still replays THIS
+    # request at the requested size instead of its own stale default (unified --workers, #857).
+    workers = os.environ.get("AURYN_PARSE_WORKERS", "").strip()
+    if workers:
+        payload["workers"] = workers
     tmp.write_text(json.dumps(payload))
     os.replace(tmp, target)  # atomic publish: the daemon never reads a half-written request
     ensure_deepen_daemon()
@@ -271,6 +277,7 @@ def _process_request(req: Path, client, attempts: dict[str, int]):
         local_dir = data["local_dir"]
         project_name = data.get("project_name")
         embed = data.get("embed")  # the producer's embed mode (None -> the ingest's default)
+        workers = data.get("workers")  # the producer's --workers (None -> the daemon's own default)
         if not isinstance(graph_name, str) or not graph_name or not isinstance(local_dir, str) or not local_dir:
             raise ValueError("request missing graph or local_dir")
     except (OSError, ValueError, KeyError, TypeError):
@@ -283,7 +290,7 @@ def _process_request(req: Path, client, attempts: dict[str, int]):
     key = req.name  # retry accounting per (graph, project) request, not per graph (repos share graphs)
     try:
         client = client or _connect()
-        _deepen(client, graph_name, local_dir, project_name, embed)
+        _deepen(client, graph_name, local_dir, project_name, embed, workers)
         inflight.unlink(missing_ok=True)
         attempts.pop(key, None)
     except Exception:
@@ -307,7 +314,8 @@ def _process_request(req: Path, client, attempts: dict[str, int]):
     return client
 
 
-def _deepen(client, graph_name: str, local_dir: str, project_name: str | None, embed: str | None = None) -> None:
+def _deepen(client, graph_name: str, local_dir: str, project_name: str | None, embed: str | None = None,
+            workers: str | None = None) -> None:
     """Run the deep pass for one repo by re-running its ingest with deep="inline" against the already
     fast-built graph -- the fast phase short-circuits (same sha + depth=fast), so only the deep upgrade
     does work. Held under the per-repo `sync_lock` (as the CLI/MCP/hook syncs are), so a concurrent
@@ -333,12 +341,25 @@ def _deepen(client, graph_name: str, local_dir: str, project_name: str | None, e
         logger.warning("Deepen skipped for %r/%r: no matching project on the configured backend "
                        "(stale request, deleted graph, or a non-configured backend)", graph_name, project_name)
         return
-    with sync_lock(resolve_project_root(local_dir), queue_one=False):
-        # Replay with the PRODUCER's embed mode (carried in the request): honors an original embed="off",
-        # yet still refreshes vectors if the working tree changed between the producer's embed and now
-        # (the replay's incremental resync picks up the delta, and its embed tail embeds the new nodes).
-        # Embedding is idempotent, so when nothing changed this is a cheap scan that embeds nothing.
-        report = ingest_directory(writer, local_dir, project_name=project_name, deep="inline", embed=embed)
+    # Apply the PRODUCER's parse-pool size for THIS replay only, then restore -- so one request's
+    # --workers can't leak into the next on this long-lived daemon (whose own env may differ).
+    _prev_workers = os.environ.get("AURYN_PARSE_WORKERS")
+    if workers:
+        os.environ["AURYN_PARSE_WORKERS"] = str(workers)
+    try:
+        with sync_lock(resolve_project_root(local_dir), queue_one=False):
+            # Replay with the PRODUCER's embed mode (carried in the request): honors an original
+            # embed="off", yet still refreshes vectors if the working tree changed between the producer's
+            # embed and now (the replay's incremental resync picks up the delta, and its embed tail
+            # embeds the new nodes). Embedding is idempotent, so when nothing changed this is a cheap
+            # scan that embeds nothing.
+            report = ingest_directory(writer, local_dir, project_name=project_name, deep="inline", embed=embed)
+    finally:
+        if workers:
+            if _prev_workers is None:
+                os.environ.pop("AURYN_PARSE_WORKERS", None)
+            else:
+                os.environ["AURYN_PARSE_WORKERS"] = _prev_workers
     errored = [r.language for r in report.languages if r.deep_status == "error"]
     if errored:  # surface as a failure so _process_request's bounded retry kicks in
         raise RuntimeError(f"deep pass errored for {graph_name!r}: {', '.join(errored)}")

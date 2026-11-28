@@ -12,8 +12,14 @@ from auryn.core.parallel import resolve_workers
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
-    monkeypatch.delenv("AURYN_PARSE_WORKERS", raising=False)
+def _clean_env():
+    # Save/restore directly (not via monkeypatch): the CLI test mutates os.environ itself, which
+    # monkeypatch's teardown wouldn't undo -- so clean before AND after to isolate every test.
+    prev = os.environ.pop("AURYN_PARSE_WORKERS", None)
+    yield
+    os.environ.pop("AURYN_PARSE_WORKERS", None)
+    if prev is not None:
+        os.environ["AURYN_PARSE_WORKERS"] = prev
 
 
 def test_explicit_request_wins_over_env_and_cpu(monkeypatch):

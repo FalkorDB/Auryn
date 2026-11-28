@@ -25,7 +25,7 @@ import click
 from auryn.core.base_ingestor import BaseIngestor
 from auryn.core.graph_client import GraphWriter, connect
 from auryn.core.graph_model import GraphEdge, GraphNode
-from auryn.core.parallel import make_process_pool
+from auryn.core.parallel import make_process_pool, resolve_workers
 from auryn.core.registry import register_ingestor
 from auryn.ingestors.plsql import diagnostics, resolution
 from auryn.ingestors.plsql.config import PLSQL_FILE_SUFFIXES, PLSQLFileConfig, project_id
@@ -339,7 +339,7 @@ class PLSQLFileIngestor(BaseIngestor):
         return sorted(resolved)
 
     def _parse_files(self, files: list[Path], root: Path) -> list[RawPlsqlFile]:
-        workers = self._config.workers or os.cpu_count() or 1
+        workers = resolve_workers(self._config.workers)
         cap = self._config.max_parse_seconds
         paths = [str(f) for f in files]
         total = len(paths)
@@ -437,7 +437,7 @@ class PLSQLFileIngestor(BaseIngestor):
         then the first failure *in file order* is reported, preserving determinism); `--workers 1`
         forces the sequential path with its per-file progress line."""
         diagnostics_dir = self._config.diagnostics_dir or str(Path.cwd() / "auryn-diagnostics")
-        workers = self._config.workers or os.cpu_count() or 1
+        workers = resolve_workers(self._config.workers)
         logger.warning(
             "STRICT mode: halt on the first decode/parse failure; diagnostics -> %s (%d worker(s))",
             diagnostics_dir, workers,

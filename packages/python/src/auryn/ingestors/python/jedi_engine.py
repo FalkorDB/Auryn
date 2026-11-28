@@ -18,7 +18,7 @@ from pathlib import Path
 
 import jedi
 
-from auryn.core.parallel import make_process_pool
+from auryn.core.parallel import make_process_pool, resolve_workers
 from auryn.ingestors.python.raw_model import RawFunction, RawModule
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,7 @@ def _batches(items: list, size: int) -> list[list]:
 def build_precomputed_oracle(source_dir: str, modules: list[RawModule], workers: int | None = None) -> PrecomputedOracle:
     """Fan per-file Jedi inference across a process pool, then return a lookup-only oracle.
     `workers=1` (or a single file) runs inline, skipping pool overhead."""
-    workers = workers or os.cpu_count() or 1
+    workers = resolve_workers(workers)
     per_file = [(m.path, *_collect_queries(m)) for m in modules]
 
     results: list = []

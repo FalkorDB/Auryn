@@ -22,7 +22,7 @@ import click
 from auryn.core.base_ingestor import BaseIngestor
 from auryn.core.graph_client import GraphWriter, connect
 from auryn.core.graph_model import GraphEdge, GraphNode
-from auryn.core.parallel import make_process_pool
+from auryn.core.parallel import make_process_pool, resolve_workers
 from auryn.core.registry import register_ingestor
 from auryn.ingestors.csharp import resolution
 from auryn.ingestors.csharp.config import CSharpSourceConfig, project_id
@@ -127,7 +127,7 @@ class CSharpIngestor(BaseIngestor):
         )
 
     def _parse_files(self, files: list[Path], root: Path) -> list[RawFile]:
-        workers = self._config.workers or os.cpu_count() or 1
+        workers = resolve_workers(self._config.workers)
         paths = [str(f) for f in files]
         if workers == 1 or len(paths) <= 1:
             raw_files = [parse_file(p) for p in paths]
