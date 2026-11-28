@@ -40,7 +40,8 @@ class _FakeWriter:
         if "n.name IN $names" in cypher:
             names = set((params or {}).get("names", []))
             if "coalesce(n.resolved, true) = false" in cypher:  # direction B: pre-existing placeholders by name
-                return _Result([[r[0], r[1]] for r in self._rows if r[5] in names and r[2] is False])
+                # -> (linkage_key, id, origin), placeholders only
+                return _Result([[r[0], r[1], r[4]] for r in self._rows if r[5] in names and r[2] is False])
             # direction A: graph-wide, name-indexed canonical candidates (-> name, linkage_key, id)
             return _Result([[r[5], r[0], r[1]] for r in self._rows
                             if r[5] in names and r[2] is not False and r[3] is not False])
@@ -264,3 +265,33 @@ def test_definition_first_resolves_preexisting_placeholder_on_a_real_graph(graph
     assert graph.query(
         "MATCH (:Module {id:'caller'})-[:IMPORTS]->(:Module {id:'real_mod'}) RETURN count(*)"
     ).result_set == [[1]]
+
+
+def test_definition_first_does_not_resolve_a_terminal_origin_placeholder():
+    # #866 review: a stdlib/builtin placeholder is intentionally unresolved -- direction B must NOT
+    # suffix-match `extern://python/json::dumps` (stdlib) to a project def `vendor.json::dumps`.
+    real = "extern://python/vendor.json::dumps"               # a project definition, this ingest
+    ph = "extern://python/json::dumps"                        # pre-existing STDLIB placeholder
+    writer = _FakeWriter([
+        (real, "py://a/dumps", None, None, "local", "dumps"),
+        (ph, ph, False, None, "stdlib", "dumps"),             # terminal origin -> never absorbed
+    ])
+    stats = reconcile_linkages(writer, real_linkages=[real], placeholder_ids=[])
+    assert stats.absorbed == 0 and stats.resolved_near_misses == []
+
+
+def test_definition_first_exact_key_ambiguity_blocks_suffix_resolution():
+    # #866 review: if the pre-existing placeholder's OWN key already has TWO canonical defs (an
+    # ambiguous exact-key group the main loop leaves unmerged), a later suffix def must NOT silently
+    # become the sole target -- the exact-key clash wins and it stays unmerged.
+    suffix_def = "extern://python/plugins.backend.core::charge"  # def ingested this pass (a suffix of ph)
+    ph = "extern://python/backend.core::charge"
+    writer = _FakeWriter([
+        (suffix_def, "py://s/charge", None, None, "local", "charge"),
+        (ph, "py://x/charge", None, None, "local", "charge"),   # exact-key canonical #1
+        (ph, "py://y/charge", None, None, "local", "charge"),   # exact-key canonical #2 -> ambiguous
+        (ph, ph, False, None, "external", "charge"),            # the placeholder
+    ])
+    stats = reconcile_linkages(writer, real_linkages=[suffix_def], placeholder_ids=[])
+    assert stats.absorbed == 0
+    assert ph in stats.ambiguous and stats.resolved_near_misses == []

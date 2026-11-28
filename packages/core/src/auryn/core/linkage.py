@@ -228,21 +228,50 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
     def_names = sorted({p[2] for link in canonical_links
                         if (p := _parse_linkage(link)) is not None and p[0] in _FILE_PATH_KEYED_LANGS})
     canonical_set = set(canonical_links)
+    discovered: dict[str, str] = {}  # placeholder linkage_key -> one placeholder node id, by matched def name
     for label in present if def_names else ():
         rows = writer.ro_query(
             f"MATCH (n:{label}) WHERE n.name IN $names AND n.linkage_key IS NOT NULL "
             "AND coalesce(n.resolved, true) = false "  # placeholders only (a real def is never a B-candidate)
-            "RETURN n.linkage_key, n.id",
+            "RETURN n.linkage_key, n.id, n.origin",
             {"names": def_names},
         ).result_set
-        for link, nid in rows:
+        for link, nid, origin in rows:
             link, nid = str(link), str(nid)
             if link in this_ingest or link in canonical_set:
-                continue  # already handled by direction A or absorbed above
-            if all(nid != eid for eid, *_ in by_link.get(link, [])):
-                by_link.setdefault(link, []).append((nid, False, None, "external"))  # make it absorbable below
-            if link not in attempt:
-                attempt.append(link)
+                continue  # already handled by direction A / the main absorb loop
+            if str(origin or "external") in _TERMINAL_ORIGINS:
+                continue  # a stdlib/builtin/libc placeholder is intentionally unresolved -- never suffix-match it
+            discovered.setdefault(link, nid)
+
+    # Before suffix-resolving a discovered placeholder, apply the main loop's EXACT-key rules to its OWN
+    # key (fetch each one's full group): an exact canonical takes it (even across separate ingests that
+    # never reconciled), 2+ exact canonicals are a genuine clash left unmerged, and only a key with NO
+    # exact canonical falls through to the suffix match below -- so a suffix def never silently wins over
+    # an ambiguous exact-key group (a `resolved:false` placeholder whose own key already has two defs).
+    if discovered:
+        groups: dict[str, list[tuple[str, object, object, object]]] = defaultdict(list)
+        for label in present:
+            rows = writer.ro_query(
+                f"MATCH (n:{label}) WHERE n.linkage_key IN $ls "
+                "RETURN n.linkage_key, n.id, n.resolved, n.defined, n.origin",
+                {"ls": list(discovered)},
+            ).result_set
+            for link, nid, resolved, defined, origin in rows:
+                groups[str(link)].append((str(nid), resolved, defined, origin))
+        for link, nid in discovered.items():
+            cands = groups.get(link) or [(nid, False, None, "external")]
+            by_link.setdefault(link, cands)  # give the suffix/absorb step this key's nodes
+            canonical = [cid for cid, r, d, _ in cands if r is not False and d is not False]
+            if len(canonical) == 1:
+                for cid, r, d, _ in cands:  # exact match two separate ingests never reconciled -> fold it in
+                    if (r is False or d is False) and cid != canonical[0]:
+                        _absorb(writer, absorbable_id=cid, canonical_id=canonical[0])
+                        stats.absorbed += 1
+            elif len(canonical) >= 2:
+                stats.ambiguous.append(link)  # exact-key clash -> never suffix-resolve
+            elif link not in attempt:
+                attempt.append(link)  # no exact canonical -> try the suffix match below
 
     if attempt:
         ph_parsed = [(ph, _parse_linkage(ph)) for ph in attempt]
