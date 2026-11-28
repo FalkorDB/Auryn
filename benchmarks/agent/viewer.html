@@ -208,8 +208,8 @@ function render(){
   const meta = document.getElementById("runmeta");
   const first = RUNS[0] || {};
   meta.innerHTML = RUNS.length ? [
-    `<span>repo <b>${(first.repo||first.graph||"—")}</b></span>`,
-    `<span>model <b>${(window.__META__?.model)||"—"}</b></span>`,
+    `<span>repo <b>${esc(first.repo||first.graph||"—")}</b></span>`,
+    `<span>model <b>${esc((window.__META__?.model)||"—")}</b></span>`,
     `<span>runs <b>${RUNS.length}</b></span>`,
   ].join("") : "";
 
@@ -244,7 +244,7 @@ function render(){
   wrap.innerHTML = [...groups.entries()].map(([tid, arms])=>{
     const q = arms.A||arms.B||{};
     return `<div class="task">
-      <div class="q"><div class="cap">${q.capability||tid}</div><p class="qt">${esc(q.question||tid)}</p></div>
+      <div class="q"><div class="cap">${esc(q.capability||tid)}</div><p class="qt">${esc(q.question||tid)}</p></div>
       <div class="arms">${["A","B"].map(a=>armCell(arms[a],a,tid)).join("")}</div>
     </div>`;
   }).join("");
@@ -279,10 +279,10 @@ function openTrace(idx){
   const isB = r.arm==="B";
   document.getElementById("dhead").innerHTML =
     `<span class="name ${r.arm.toLowerCase()}" style="font-family:var(--mono);font-weight:600;color:var(--arm-${r.arm.toLowerCase()})">Arm ${r.arm} · ${isB?"code graph":"no graph"}</span>
-     <span style="font-family:var(--mono);font-size:12px;color:var(--muted)">${r.task_id}</span>
+     <span style="font-family:var(--mono);font-size:12px;color:var(--muted)">${esc(r.task_id)}</span>
      <button class="x" onclick="closeTrace()">✕</button>`;
   const stat = (k,v)=>`<div><div class="kk">${k}</div><div class="vv">${v}</div></div>`;
-  const facts = (r.grade?.facts||[]).map(f=>`<div class="fact"><span class="vpill ${f.verdict}">${f.verdict||"?"}</span><div><div class="ft">${esc(f.fact||"")}</div>${f.quote?`<div class="quote">“${esc(f.quote)}”</div>`:""}</div></div>`).join("");
+  const facts = (r.grade?.facts||[]).map(f=>`<div class="fact"><span class="vpill ${esc(f.verdict||"")}">${esc(f.verdict||"?")}</span><div><div class="ft">${esc(f.fact||"")}</div>${f.quote?`<div class="quote">“${esc(f.quote)}”</div>`:""}</div></div>`).join("");
   const tl = (r.timeline||[]).map(ev=>{
     if(ev.kind==="thinking") return `<div class="ev thinking"><div class="lbl">thinking</div><div class="body">${esc(trunc(ev.text,900))}</div></div>`;
     if(ev.kind==="text") return ev.text&&ev.text.trim()? `<div class="ev text"><div class="lbl">response</div><div class="body">${esc(trunc(ev.text,1400))}</div></div>`:"";
@@ -306,9 +306,9 @@ document.getElementById("scrim").addEventListener("click", closeTrace);
 document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeTrace(); });
 
 function isFileTool(n){ return ["Read","Grep","Glob","Bash","LS"].includes(n); }
-function shortTool(n){ return (n||"").replace("mcp__auryn__","auryn.").replace("mcp__","").replace(/^ToolSearch$/,"ToolSearch"); }
+function shortTool(n){ return (n||"").replace("mcp__auryn__","auryn.").replace("mcp__",""); }
 function trunc(s,n){ s=String(s==null?"":s); return s.length>n? s.slice(0,n)+" …":s; }
-function esc(s){ return String(s==null?"":s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 // drag-drop to load another results set
 const drop = document.getElementById("drop");
