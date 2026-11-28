@@ -1,0 +1,19 @@
+{
+  "name": "auryn",
+  "owner": {
+    "name": "FalkorDB",
+    "url": "https://www.falkordb.com"
+  },
+  "metadata": {
+    "description": "Auryn, the code graph for coding agents, packaged as a Claude Code plugin."
+  },
+  "plugins": [
+    {
+      "name": "auryn",
+      "source": "./claude-plugin",
+      "description": "Code graph for Claude Code: where is X, who calls it, what breaks if it changes, in one tool call.",
+      "category": "development",
+      "homepage": "https://github.com/FalkorDB/Auryn"
+    }
+  ]
+}
