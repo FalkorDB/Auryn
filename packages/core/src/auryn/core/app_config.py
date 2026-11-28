@@ -139,8 +139,8 @@ def load_config() -> Config:
     git_info_enabled = isinstance(gi, dict) and gi.get("enabled") is True
     try:
         schema_version = int(data.get("schema_version", 0))
-    except (TypeError, ValueError):
-        schema_version = 0  # a stray value must never break an ingest
+    except (TypeError, ValueError, OverflowError):
+        schema_version = 0  # a stray value (text, inf, …) must never break an ingest
     return Config(backend=backend, agents=agents, resync_trigger=trigger, repos=repos,
                   disabled_hooks=disabled_hooks, embed_mode=embed_mode,
                   git_info_enabled=git_info_enabled, schema_version=schema_version)

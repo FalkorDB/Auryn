@@ -20,17 +20,22 @@ def harness(monkeypatch):
     local_migrate ran. `run(cfg)` returns (migrated, calls, bumped_to)."""
     state = {"cfg": None, "bumped": [], "migrated_repos": None}
 
+    import contextlib
+
     monkeypatch.setattr(schema_migration, "load_config", lambda: state["cfg"])
     monkeypatch.setattr(schema_migration, "set_schema_version", lambda v: state["bumped"].append(v))
     monkeypatch.setattr(schema_migration, "GRAPH_SCHEMA_VERSION", 2)  # pretend current is v2
+    monkeypatch.setattr(schema_migration, "_migration_lock", contextlib.nullcontext)  # no real flock in unit tests
+    monkeypatch.setattr(schema_migration, "_remote_warned", False)
     # reset the module-level re-entry guard between tests
     schema_migration._state = type(schema_migration._state)()
 
-    def run(cfg):
+    def run(cfg, migrate_ok=True):
         state["cfg"] = cfg
 
         def local_migrate(repos):
             state["migrated_repos"] = list(repos)
+            return migrate_ok  # True iff every repo rebuilt cleanly
 
         migrated = schema_migration.migrate_schema_if_stale(is_local=cfg.backend.mode == "local",
                                                             local_migrate=local_migrate, current_version=2)
@@ -65,8 +70,16 @@ def test_remote_stale_is_warned_not_destroyed(harness, caplog):
         migrated, st = harness(_cfg(version=0, mode="remote", repos=(_REPO,)))
     assert migrated is False
     assert st["migrated_repos"] is None           # a shared DB is NEVER auto-destroyed
-    assert st["bumped"] == [2]                     # warned once, then bumped so it doesn't nag
+    assert st["bumped"] == []                      # must NOT advance the local-graph stamp from a remote cmd
     assert any("REMOTE/shared" in r.message or "remote" in r.message.lower() for r in caplog.records)
+
+
+def test_local_stale_rebuild_failure_does_not_advance_version(harness):
+    # If a rebuild did not fully succeed, the stamp must stay put so the migration retries.
+    migrated, st = harness(_cfg(version=1, mode="local", repos=(_REPO,)), migrate_ok=False)
+    assert migrated is False
+    assert st["migrated_repos"] == [_REPO]  # it attempted...
+    assert st["bumped"] == []               # ...but did NOT advance the version
 
 
 def test_local_stale_no_repos_just_adopts_version(harness):
@@ -121,12 +134,22 @@ def test_cli_local_migrate_deletes_graphs_and_reingests(monkeypatch, tmp_path):
             deleted.append(self.name)
 
     class _FakeClient:
+        def list_graphs(self):
+            return ["gA"]  # graph exists -> eligible for deletion
+
         def select_graph(self, name):
             return _FakeGraph(name)
 
+    class _OkReport:
+        languages = []  # no per-language errors -> a clean rebuild
+
+    def _fake_ingest(writer, path, **k):
+        reingested.append(path)
+        return _OkReport()
+
     monkeypatch.setattr(cli, "_resolve_connection", lambda *a, **k: object())
     monkeypatch.setattr(cli, "connect_client", lambda config: _FakeClient())
-    monkeypatch.setattr(ingest_mod, "ingest_directory", lambda writer, path, **k: reingested.append(path))
+    monkeypatch.setattr(ingest_mod, "ingest_directory", _fake_ingest)
 
     cli._migrate_schema_if_stale(None, None, None, None, False)
 
@@ -151,3 +174,33 @@ def test_cli_explicit_host_is_treated_as_remote_not_destroyed(monkeypatch, tmp_p
     cli._migrate_schema_if_stale("remote.example.com", 6379, None, None, False)
 
     assert deleted == []  # a --host target is never auto-destroyed/re-ingested
+
+
+def test_cli_missing_source_dir_graph_not_deleted_and_stamp_not_advanced(monkeypatch, tmp_path):
+    # A registered repo whose source dir is GONE must not have its graph deleted (we can't rebuild it),
+    # and the machine isn't fully migrated -> stamp stays put so it retries / the user can `forget`.
+    import auryn.cli as cli
+    from auryn.core import app_config, ingest as ingest_mod
+
+    schema_migration._state = type(schema_migration._state)()
+    monkeypatch.setattr(app_config, "config_path", lambda: tmp_path / "config.toml")
+    gone = tmp_path / "gone"  # never created
+    app_config.save_config(Config(backend=Backend(mode="local"), schema_version=0,
+                                  repos=(RepoRegistration(local_dir=str(gone), graph_name="gG"),)))
+    deleted = []
+
+    class _Client:
+        def list_graphs(self):
+            return ["gG"]
+
+        def select_graph(self, name):
+            return type("G", (), {"delete": lambda s: deleted.append(name)})()
+
+    monkeypatch.setattr(cli, "_resolve_connection", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "connect_client", lambda config: _Client())
+    monkeypatch.setattr(ingest_mod, "ingest_directory", lambda *a, **k: pytest.fail("must not re-ingest a gone repo"))
+
+    cli._migrate_schema_if_stale(None, None, None, None, False)
+
+    assert deleted == []  # the un-rebuildable graph was NOT destroyed
+    assert app_config.load_config().schema_version == 0  # not fully migrated -> stamp unchanged

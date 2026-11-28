@@ -146,24 +146,42 @@ def _migrate_schema_if_stale(host, port, username, password, ssl) -> None:
     def _graph_for(repo) -> str:
         return repo.graph_name or default_graph_name(resolve_project_root(repo.local_dir))
 
-    def local_migrate(repos) -> None:
+    def local_migrate(repos) -> bool:
+        """Delete + re-ingest each registered repo; return True iff EVERY repo rebuilt cleanly (so the
+        caller only then advances the schema stamp). Never deletes a graph it can't rebuild, never
+        swallows a real deletion failure, and treats a per-language ingest error as an incomplete
+        rebuild."""
         from auryn.core import ingest as ingest_mod
 
         client = connect_client(_resolve_connection(host, port, username, password, ssl))
-        for name in sorted({_graph_for(r) for r in repos}):  # drop each distinct graph once
-            try:
+        # Only touch repos whose source still exists -- deleting a graph we then can't rebuild would be
+        # data loss. A gone repo is left untouched (its graph survives; the user can `auryn forget` it).
+        available = [r for r in repos if Path(r.local_dir).exists()]
+        missing = [r for r in repos if not Path(r.local_dir).exists()]
+        for r in missing:
+            click.secho(f"  schema migration: skipping {r.local_dir} (source gone -- leaving its graph "
+                        f"untouched; `auryn forget` it if stale)", fg="yellow", err=True)
+
+        # Drop each distinct graph of the available repos. Only drop graphs that actually exist, so a
+        # real (transient) delete failure propagates and ABORTS the migration -- we never proceed to
+        # rebuild against a graph we failed to clear, and the stamp stays put so it retries.
+        existing = set(client.list_graphs())
+        for name in sorted({_graph_for(r) for r in available}):
+            if name in existing:
                 client.select_graph(name).delete()
-            except Exception:  # noqa: BLE001 -- a graph not present yet is fine
-                pass
-        for repo in repos:
-            root = Path(repo.local_dir)
-            if not root.exists():
-                click.secho(f"  schema migration: skipping {repo.local_dir} (path is gone)", fg="yellow", err=True)
-                continue
-            ingest_mod.ingest_directory(
-                GraphWriter(client.select_graph(_graph_for(repo))), str(root),
+
+        all_ok = not missing  # a skipped (gone) repo means the machine isn't fully migrated
+        for repo in available:
+            report = ingest_mod.ingest_directory(
+                GraphWriter(client.select_graph(_graph_for(repo))), str(Path(repo.local_dir)),
                 project_name=repo.project_name,
             )
+            failed = [lr.language for lr in report.languages if lr.error]
+            if failed:
+                all_ok = False
+                click.secho(f"  schema migration: {repo.local_dir} rebuilt with errors in {', '.join(failed)}",
+                            fg="yellow", err=True)
+        return all_ok
 
     migrate_schema_if_stale(is_local=is_local, local_migrate=local_migrate)
 
