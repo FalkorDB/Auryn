@@ -11,7 +11,16 @@ dropped (a Spring enrichment is the future analog).
 Name-based only -- this is the fast tree-sitter engine, so every CALLS edge is stamped
 `resolution="name"`. A future deep JDT/javac pass would re-emit the same node ids with a
 stronger provenance (the two-phase model). Ambiguous or unresolved references produce no edge
-rather than a wrong guess -- the same trade-off as the C#/PL/SQL ingestors."""
+rather than a wrong guess -- the same trade-off as the C#/PL/SQL ingestors.
+
+What "name-based" still uses, without type inference: the receiver's declared type (a field, a
+parameter, a typed local, a static `Type.` call, or a builder chain followed through declared
+return types), then -- among a type's overloads -- the argument count (varargs-aware) and the
+argument types the parser can see (literals, `new T()`, casts, `X.class`, typed names). A call
+that still fits several overloads binds only on an exact match, as javac would; otherwise it is
+left unresolved. Left to the deep pass: generic inference, lambdas, inherited-vs-overridden
+dispatch, and argument expressions whose type needs inference (method results, fields of other
+objects)."""
 
 from __future__ import annotations
 
@@ -198,6 +207,15 @@ def _resolve(raw_files: list[RawFile], project_id: str, seed: "JavaGraphIndex | 
         for name, tuples in seed.method_index.items():
             method_index[name].extend(tuples)
 
+    ctx = _CallContext(
+        type_index=type_index, method_index=method_index,
+        varargs_ids={_method_id(e.type_id, m) for e in emit_entries for m in e.raw_type.methods
+                     if m.parameters and m.parameters[-1].is_varargs},
+        by_type_id={x.type_id: x for xs in type_index.values() for x in xs},
+        return_types={_method_id(e.type_id, m): m.return_type for e in emit_entries for m in e.raw_type.methods
+                      if m.return_type},
+    )
+
     # Pass 1: nodes + structural edges (so pass 2's cross-refs always have a landing node). EMIT ONLY
     # the emit entries; seed entries exist purely as resolution targets.
     for e in emit_entries:
@@ -208,7 +226,7 @@ def _resolve(raw_files: list[RawFile], project_id: str, seed: "JavaGraphIndex | 
     for e in emit_entries:
         yield from _emit_hierarchy(e, type_index)
         yield from _emit_type_references(e, type_index)
-        yield from _emit_calls(e, type_index, method_index, imports_by_file.get(e.file_id, {}), emitted_externs)
+        yield from _emit_calls(e, ctx, imports_by_file.get(e.file_id, {}), emitted_externs)
 
 
 # -- modules & packages --------------------------------------------------------------------
@@ -474,22 +492,8 @@ def _depends_on(from_label: str, from_id: str, names: set[str], e: _Entry, type_
         yield GraphEdge("DEPENDS_ON", from_label, {"id": from_id}, target.kind, {"id": target.type_id})
 
 
-def _pick(candidates: list[tuple[str, str, str, str]]) -> str:
-    return sorted(candidates, key=lambda c: c[1])[0][1]
-
-
-def _pick_method(candidates: list[tuple[str, str, str, str]], e: _Entry) -> str:
-    """Method analog of _resolve_target's module/package bias: a `(owner_id, method_id, package,
-    module)` candidate from the referrer's own module+package wins, then same-package, then
-    same-module, then anywhere -- keeps two modules' same-named, same-package methods from cross-binding."""
-    same_mod_pkg = [c for c in candidates if c[3] == e.module and c[2] == e.package]
-    same_pkg = [c for c in candidates if c[2] == e.package]
-    same_mod = [c for c in candidates if c[3] == e.module]
-    return _pick(same_mod_pkg or same_pkg or same_mod or candidates)
-
-
 def _resolve_call(call: RawCall, e: _Entry, member_types: dict[str, str], imports: dict[str, str],
-                  type_index: dict[str, list[_Entry]], method_index: dict[str, list[tuple[str, str, str, str]]]):
+                  ctx: "_CallContext"):
     """Resolve one call to one of:
       * ``("local", target_method_id, extra_props)`` -- binds to a project Method (as before);
       * ``("extern", _Extern)`` -- a callee we can NAME but that isn't defined here (a JDK/stdlib
@@ -498,8 +502,11 @@ def _resolve_call(call: RawCall, e: _Entry, member_types: dict[str, str], import
         dangling reference (a missing member of a *project* type -- deliberately left dropped, so
         an incremental resync leaves no stale `extern://` behind).
 
-    `new X()` -> X's constructor; a receiver naming a known field prefers that field's type's
-    method; a bare / `this` call prefers the same type, then same package, then anywhere."""
+    `new X()` -> X's constructor; a receiver whose type is known (a local, parameter or field, or a
+    static `Type.` call) resolves on that type or its nearest supertype; a bare / `this` call on the
+    calling type, its supertypes, then its enclosing types; a receiver we can't type (a `var`, a
+    chain) only when the name has a single fitting project method. Among overloads, `_choose`."""
+    type_index, method_index = ctx.type_index, ctx.method_index
     if call.is_new:
         target = _resolve_target(call.name, type_index, e.package, e.module)
         if target is not None:
@@ -518,7 +525,7 @@ def _resolve_call(call: RawCall, e: _Entry, member_types: dict[str, str], import
         return _extern_call(call, e, member_types, imports, type_index)
 
     if call.receiver is not None and call.receiver != "this":
-        rtype = member_types.get(call.receiver)
+        rtype = call.receiver_type or member_types.get(call.receiver)
         if rtype is not None:
             resolved_project = False
             for type_name in _referenced_names(rtype):
@@ -526,20 +533,229 @@ def _resolve_call(call: RawCall, e: _Entry, member_types: dict[str, str], import
                 if target_type is None:
                     continue
                 resolved_project = True
-                matches = [c for c in candidates if c[0] == target_type.type_id]
+                matches = _on_type_or_ancestors(target_type, candidates, ctx)
                 if matches:
-                    return "local", _pick(matches), {"receiver_type": target_type.name}
+                    chosen = _choose(matches, call, e, member_types, ctx)
+                    return ("local", chosen, {"receiver_type": target_type.name}) if chosen else None
             if resolved_project:
                 return None  # receiver is a project type, but missing this member -> intra-project
             # receiver's type is external -> name the call on that type (ADR 0004).
             head = next(iter(_referenced_names(rtype)), None)
             return _extern_result(head, call.name, imports, receiver_type=head) if head else None
-        return "local", _pick_method(candidates, e), {}
+        # Not a typed variable: a static `Type.method(...)` on a project type binds to that type only.
+        target_type = _resolve_target(call.receiver, type_index, e.package, e.module) if call.receiver[:1].isupper() else None
+        if target_type is not None:
+            matches = _on_type_or_ancestors(target_type, candidates, ctx)
+            chosen = _choose(matches, call, e, member_types, ctx) if matches else None
+            return ("local", chosen, {"receiver_type": target_type.name}) if chosen else None
+        return _unique(candidates, call, e, member_types, ctx)  # a variable of unknown type
 
-    same_type = [c for c in candidates if c[0] == e.type_id]  # same-module already (type_id is module-scoped)
-    if same_type:
-        return "local", _pick(same_type), {}
-    return "local", _pick_method(candidates, e), {}
+    if call.chained:
+        rtype = _chain_type(call.receiver_chain, e, member_types, ctx)
+        if rtype is _EXTERNAL:
+            return None  # the chain runs on a JDK/external type: never a project method
+        if rtype is not None:
+            target_type = _resolve_target(rtype, type_index, e.package, e.module)
+            matches = _on_type_or_ancestors(target_type, candidates, ctx) if target_type is not None else []
+            if matches:
+                chosen = _choose(matches, call, e, member_types, ctx)
+                return ("local", chosen, {"receiver_type": target_type.name}) if chosen else None
+        return _unique(candidates, call, e, member_types, ctx)  # `a().b()`: the receiver's type is hidden
+
+    # bare `b()` / `this.b()`: the calling type, its ancestors, then its enclosing types.
+    owner: _Entry | None = e
+    while owner is not None:
+        matches = _on_type_or_ancestors(owner, candidates, ctx)
+        if matches:
+            chosen = _choose(matches, call, e, member_types, ctx)
+            return ("local", chosen, {}) if chosen else None
+        owner = ctx.by_type_id.get(owner.parent_type_id) if owner.parent_type_id else None
+    return _unique(candidates, call, e, member_types, ctx)  # e.g. a static import
+
+
+# -- overload selection (name-based pass: pick only when the call fits exactly one) ----------
+
+@dataclass
+class _CallContext:
+    type_index: dict
+    method_index: dict
+    varargs_ids: set  # method ids whose last parameter is `T...` (emit entries; seeds read as fixed)
+    by_type_id: dict  # type_id -> _Entry
+    return_types: dict = field(default_factory=dict)  # method id -> declared return type (emit entries)
+    lower_names: dict | None = None  # lower-case simple type name -> type_index key (built on first use)
+
+
+_PRIMITIVES = frozenset({"int", "long", "short", "byte", "char", "boolean", "float", "double"})
+_BOXED = frozenset({"integer", "long", "short", "byte", "character", "boolean", "float", "double", "number"})
+_UNBOX = {"integer": "int", "character": "char"}
+_FINAL_JDK = _PRIMITIVES | _BOXED | {"string"}
+_FINAL_JDK_SUPERS = frozenset({"object", "serializable", "comparable", "constable", "constantdesc"})
+
+
+def _kind(t: str) -> str:
+    """Primitive/boxed family: numbers widen into each other; boolean and char stand alone."""
+    return "bool" if t == "boolean" else "char" if t in ("char", "character") else "num"
+
+
+def _param_types(method_id: str) -> list[str]:
+    """A method id's parameter types, split at top-level commas (`map<k,v>` stays whole)."""
+    sig = method_id[method_id.rfind("(", 0, method_id.rfind(")") + 1) + 1: method_id.rfind(")")]
+    if not sig:
+        return []
+    out, depth, cur = [], 0, ""
+    for ch in sig:
+        depth += ch == "<"
+        depth -= ch == ">"
+        if ch == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    out.append(cur.strip())
+    return out
+
+
+def _simple(type_text: str | None) -> str | None:
+    """`java.util.List<String>` -> `list`; `String[]` -> `string[]` (lower-case, generics dropped)."""
+    if not type_text:
+        return None
+    t = re.sub(r"<.*>", "", type_text).replace(" ", "").lower()
+    arrays = t.count("[]")
+    base = t.replace("[]", "").replace("...", "").rsplit(".", 1)[-1]
+    return base + "[]" * arrays
+
+
+def _project_type(simple: str, e: _Entry, ctx: _CallContext) -> _Entry | None:
+    if ctx.lower_names is None:  # method ids are lower-case; type_index keys keep their case
+        ctx.lower_names = {name.lower(): name for name, entries in ctx.type_index.items() if entries}
+    name = ctx.lower_names.get(simple)
+    return _resolve_target(name, ctx.type_index, e.package, e.module) if name else None
+
+
+def _ancestors(t: _Entry, ctx: _CallContext) -> list[_Entry]:
+    """`t` then its project supertypes (superclass chain and interfaces), nearest first."""
+    out, queue, seen = [], [t], set()
+    while queue and len(out) < 32:
+        cur = queue.pop(0)
+        if cur.type_id in seen:
+            continue
+        seen.add(cur.type_id)
+        out.append(cur)
+        rt = cur.raw_type
+        for sup in ([rt.superclass] if rt.superclass else []) + list(rt.interfaces):
+            nxt = _resolve_target(sup, ctx.type_index, cur.package, cur.module)
+            if nxt is not None:
+                queue.append(nxt)
+    return out
+
+
+def _on_type_or_ancestors(t: _Entry, candidates, ctx: _CallContext):
+    """Candidates declared on `t`, else on its nearest supertype that declares the name."""
+    for a in _ancestors(t, ctx):
+        here = [c for c in candidates if c[0] == a.type_id]
+        if here:
+            return here
+    return []
+
+
+def _fits(arg: str | None, param: str, e: _Entry, ctx: _CallContext) -> bool:
+    """Can an argument of (simple, lower-case) type `arg` be passed for `param`? Only a clear
+    mismatch says no; anything we can't see (unknown arg, generic `T`, a JDK type) fits."""
+    if arg is None or arg == param or param in ("object", "t"):
+        return True
+    if ("[]" in arg) != ("[]" in param):
+        return False
+    if param in _PRIMITIVES or param in _BOXED:
+        if arg not in _PRIMITIVES and arg not in _BOXED:
+            return False
+        if param == "number":
+            return _kind(arg) == "num"
+        if param in _BOXED and param not in _PRIMITIVES:  # Integer/Character: itself or its primitive
+            return arg in (param, _UNBOX.get(param, param))
+        return _kind(arg) == _kind(param)  # a primitive (or same-named box) takes its own kind
+    if arg in _FINAL_JDK:  # String / boxes / primitives: final, so only their few supertypes accept them
+        return param in _FINAL_JDK_SUPERS or (arg == "string" and param == "charsequence")
+    target = _project_type(param, e, ctx)
+    if target is None:
+        return True  # a JDK/external param: any reference type may implement it
+    source = _project_type(arg, e, ctx)
+    # a project parameter type takes only itself or a project subtype (a JDK class can't extend it)
+    return source is not None and any(a.type_id == target.type_id for a in _ancestors(source, ctx))
+
+
+def _arg_types(call: RawCall, member_types: dict[str, str]) -> list[str | None]:
+    names = call.arg_names or [None] * len(call.arg_types)
+    return [_simple(t or (member_types.get(n) if n else None)) for t, n in zip(call.arg_types, names)]
+
+
+def _choose(matches, call: RawCall, e: _Entry, member_types: dict[str, str], ctx: _CallContext) -> str | None:
+    """The one overload among `matches` this call can be, or None. Filters by argument count
+    (varargs-aware) and by the argument types we can see; when several still fit, Java's own rule
+    for an exact match (every argument's type known and equal to the parameter's) breaks the tie.
+    Anything still ambiguous is left unresolved -- no edge beats a wrong one."""
+    if call.arg_count is None:
+        ids_ = sorted({c[1] for c in matches})
+        return ids_[0] if len(ids_) == 1 else None
+    args = _arg_types(call, member_types)
+    fitting = []
+    for c in matches:
+        params = [_simple(p) or p for p in _param_types(c[1])]
+        varargs = c[1] in ctx.varargs_ids
+        if varargs:
+            if call.arg_count < len(params) - 1:
+                continue
+            fixed = params[:-1]
+            if not all(_fits(a, p, e, ctx) for a, p in zip(args, fixed)):
+                continue
+        elif call.arg_count != len(params) or not all(_fits(a, p, e, ctx) for a, p in zip(args, params)):
+            continue
+        fitting.append((c[1], params, varargs))
+    ids_ = sorted({f[0] for f in fitting})
+    if len(ids_) == 1:
+        return ids_[0]
+    exact = sorted({mid for mid, params, varargs in fitting
+                    if not varargs and len(params) == len(args) and all(a is not None and a == p for a, p in zip(args, params))})
+    return exact[0] if len(exact) == 1 else None
+
+
+_EXTERNAL = "<external>"  # a receiver chain known to run on a JDK/external type
+
+
+def _chain_type(chain, e: _Entry, member_types: dict[str, str], ctx: _CallContext) -> str | None:
+    """The simple type name a receiver chain evaluates to, following each step's declared return
+    type on a project type (`new GsonBuilder().setX().create()` -> GsonBuilder -> GsonBuilder);
+    `_EXTERNAL` once it reaches a type we can name that isn't the project's; None when a step is
+    ambiguous or its type can't be seen."""
+    if not chain:
+        return None
+    kind, base, steps = chain[0], chain[1], chain[2]
+    if kind == "new":
+        current = base
+    elif kind == "this":
+        current = e.name
+    else:
+        current = chain[3] if len(chain) > 3 else member_types.get(base)
+    for name, argc in steps:
+        head = next(iter(_referenced_names(current or "")), None)
+        owner = _resolve_target(head, ctx.type_index, e.package, e.module) if head else None
+        if owner is None:
+            return _EXTERNAL if head else None  # a known JDK/external type: the rest of the chain is too
+        matches = _on_type_or_ancestors(owner, ctx.method_index.get(name, []), ctx)
+        step = RawCall(name=name, arg_count=argc, arg_types=[None] * argc)
+        chosen = _choose(matches, step, e, member_types, ctx) if matches else None
+        current = ctx.return_types.get(chosen) if chosen else None
+        if not current:
+            return None
+    head = next(iter(_referenced_names(current or "")), None)
+    if head and _resolve_target(head, ctx.type_index, e.package, e.module) is None:
+        return _EXTERNAL
+    return head
+
+
+def _unique(candidates, call: RawCall, e: _Entry, member_types: dict[str, str], ctx: _CallContext):
+    """A call whose receiver type we can't see binds only if exactly one project method fits."""
+    chosen = _choose(candidates, call, e, member_types, ctx)
+    return ("local", chosen, {}) if chosen else None
 
 
 def _extern_call(call: RawCall, e: _Entry, member_types: dict[str, str], imports: dict[str, str],
@@ -551,8 +767,8 @@ def _extern_call(call: RawCall, e: _Entry, member_types: dict[str, str], imports
     recv = call.receiver
     if recv is None or recv == "this":
         return None  # unqualified / inherited call -- can't name the owning type
-    rtype = member_types.get(recv)
-    if rtype is not None:  # receiver is a field -> its declared type owns the method
+    rtype = call.receiver_type or member_types.get(recv)
+    if rtype is not None:  # receiver is a typed local/param/field -> its declared type owns the method
         head = next(iter(_referenced_names(rtype)), None)
         if head is None:
             return None
@@ -582,14 +798,14 @@ def _extern_result(type_simple: str, member: str, imports: dict[str, str], recei
     )
 
 
-def _emit_calls(e: _Entry, type_index: dict[str, list[_Entry]], method_index: dict[str, list[tuple[str, str, str, str]]],
-                imports: dict[str, str], emitted_externs: set[str]) -> Iterator[GraphNode | GraphEdge]:
+def _emit_calls(e: _Entry, ctx: "_CallContext", imports: dict[str, str],
+                emitted_externs: set[str]) -> Iterator[GraphNode | GraphEdge]:
     member_types = {f.name: f.type for f in e.raw_type.fields if f.type}
     for m in e.raw_type.methods:
         mid = _method_id(e.type_id, m)
         emitted: set[str] = set()  # dedup CALLS targets from this method (project id or placeholder id)
         for call in m.calls:
-            hit = _resolve_call(call, e, member_types, imports, type_index, method_index)
+            hit = _resolve_call(call, e, member_types, imports, ctx)
             if hit is None:
                 continue
             if hit[0] == "local":

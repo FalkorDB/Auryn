@@ -42,6 +42,25 @@ class RawCall:
     to name -- a field_access or method chain). resolution.py uses it to prefer resolving
     against a field's declared type over a same-name coincidence."""
     is_new: bool = False  # `new Widget()` -> resolves against a constructor
+    receiver_type: str | None = None
+    """The declared type of a `receiver` that is a local variable or parameter of the calling
+    method (as written, e.g. "Gson", "List<String>"); None when the receiver isn't one (a field is
+    looked up later, in resolution.py) or its type isn't written (`var`)."""
+    chained: bool = False
+    """True when the call HAS a receiver we can't name (a method chain `a().b()`, a field access
+    `x.y.b()`, `super.b()`); False for a bare `b()` and for an identifier/`this` receiver."""
+    receiver_chain: tuple | None = None
+    """For a `chained` call, how its receiver is built when that is followable: `(base_kind,
+    base, steps)` with base_kind "new" (base = the created type), "var" (base = an identifier, its
+    local/param type in `receiver_type` when known) or "this", and steps = `[(method, arg_count)]`
+    applied in order -- `new B().x().y()` calling `y` is ("new", "B", [("x", 0)]). None otherwise."""
+    arg_count: int | None = None  # number of arguments; None = not captured (picks no overload)
+    arg_types: list[str | None] = field(default_factory=list)
+    """Per argument, its static type when the parser can see it cheaply (a literal, `new T()`, a
+    cast, a local/parameter of known type), else None (unknown -- fits any parameter)."""
+    arg_names: list[str | None] = field(default_factory=list)
+    """Per argument, the identifier when the argument is a bare name whose type wasn't local -- a
+    field, which resolution.py types from the enclosing class."""
     line: int = 0  # 1-based line of the callee identifier (method name, or the created type) -- what SCIP
     # anchors an occurrence to; feeds the deep pass's line-precise call-site gate. 0 = not captured.
 

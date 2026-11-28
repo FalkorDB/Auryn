@@ -179,9 +179,91 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
     def _type_text(node) -> str:
         return " ".join(txt(node).split()) if node is not None else ""
 
-    def collect_calls(body) -> list[RawCall]:
+    def local_types(body, params: list[RawParameter]) -> dict[str, str]:
+        """name -> declared type for the method's parameters and every typed local it declares
+        (`T x = ...`, `for (T x : ...)`, try-with-resources). Method-wide, not block-scoped: a
+        name re-declared with another type in a sibling block keeps the first -- rare, and still a
+        typed receiver. `var` declarations are left out (their type isn't written)."""
+        out = {p.name: p.type for p in params if p.name and p.type}
+        if body is None:
+            return out
+        stack = [body]
+        while stack:
+            n = stack.pop()
+            if n.type in ("local_variable_declaration", "enhanced_for_statement", "resource"):
+                type_text = _type_text(field(n, "type"))
+                if type_text and type_text != "var":
+                    names = [field(d, "name") for d in n.children if d.type == "variable_declarator"]
+                    if n.type != "local_variable_declaration":
+                        names = [field(n, "name")]
+                    for nm in names:
+                        if nm is not None:
+                            out.setdefault(txt(nm), type_text)
+            stack.extend(n.children)
+        return out
+
+    def arg_info(node, locals_: dict[str, str]) -> tuple[str | None, str | None]:
+        """(static type, field-candidate identifier) of one argument expression -- only what is
+        visible without type inference; anything else is (None, None) = fits any parameter."""
+        t = node.type
+        if t in ("string_literal", "text_block"):
+            return "String", None
+        if t == "character_literal":
+            return "char", None
+        if t in ("true", "false"):
+            return "boolean", None
+        if t in ("decimal_integer_literal", "hex_integer_literal", "octal_integer_literal", "binary_integer_literal"):
+            return ("long" if txt(node)[-1:] in "lL" else "int"), None
+        if t in ("decimal_floating_point_literal", "hex_floating_point_literal"):
+            return ("float" if txt(node)[-1:] in "fF" else "double"), None
+        if t == "class_literal":
+            return "Class", None
+        if t == "object_creation_expression":
+            name_node = first_type_name_node(field(node, "type"))
+            return (txt(name_node) if name_node is not None else None), None
+        if t == "cast_expression":
+            return (_type_text(field(node, "type")) or None), None
+        if t == "identifier":
+            name = txt(node)
+            return (locals_[name], None) if name in locals_ else (None, name)
+        return None, None
+
+    def receiver_chain(obj, locals_: dict[str, str]):
+        """(base_kind, base, steps) for a receiver built by `new T()` / a name / `this` followed by
+        up to 8 method calls; None for anything else (a field access, an array, a lambda...)."""
+        steps = []
+        while obj is not None and len(steps) <= 8:
+            if obj.type == "parenthesized_expression":
+                obj = next(iter(obj.named_children), None)
+                continue
+            if obj.type == "method_invocation":
+                args_node = field(obj, "arguments")
+                steps.append((txt(field(obj, "name")), len(args_node.named_children) if args_node is not None else 0))
+                obj = field(obj, "object")
+                if obj is None:
+                    return None  # a bare call starts the chain: its owner isn't named here
+                continue
+            steps.reverse()
+            if obj.type == "object_creation_expression":
+                name_node = first_type_name_node(field(obj, "type"))
+                return ("new", txt(name_node), steps) if name_node is not None else None
+            if obj.type == "identifier":
+                return ("var", txt(obj), steps)
+            if obj.type == "this":
+                return ("this", "", steps)
+            return None
+        return None
+
+    def chain_of(obj, locals_: dict[str, str]):
+        chain = receiver_chain(obj, locals_)
+        if chain is not None and chain[0] == "var" and chain[1] in locals_:
+            return ("var", chain[1], chain[2], locals_[chain[1]])
+        return chain
+
+    def collect_calls(body, params: list[RawParameter] | None = None) -> list[RawCall]:
         if body is None:
             return []
+        locals_ = local_types(body, params or [])
         out: list[RawCall] = []
         seen: set = set()
         stack = [body]
@@ -191,18 +273,30 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
                 name_node = field(n, "name")
                 obj = field(n, "object")
                 recv = None
+                chained = False
                 if obj is not None and obj.type == "this":
                     recv = "this"
                 elif obj is not None and obj.type == "identifier":
                     recv = txt(obj)
+                elif obj is not None:
+                    chained = True  # a chain / field access / super: the receiver can't be named
                 nm = txt(name_node)
                 line = (name_node.start_point[0] + 1) if name_node is not None else 0
+                args_node = field(n, "arguments")
+                args = [arg_info(a, locals_) for a in args_node.named_children] if args_node is not None else []
                 # the line is part of the dedup key: the deep pass's line-precise gate needs EVERY call
                 # site's line, so `store.put()` on two lines keeps both (a name-only key would drop one).
-                key = (nm, recv, False, line)
+                # The argument count is too: two overloads called on one line are two calls.
+                key = (nm, recv, False, line, len(args))
                 if nm and key not in seen:
                     seen.add(key)
-                    out.append(RawCall(name=nm, receiver=recv, is_new=False, line=line))
+                    out.append(RawCall(
+                        name=nm, receiver=recv, is_new=False, line=line,
+                        receiver_type=locals_.get(recv) if recv not in (None, "this") else None,
+                        chained=chained, arg_count=len(args),
+                        receiver_chain=chain_of(obj, locals_) if chained else None,
+                        arg_types=[a[0] for a in args], arg_names=[a[1] for a in args],
+                    ))
             elif n.type == "object_creation_expression":
                 name_node = first_type_name_node(field(n, "type"))  # the FINAL type identifier, not the
                 nm = txt(name_node) if name_node is not None else None  # scoped type's start -- SCIP anchors
@@ -219,6 +313,7 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
         throws_node = next((c for c in node.children if c.type == "throws"), None)
         throws = [first_type_name(c) for c in throws_node.named_children] if throws_node is not None else []
         body = field(node, "body")
+        params = parameters(field(node, "parameters"))
         ls, le = lines(node)
         return RawMethod(
             name=txt(field(node, "name")),
@@ -226,10 +321,10 @@ def parse_source(source: bytes, path_label: str) -> RawFile:
             accessibility=accessibility(keywords),
             modifiers=keywords,
             return_type=_type_text(field(node, "type")) if kind == "ORDINARY" else None,
-            parameters=parameters(field(node, "parameters")),
+            parameters=params,
             throws=[t for t in throws if t],
             annotations=annotations,
-            calls=collect_calls(body),
+            calls=collect_calls(body, params),
             source=txt(node),
             doc=leading_comment(node, source),
             line_start=ls, line_end=le,
