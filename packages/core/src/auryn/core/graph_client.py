@@ -10,6 +10,7 @@ standard approach. All property *values* are passed as bound query parameters.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import time
@@ -910,7 +911,14 @@ class GraphWriter:
         concurrent resync re-merged it (new `_fingerprint`) and cleared its embedding -- the match
         fails and the now-stale vector is dropped rather than marking the node done, so it stays
         pending for the next pass. (Nodes written without a fingerprint, e.g. in tests, compare
-        '' = '' and still take the vector.)"""
+        '' = '' and still take the vector.)
+
+        It also **never overwrites a vector**: a node that already has one was embedded by another
+        pass whose scan overlapped this one (a second embed daemon, `auryn embed` beside the
+        daemon), so its vector is already current. Rewriting it would replace the node's entry in
+        the vector index, and FalkorDB 4.18 (what falkordblite 0.10 bundles) keeps the replaced
+        entry, which then takes a KNN slot (see knn_search). A node whose content changed was
+        cleared first (invalidate_embeddings), so it still takes its new vector."""
         by_label: dict[str, list[tuple[str, list[float], str | None]]] = defaultdict(list)
         for kind_label, node_id, vector, fingerprint in items:
             by_label[kind_label].append((node_id, vector, fingerprint))
@@ -919,7 +927,7 @@ class GraphWriter:
                 rows = [{"id": nid, "vec": list(vec), "fp": fp or ""} for nid, vec, fp in chunk]
                 query = (
                     f"UNWIND $rows AS row MATCH (n:{kind_label} {{id: row.id}}) "
-                    "WHERE coalesce(n._fingerprint, '') = row.fp "
+                    f"WHERE n.{self.EMBEDDING_PROPERTY} IS NULL AND coalesce(n._fingerprint, '') = row.fp "
                     f"SET n:{self.SHARED_EMBEDDING_LABEL}, n.{self.EMBEDDING_PROPERTY} = vecf32(row.vec)"
                 )
                 self._write_rows(query, rows)
@@ -976,7 +984,14 @@ class GraphWriter:
         """K nearest embedded nodes to `query_vec`, nearest first. Returns one dict per hit with
         `id`, `kind` (the node's real label, not the shared marker), `score` (cosine distance --
         smaller is closer), and any `return_properties` projected from the node. Read-only; returns
-        [] cleanly if no vector index exists yet (embeddings still building)."""
+        [] cleanly if no vector index exists yet (embeddings still building).
+
+        FalkorDB 4.18 (what falkordblite 0.10 bundles; 4.20 doesn't) keeps a vector in the index
+        after its node is deleted, cleared, or updated in any way, and `queryNodes` spends one of
+        its `k` slots on each such dead entry before leaving it out -- so a resynced graph can
+        return far fewer than `k`. When a query comes back short, the index is asked again for
+        more, sized by its share of dead entries (see _vector_index_counts), until `k` live nodes
+        are in or the index is exhausted."""
         proj = "".join(f", n.{p} AS {p}" for p in return_properties)
         query = (
             f"CALL db.idx.vector.queryNodes('{self.SHARED_EMBEDDING_LABEL}', "
@@ -984,12 +999,44 @@ class GraphWriter:
             f"RETURN n.id AS id, {semantic_label('n')} AS kind, "
             f"score{proj} ORDER BY score"
         )
+
+        def nearest(fetch: int) -> list[dict]:
+            result = self._graph.ro_query(query, {"k": fetch, "q": list(query_vec)})
+            columns = [name for _, name in result.header]
+            return [dict(zip(columns, row)) for row in result.result_set]
+
         try:
-            result = self._graph.ro_query(query, {"k": k, "q": list(query_vec)})
+            hits = nearest(k)
+            if len(hits) < k and (counts := self._vector_index_counts()):
+                live, top = counts
+                fetch = k
+                while len(hits) < min(k, live) and fetch < top:
+                    fetch = min(top, max(2 * fetch, math.ceil(k * top / live)))
+                    hits = nearest(fetch)
         except ResponseError:
             return []  # no vector index yet -> semantic search unavailable, degrade to empty
-        columns = [name for _, name in result.header]
-        return [dict(zip(columns, row)) for row in result.result_set]
+        return hits[:k]
+
+    def _vector_index_counts(self) -> tuple[int, int] | None:
+        """(live entries, entries ever added) of the shared vector index, from the `numDocuments`
+        and `maxDocId` FalkorDB reports for it -- the gap is how many dead entries it may still
+        hold. None when the index is missing or empty, or the server doesn't report them (FalkorDB
+        6 doesn't, and has no dead entries to make up for)."""
+        try:
+            rows = self._graph.ro_query(
+                "CALL db.indexes() YIELD label, entitytype, info "
+                "WHERE label = $label AND entitytype = 'NODE' RETURN info",
+                {"label": self.SHARED_EMBEDDING_LABEL},
+            ).result_set
+        except ResponseError:
+            return None  # a server whose db.indexes() has no `info` -- keep the hits already found
+        info = rows[0][0] if rows else None
+        if not isinstance(info, dict):
+            return None
+        live, top = info.get("numDocuments"), info.get("maxDocId")
+        if not isinstance(live, int) or not isinstance(top, int) or live <= 0:
+            return None
+        return live, top
 
     def fulltext_search(self, query: str, k: int, *, return_properties: tuple[str, ...] = ()) -> list[dict]:
         """Top-k embedded nodes by lexical (BM25) relevance to `query` -- the keyword half of

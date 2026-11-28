@@ -92,3 +92,36 @@ def test_write_embeddings_skips_when_fingerprint_changed(writer):
     # The matching fingerprint writes normally.
     writer.write_embeddings([("Function", "f1", [1.0, 0.0, 0.0], "fp-new")])
     assert [h["id"] for h in writer.knn_search([1.0, 0.0, 0.0], 5)] == ["f1"]
+
+
+def test_write_embeddings_never_overwrites_a_vector(writer):
+    """A pass that scanned a node before another pass embedded it brings a vector for the same
+    content; writing it again would only replace the node's index entry (see write_embeddings)."""
+    _seed(writer)
+    writer.create_vector_index(writer.SHARED_EMBEDDING_LABEL, writer.EMBEDDING_PROPERTY, dim=3)
+    writer.write_embeddings([("Function", "f1", [1.0, 0.0, 0.0], None)])
+
+    writer.write_embeddings([("Function", "f1", [0.0, 1.0, 0.0], None)])
+
+    rows = writer.ro_query("MATCH (n:Function {id:'f1'}) RETURN n.embedding").result_set
+    assert list(rows[0][0]) == [1.0, 0.0, 0.0]
+
+
+def test_knn_search_returns_k_past_dead_index_entries(writer):
+    """FalkorDB 4.18 keeps a deleted node's vector in the index and spends a KNN slot on it before
+    leaving it out. With a deleted twin beside every live node, a plain query for `k` returned k/2."""
+    writer.query(
+        "UNWIND range(1, 10) AS i "
+        "CREATE (:Function {id: 'live' + toString(i)}), (:Function {id: 'dead' + toString(i)})"
+    )
+    writer.create_vector_index(writer.SHARED_EMBEDDING_LABEL, writer.EMBEDDING_PROPERTY, dim=3)
+    vectors = {i: [1.0, i / 10, 0.5] for i in range(1, 11)}
+    writer.write_embeddings(
+        [("Function", f"{kind}{i}", vec, None) for kind in ("live", "dead") for i, vec in vectors.items()]
+    )
+    writer.query("MATCH (n:Function) WHERE n.id STARTS WITH 'dead' DETACH DELETE n")
+
+    hits = writer.knn_search([1.0, 0.5, 0.5], 4)
+
+    assert len(hits) == 4 and all(h["id"].startswith("live") for h in hits)
+    assert len(writer.knn_search([1.0, 0.5, 0.5], 20)) == 10  # never more than the live nodes

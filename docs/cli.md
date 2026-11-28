@@ -220,9 +220,10 @@ machine (an `/etc/hosts` alias there) works when given as `--host`.
 ### `embed`
 Build vector + full-text indexes for a graph's callables/types/files — what powers the MCP
 `search_code` (hybrid: lexical + semantic) tool. Idempotent (only un-embedded nodes are
-processed). `--model` overrides the local embedding model; `--reembed` rebuilds everything (after
-a model change); `--graph-name` + connection options. The local model auto-installs on first use
-(opt-out; `AURYN_AUTO_INSTALL=0`).
+processed), and safe beside the background embed daemon: a node that already has a vector is
+never written again, even when two passes over one graph overlap. `--model` overrides the local
+embedding model; `--reembed` rebuilds everything (after a model change); `--graph-name` +
+connection options. The local model auto-installs on first use (opt-out; `AURYN_AUTO_INSTALL=0`).
 
 ### `impact`
 "What will this change break?" — the blast radius of a diff. Diffs the working tree (or a git
