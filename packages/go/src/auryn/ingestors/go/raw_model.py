@@ -126,6 +126,15 @@ class RawConst:
 
 
 @dataclass
+class RawVar:
+    """A package-level `var name T` with an explicit type. Not a graph node: resolution reads it
+    only to type a call's receiver (`client.Do()` on `var client *http.Client`)."""
+
+    name: str
+    type: str  # type as written, e.g. "*http.Client"
+
+
+@dataclass
 class RawImport:
     path: str  # the import path with quotes stripped, e.g. "github.com/acme/proj/model"
     alias: str | None = None  # explicit alias (`m "..."`), else None (defaults to path's last seg)
@@ -139,3 +148,4 @@ class RawFile:
     types: list[RawType] = field(default_factory=list)
     functions: list[RawFunction] = field(default_factory=list)  # free funcs AND methods
     consts: list[RawConst] = field(default_factory=list)
+    vars: list[RawVar] = field(default_factory=list)  # package-level, explicitly typed only

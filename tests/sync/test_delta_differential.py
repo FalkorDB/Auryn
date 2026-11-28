@@ -338,6 +338,20 @@ def _build_go(repo: GitRepo) -> list[str]:
     })
     shas.append(repo.commit("c15 move type Moved a.go->b.go (a.go kept); DEFINED_IN must retarget, no stale edge"))
 
+    # PACKAGE-VAR-TYPED CALLS: `mu.Lock()` on `var mu *sync.Mutex` is placeholdered from the var's own
+    # file only. Retyping the var touches lock.go alone, so send.go (which imports sync too) is not
+    # re-emitted -- the full recompute must agree that its `mu.Lock()` stays unresolved.
+    repo.write({
+        "bus/lock.go": 'package bus\n\nimport "sync"\n\nvar mu *sync.Mutex\n\nfunc Acquire() {\n\tmu.Lock()\n}\n',
+        "bus/send.go": 'package bus\n\nimport "sync"\n\nfunc Send(wg *sync.WaitGroup) {\n\tmu.Lock()\n\twg.Done()\n}\n',
+    })
+    shas.append(repo.commit("c16 add package bus: var mu *sync.Mutex in lock.go, used by lock.go and send.go"))
+
+    repo.write({
+        "bus/lock.go": 'package bus\n\nimport "sync"\n\nvar mu *sync.RWMutex\n\nfunc Acquire() {\n\tmu.Lock()\n}\n',
+    })
+    shas.append(repo.commit("c17 retype var mu in lock.go only (send.go untouched)"))
+
     return shas
 
 
