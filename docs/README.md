@@ -28,6 +28,7 @@ The `adr/` folder records the deeper design decisions and their rationale:
 | [0005](adr/0005-delta-sync-all-languages.md) | Delta-sync across all languages — commit-driven incremental updates. |
 | [0006](adr/0006-http-call-endpoint-seam.md) | HTTP call↔endpoint seam — the route-keyed, language-agnostic stitch. |
 | [0007](adr/0007-deployment-infrastructure-tier.md) | Deployment & infrastructure tier — the image-keyed contract across Docker/Compose/k8s/Helm/Terraform. |
+| [0008](adr/0008-message-bus-traversal-edge.md) | Message-bus hop — the derived `NOTIFIES` edge the traversals follow across a topic. |
 
 ## Website content
 

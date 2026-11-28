@@ -7,18 +7,21 @@ of higher-confidence broker patterns (Kafka/RabbitMQ/NATS/Redis/SNS-style) rathe
 Golden path:
 
     publisher -PUBLISHES_TO-> Topic <-SUBSCRIBES_TO- subscriber
+    publisher -NOTIFIES-> subscriber                              (derived, ADR 0008)
 
 Reads each callable's stored `source` (no file I/O, like auryn-orm). Comments are stripped first (a
 commented-out publish must not mint an edge), only a COMPLETE string literal is accepted as a topic (a
 concatenated `"orders." + tenant` is ignored, not captured as `orders.`), and a multi-topic
 `subscribe(['a','b'])` / `@KafkaListener(topics={'a','b'})` links to EVERY topic. Idempotent +
-order-independent (owns its whole Topic + PUBLISHES_TO/SUBSCRIBES_TO layer). Heuristic by nature: only a
-string-literal topic is resolved (a topic held in a variable/constant is not)."""
+order-independent (owns its whole Topic + PUBLISHES_TO/SUBSCRIBES_TO layer and its `message-bus`
+NOTIFIES edges). Heuristic by nature: only a string-literal topic is resolved (a topic held in a
+variable/constant is not)."""
 
 from __future__ import annotations
 
 import logging
 import re
+from collections import defaultdict
 
 from auryn.core.graph_client import GraphWriter, semantic_label
 from auryn.core.graph_model import EdgeSchema, GraphEdge, GraphNode, NodeSchema
@@ -26,7 +29,8 @@ from auryn.core.graph_model import EdgeSchema, GraphEdge, GraphNode, NodeSchema
 logger = logging.getLogger("auryn.events")
 
 _SCHEMA = [NodeSchema(label="Topic", indexed_properties=("name",))]
-_EDGES = [EdgeSchema(rel_type="PUBLISHES_TO"), EdgeSchema(rel_type="SUBSCRIBES_TO")]
+_EDGES = [EdgeSchema(rel_type="PUBLISHES_TO"), EdgeSchema(rel_type="SUBSCRIBES_TO"),
+          EdgeSchema(rel_type="NOTIFIES")]
 
 # A COMPLETE string-literal argument/element: a quoted run bounded on BOTH sides by an arg/list delimiter
 # (or string ends), so a concatenation is never captured -- neither a trailing `"orders." + x` (no right
@@ -99,6 +103,8 @@ def stitch(writer: GraphWriter) -> dict | None:
     topics: set[str] = set()
     edges: list[GraphEdge] = []
     n_pub = n_sub = 0
+    # topic -> the (id, label) of every callable that publishes / subscribes to it, for NOTIFIES
+    ends = {"PUBLISHES_TO": defaultdict(set), "SUBSCRIBES_TO": defaultdict(set)}
     for cid, clabel, src in callables:
         pubs, subs = _extract(src)
         for rel, found in (("PUBLISHES_TO", pubs), ("SUBSCRIBES_TO", subs)):
@@ -106,18 +112,46 @@ def stitch(writer: GraphWriter) -> dict | None:
                 topics.add(topic)
                 edges.append(GraphEdge(rel, clabel, {"id": cid}, "Topic", {"id": f"topic://{topic}"},
                                        {"provenance": "message-bus", "topic": topic}))
+                ends[rel][topic].add((cid, clabel))
                 n_pub += rel == "PUBLISHES_TO"
                 n_sub += rel == "SUBSCRIBES_TO"
     if not edges:
         return None
 
+    notifies = _notifies_edges(ends["PUBLISHES_TO"], ends["SUBSCRIBES_TO"])
     writer.setup_schema(_SCHEMA)
     writer.merge_nodes([GraphNode("Topic", {"id": f"topic://{t}"}, {"name": t, "provenance": "message-bus"})
                         for t in sorted(topics)])
-    writer.merge_edges(edges)
-    report = {"topics": len(topics), "publishes_edges": n_pub, "subscribes_edges": n_sub}
+    writer.merge_edges(edges + notifies)
+    report = {"topics": len(topics), "publishes_edges": n_pub, "subscribes_edges": n_sub,
+              "notifies_edges": len(notifies)}
     logger.info("message-bus stitch: %s", report)
     return report
+
+
+def _notifies_edges(publishers: dict[str, set[tuple[str, str]]],
+                    subscribers: dict[str, set[tuple[str, str]]]) -> list[GraphEdge]:
+    """A direct, traversable `publisher -[:NOTIFIES]-> subscriber` edge for every pair that shares a
+    topic (ADR 0008). The Topic node forms a "V" -- both sides point INTO it -- so a single-direction
+    walk (who_calls, callees, impact_of, trace_entrypoint) stops at the topic. This collapses the V into
+    one edge, the async sibling of the HTTP stitch's INVOKES: a separate type because the publisher
+    never waits on, or depends on, its subscribers, so a dependency walk (impact_of_diff) can leave it
+    out while the reachability walks follow it.
+
+    One edge per pair, `topics` lists every topic they share. A callable that subscribes to its own
+    topic gets no self-loop. Built from the same extraction as the raw edges, so it is a pure function
+    of the current callables' source."""
+    shared: dict[tuple[tuple[str, str], tuple[str, str]], set[str]] = defaultdict(set)
+    for topic, pubs in publishers.items():
+        for pub in pubs:
+            for sub in subscribers.get(topic, ()):
+                if pub[0] != sub[0]:
+                    shared[(pub, sub)].add(topic)
+    return [
+        GraphEdge("NOTIFIES", pub_label, {"id": pub_id}, sub_label, {"id": sub_id},
+                  {"provenance": "message-bus", "topics": sorted(found)})
+        for ((pub_id, pub_label), (sub_id, sub_label)), found in sorted(shared.items())
+    ]
 
 
 def _read_callables(writer: GraphWriter):
@@ -133,7 +167,10 @@ def _read_callables(writer: GraphWriter):
 
 
 def _clear_prior_layer(writer: GraphWriter) -> None:
-    """Drop this hook's whole layer so a re-run rebuilds from the current graph (idempotent)."""
+    """Drop this hook's whole layer so a re-run rebuilds from the current graph (idempotent). Runs
+    before the early returns, so the last publish or subscribe removed from the code takes its
+    derived NOTIFIES edges with it."""
     writer.query("MATCH ()-[r:PUBLISHES_TO]->() DELETE r")
     writer.query("MATCH ()-[r:SUBSCRIBES_TO]->() DELETE r")
+    writer.query("MATCH ()-[r:NOTIFIES]->() WHERE r.provenance = 'message-bus' DELETE r")
     writer.query("MATCH (n:Topic) DETACH DELETE n")

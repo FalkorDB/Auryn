@@ -46,9 +46,14 @@ DEFAULT_QUERY_TIMEOUT_MS = 15000
 # report "everything in the same namespace" as impacted by default. INVOKES is the
 # derived cross-service call the HTTP stitch writes (caller -> handler, across the
 # request/response seam) so blast radius and reachability span repos and languages
-# in one traversal instead of dying at the first HTTP boundary.
-DEFAULT_IMPACT_EDGE_TYPES = ("CALLS", "INVOKES", "DEPENDS_ON", "READS", "WRITES", "REFERENCES")
-DEFAULT_CLOSURE_CALL_EDGE_TYPES = ("CALLS", "INVOKES")
+# in one traversal instead of dying at the first HTTP boundary. NOTIFIES is its async
+# sibling, written by the message-bus stitch (publisher -> subscriber, across a topic --
+# ADR 0008): not a call, since the publisher never waits on its subscribers, but the next
+# step of the same flow, so the reachability walks follow it too. ASYNC_EDGE_TYPES names
+# the edges a dependency walk must leave out (see impact.impact_of_diff).
+DEFAULT_IMPACT_EDGE_TYPES = ("CALLS", "INVOKES", "NOTIFIES", "DEPENDS_ON", "READS", "WRITES", "REFERENCES")
+DEFAULT_CLOSURE_CALL_EDGE_TYPES = ("CALLS", "INVOKES", "NOTIFIES")
+ASYNC_EDGE_TYPES = ("NOTIFIES",)
 DEFAULT_CLOSURE_DATA_EDGE_TYPES = ("READS", "WRITES")
 
 _SAFE_REL_TYPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -169,8 +174,8 @@ def serialize_edge(from_id: str, to_id: str, rel_type: str, rel_props) -> dict:
 
 def serialize_edge_lean(from_id: str, to_id: str, rel_type: str, rel_props) -> dict:
     """serialize_edge trimmed to the fields that carry meaning for a call-chain list --
-    direction (`from` -> `to`), the relation `type`, and the `resolution`/`via` provenance
-    when present. Drops the full property bag (`argument_types`, `type_arguments`, ...) that a
+    direction (`from` -> `to`), the relation `type`, the `resolution`/`via` provenance when
+    present, and the `topics` a NOTIFIES hop crosses. Drops the full property bag (`argument_types`, `type_arguments`, ...) that a
     who_calls/callees result would otherwise multiply across dozens of edges. The viewer's
     edge-returning paths (neighbors / all_nodes_and_edges / shortest_path) keep the full
     serialize_edge; only the traversal-list tools use this."""
@@ -180,6 +185,8 @@ def serialize_edge_lean(from_id: str, to_id: str, rel_type: str, rel_props) -> d
         edge["resolution"] = props["resolution"]
     if "via" in props:
         edge["via"] = props["via"]
+    if "topics" in props:
+        edge["topics"] = props["topics"]
     return edge
 
 
@@ -599,7 +606,8 @@ def impact_of(
 ) -> dict | None:
     """Change-impact traversal: every node reachable from `node_id` within
     `max_depth` hops over `edge_types` (default: CALLS/DEPENDS_ON/READS/WRITES/
-    REFERENCES -- the "this uses that" edges every ingestor writes). `direction`
+    REFERENCES -- the "this uses that" edges every ingestor writes -- plus the
+    stitches' INVOKES and NOTIFIES across an HTTP or message-bus hop). `direction`
     is "downstream" (what this node's changes could break, following edges
     outward), "upstream" (what could force this node to change, following edges
     inward), or "both" (each direction queried and reported separately, not
@@ -749,7 +757,8 @@ def trace_entrypoint(
 
     # CALLS closure from the root(s), transitively crossing the HTTP seam so the trace is truly
     # end to end -- a checkout that hops React -> C# gateway -> Python platform reaches the
-    # money-moving code, not just the first service's handler.
+    # money-moving code, not just the first service's handler -- and the message-bus hop
+    # (NOTIFIES), so it also reaches the listener an order-placed event sets off.
     closure, functions_truncated = _closure_across_seam(
         graph, root_ids, call_type_pattern, depth_range, limit
     )
@@ -799,8 +808,10 @@ def _call_neighbors(graph: Graph, node_id: str, direction: str, max_depth: int, 
         raise ValueError(f"max_depth must be between 1 and {MAX_ALLOWED_DEPTH}, got {max_depth!r}")
     # callers = who reaches this (inward); callees = what this reaches (outward). CALLS is an
     # in-process call; INVOKES is the HTTP stitch's derived cross-service call (caller -> handler),
-    # so "who calls X" spans the request/response seam across repos and languages, not just one repo.
-    pattern = f"<-[:CALLS|INVOKES*1..{max_depth}]-" if direction == "callers" else f"-[:CALLS|INVOKES*1..{max_depth}]->"
+    # so "who calls X" spans the request/response seam across repos and languages, not just one repo;
+    # NOTIFIES is the message-bus stitch's publisher -> subscriber hop, so it spans a topic too.
+    types = _validated_rel_type_pattern(DEFAULT_CLOSURE_CALL_EDGE_TYPES)
+    pattern = f"<-[:{types}*1..{max_depth}]-" if direction == "callers" else f"-[:{types}*1..{max_depth}]->"
     rows = graph.ro_query(
         f"MATCH (n:Entity {{id: $id}}){pattern}(m) RETURN DISTINCT m LIMIT $limit",
         {"id": node_id, "limit": limit + 1},

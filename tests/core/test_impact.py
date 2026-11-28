@@ -321,6 +321,21 @@ def test_impact_of_diff_unmapped_file(graph):
     assert report["impact"]["total_affected"] == 0
 
 
+def test_impact_of_diff_does_not_walk_back_over_an_async_hop(graph):
+    """A publisher does not depend on its subscribers: changing a listener must not report the
+    publisher (or the callers above it) as broken, though impact_of follows the same NOTIFIES edge."""
+    graph.query(
+        "MATCH (place:Function {name:'place_order'}) "
+        "CREATE (on:Method {id:'inventory://inventory/Listener.on_order', name:'on_order', "
+        "file_path:'inventory/listener.py', line_start:3, line_end:9}), "
+        "(place)-[:NOTIFIES {provenance:'message-bus', topics:['order.placed']}]->(on)"
+    )
+    report = impact_of_diff(graph, {"inventory/listener.py": [(4, 5)]})
+    assert [s["name"] for s in report["changed_symbols"]] == ["on_order"]
+    assert report["impact"]["total_affected"] == 0
+    assert report["impact"]["cross_service_consumers"] == []
+
+
 def test_symbols_in_ranges_reports_mapped_paths(graph):
     syms, mapped = symbols_in_ranges(graph, {"orders/db.py": [(10, 12)], "config.yaml": [(1, 2)]})
     assert {s["name"] for s in syms} == {"get_connection"}

@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import git
 
-from auryn.core import ingest
+from auryn.core import graph_queries, ingest
 from auryn.core.graph_client import GraphWriter
-from auryn.core.graph_model import GraphNode
+from auryn.core.graph_model import GraphEdge, GraphNode
 from auryn.ingestors.events.stitch import _extract, _valid_topic, stitch
 
 
@@ -192,3 +192,87 @@ def test_event_bus_layer_tracks_incremental_resync(graph, tmp_path):
     assert graph.query(
         "MATCH (:Function {name:'watch'})-[:SUBSCRIBES_TO]->(:Topic {name:'orders'}) RETURN count(*)"
     ).result_set == [[1]]
+
+
+def _notifies(graph):
+    return graph.query(
+        "MATCH (a)-[r:NOTIFIES]->(b) RETURN a.name, b.name, r.topics, r.provenance ORDER BY a.name, b.name"
+    ).result_set
+
+
+def test_stitch_derives_notifies_from_publisher_to_subscriber(graph):
+    """The Topic node is a "V" (publisher and subscriber both point INTO it), so the stitch also writes
+    one direct publisher -NOTIFIES-> subscriber edge per pair, with every topic the two share. A callable
+    that subscribes to its own topic gets no self-loop."""
+    w = GraphWriter(graph)
+    _fn(w, "py://app/ship", "ship", "def ship(p):\n    p.send('orders', x)\n    p.send('audit', x)\n")
+    _fn(w, "py://app/watch", "watch", "def watch(c):\n    c.subscribe(['orders', 'audit'])\n")
+    _fn(w, "py://app/retry", "retry", "def retry(p, c):\n    p.send('again', x)\n    c.subscribe(['again'])\n")
+
+    report = stitch(w)
+
+    assert report["notifies_edges"] == 1
+    assert _notifies(graph) == [["ship", "watch", ["audit", "orders"], "message-bus"]]
+
+
+def test_notifies_is_rebuilt_from_the_current_sources(graph):
+    """NOTIFIES is a pure function of the callables' source: a subscriber that arrives after its
+    publisher (another repo ingested later) gets the edge, a re-run adds no duplicate, and removing the
+    last broker call drops the edge even though the stitch then has nothing to write."""
+    w = GraphWriter(graph)
+    _fn(w, "py://shop/ship", "ship", "def ship(p):\n    p.send('orders', x)\n")
+    stitch(w)
+    assert _notifies(graph) == []
+
+    _fn(w, "java://inv/Listener.on", "on", '@KafkaListener(topics = "orders")\nvoid on(String m) { }',
+        label="Method")
+    stitch(w)
+    stitch(w)
+    assert _notifies(graph) == [["ship", "on", ["orders"], "message-bus"]]
+
+    _fn(w, "py://shop/ship", "ship", "def ship(p):\n    return None\n")
+    _fn(w, "java://inv/Listener.on", "on", "void on(String m) { }", label="Method")
+    assert stitch(w) is None
+    assert _notifies(graph) == []
+
+
+def test_clear_leaves_another_producers_notifies_edges(graph):
+    """The stitch drops only its own `message-bus` NOTIFIES edges, the way the HTTP stitch drops only
+    its own INVOKES."""
+    w = GraphWriter(graph)
+    _fn(w, "py://a/f", "f", "def f():\n    return 1\n")
+    _fn(w, "py://a/g", "g", "def g():\n    return 2\n")
+    w.merge_edge(GraphEdge("NOTIFIES", "Function", {"id": "py://a/f"}, "Function", {"id": "py://a/g"},
+                           {"provenance": "other"}))
+    stitch(w)
+    assert _notifies(graph) == [["f", "g", None, "other"]]
+
+
+def test_directed_traversals_cross_the_topic(graph):
+    """Before NOTIFIES every directed walk stopped at the Topic, because the subscriber's edge points
+    INTO it. who_calls, callees, impact_of, trace_entrypoint and a directed find_path now reach across,
+    and the edge they return names the hop and its topic."""
+    w = GraphWriter(graph)
+    _fn(w, "py://shop/checkout", "checkout", "def checkout(p):\n    ship(p)\n")
+    _fn(w, "py://shop/ship", "ship", "def ship(p):\n    p.send('orders', x)\n")
+    _fn(w, "java://inv/Listener.on", "on", '@KafkaListener(topics = "orders")\nvoid on(String m) { }',
+        label="Method")
+    w.merge_edge(GraphEdge("CALLS", "Function", {"id": "py://shop/checkout"}, "Function",
+                           {"id": "py://shop/ship"}, {"resolution": "name"}))
+    stitch(w)
+    checkout, ship, listener = "py://shop/checkout", "py://shop/ship", "java://inv/Listener.on"
+
+    who = graph_queries.callers(graph, listener, max_depth=2)
+    assert {n["id"] for n in who["nodes"]} == {ship, checkout}
+    assert {"from": ship, "to": listener, "type": "NOTIFIES", "topics": ["orders"]} in who["edges"]
+
+    assert listener in {n["id"] for n in graph_queries.callees(graph, ship)["nodes"]}
+    assert listener in {n["id"] for n in graph_queries.trace_entrypoint(graph, checkout)["functions"]}
+
+    impact = graph_queries.impact_of(graph, listener, direction="upstream")
+    assert {i["node"]["id"] for i in impact["impacted"]} == {ship, checkout}
+    impact = graph_queries.impact_of(graph, checkout, direction="downstream")
+    assert listener in {i["node"]["id"] for i in impact["impacted"]}
+
+    path = graph_queries.shortest_path(graph, checkout, listener, directed=True)
+    assert path["found"] and [e["type"] for e in path["edges"]] == ["CALLS", "NOTIFIES"]
