@@ -24,12 +24,14 @@ class RawImport:
     `from a.b import C as D`  -> local="D", target="a.b.C", is_module=False
     `import a.b as m`         -> local="m", target="a.b",   is_module=True
     `import a`                -> local="a", target="a",     is_module=True
-    Relative imports are resolved to absolute `target` at parse time when possible.
+    `aliased` is True for an `import ... as` -- `import a.b as a` binds `a.b`, a plain `import a.b`
+    binds `a`. Relative imports are resolved to absolute `target` at parse time when possible.
     """
 
     local: str
     target: str
     is_module: bool
+    aliased: bool = False
 
 
 @dataclass
@@ -79,6 +81,7 @@ class RawFunction:
     line_start: int = 0
     line_end: int = 0
     calls: list[RawCall] = field(default_factory=list)
+    local_names: list[str] = field(default_factory=list)  # names the body binds itself (file_parser._local_names)
     self_attrs: list[RawAttribute] = field(default_factory=list)  # methods only: self.x = ... targets
     source: str = ""  # the def's source text (shared `source` property, as C/C#/PL-SQL store it)
     doc: str = ""  # shared `doc` property: leading `#` comment block above the def, cleaned
@@ -108,4 +111,5 @@ class RawModule:
     classes: list[RawClass] = field(default_factory=list)
     functions: list[RawFunction] = field(default_factory=list)
     calls: list[RawCall] = field(default_factory=list)  # module-scope (top-level) call sites
+    local_names: list[str] = field(default_factory=list)  # names the top-level code rebinds (file_parser._local_names)
     parse_ok: bool = True  # False if the file failed to parse (SyntaxError) -- see file_parser

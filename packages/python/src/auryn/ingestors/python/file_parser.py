@@ -136,6 +136,7 @@ def parse_module(source: bytes | str, path: str, package_dirs: frozenset[str] | 
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     module.functions.append(_function(node, src))
             module.calls = _module_calls(tree)
+            module.local_names = _local_names(tree.body, module_scope=True)
         return module
     except SyntaxError as e:
         # Broken (mid-edit) code: flag it so the resync can preserve the file's last-good
@@ -175,7 +176,7 @@ def _imports(node: ast.Import | ast.ImportFrom, current_dotted: str, is_package:
     if isinstance(node, ast.Import):
         for alias in node.names:
             local = alias.asname or alias.name.split(".")[0]
-            out.append(RawImport(local=local, target=alias.name, is_module=True))
+            out.append(RawImport(local=local, target=alias.name, is_module=True, aliased=bool(alias.asname)))
         return out
 
     base = _resolve_from_base(node, current_dotted, is_package)
@@ -252,6 +253,7 @@ def _function(node: ast.FunctionDef | ast.AsyncFunctionDef, src: _Source, *, in_
         line_start=node.lineno,
         line_end=node.end_lineno or node.lineno,
         calls=_calls(node),
+        local_names=_local_names(node.body),
         source=src.segment(node),
         doc=src.leading_comment(_decl_top_line(node)),
         nested=_nested_functions(node.body, src),
@@ -408,6 +410,60 @@ def _calls(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[RawCall]:
     the decorators/defaults on the `def` (they run in the enclosing scope) and any nested def's
     body (its own scope)."""
     return _calls_in_body(node.body)
+
+
+def _local_names(body: list[ast.stmt], *, module_scope: bool = False) -> list[str]:
+    """The names a scope's own code binds, parameters aside: an assignment / `for` / `with` /
+    walrus target, `except ... as e`, a `case` capture -- and, in a function body, a nested def or
+    class and an `import`. There such a name is that local, whatever the module imports or
+    defines under the same name (see the jedi engine's fallback in resolution._resolve_call).
+    At `module_scope` a def, a class and an import ARE the module's names -- what the ast rules
+    resolve to -- so only a name the top-level code rebinds counts: `db = make()` after
+    `from pkg import db`, or a second def / class / import of a name one of them already bound
+    (`def helper` then `from lib import helper`; `from pkg import db` and, under an `if` or a
+    `try`, `from otherlib import db`) -- the rules don't know which of the two is live. A nested
+    def or class body is its own scope, as in _calls_in_body, but its decorators and defaults run
+    here, and so does a lambda's body, whose calls _calls_in_body counts as this scope's. A
+    comprehension's targets are counted although they end with it -- a call through one, inside
+    it, is just as dynamic."""
+    names: set[str] = set()
+    bound: dict[str, object] = {}  # module scope: what a def / class / import first bound a name to
+
+    def visit(n: ast.AST) -> None:
+        nested_scope = isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        if module_scope and isinstance(n, ast.AnnAssign) and n.value is None:
+            return  # `fetch: Callable` declares the name, it doesn't bind it (in a function it does)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            names.add(n.id)
+        elif isinstance(n, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and n.name:
+            names.add(n.name)
+        elif isinstance(n, ast.MatchMapping) and n.rest:
+            names.add(n.rest)
+        elif nested_scope:
+            if not module_scope or bound.setdefault(n.name, n) is not n:
+                names.add(n.name)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for alias in n.names:
+                local = (alias.asname or alias.name).split(".")[0]
+                # `import a.b` and `import a.c` both bind `a`, to the same package: no rebinding;
+                # nor does `import a as a`, which is `import a`
+                plain = isinstance(n, ast.Import) and alias.asname in (None, alias.name)
+                to = local if plain else (getattr(n, "module", None), getattr(n, "level", 0), alias.name)
+                if not module_scope or bound.setdefault(local, to) != to:
+                    names.add(local)
+        if nested_scope or isinstance(n, ast.Lambda):  # what its definition evaluates, here
+            args = getattr(n, "args", None)
+            here = [*getattr(n, "decorator_list", []), *(args.defaults + args.kw_defaults if args else [])]
+            for child in here + ([n.body] if isinstance(n, ast.Lambda) else []):
+                if child is not None:  # a keyword-only parameter without a default
+                    visit(child)
+        else:
+            for child in ast.iter_child_nodes(n):
+                visit(child)
+
+    for stmt in body:
+        visit(stmt)
+    return sorted(names)
 
 
 def _module_calls(tree: ast.Module) -> list[RawCall]:

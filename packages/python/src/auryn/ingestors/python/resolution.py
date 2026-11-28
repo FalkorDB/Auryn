@@ -80,6 +80,7 @@ class _ModCtx:
     idx: "_Index"
     import_map: dict
     local_funcs: set
+    rebound: frozenset  # names the module's top-level code rebinds (RawModule.local_names)
     module_path: str
     module_dotted: str
     oracle: SemanticOracle | None
@@ -301,6 +302,7 @@ def _emit_module(m: RawModule, idx: _Index, oracle: SemanticOracle | None) -> It
         idx=idx,
         import_map={imp.local: imp for imp in m.imports},
         local_funcs={fn.name for fn in m.functions},
+        rebound=frozenset(m.local_names),
         module_path=m.path,
         module_dotted=m.dotted,
         oracle=oracle,
@@ -438,7 +440,8 @@ def _resolve_scope_calls(
     calls introduce (ADR 0004, deduped via `idx.emitted_externs`), and the unresolved simple-name
     call texts (jedi engine only, for the node's `unresolved_calls` property). Shared by
     `_emit_function` and `_emit_module` so a top-level call and a function-body call resolve
-    identically; only the caller node (`caller_label`/`caller_id`) differs."""
+    identically; only the caller node (`caller_label`/`caller_id`) differs. `scope_locals`: the
+    names bound locally in this/enclosing scopes -- see _resolve_call."""
     call_edges: list[GraphEdge] = []
     external_nodes: list[GraphNode] = []
     unresolved_calls: list[str] = []
@@ -478,6 +481,11 @@ def _emit_function(fn: RawFunction, scope_id: str, qual_prefix: str, scope_dotte
     # the same name. The ast fallback stays conservative (shadowed -> unresolved, never a WRONG edge);
     # the jedi engine resolves the real target by inference.
     scope_locals = enclosing_locals | frozenset(param_names) | frozenset(n.name for n in fn.nested)
+    if ctx.oracle is not None:
+        # The jedi engine reaches the ast rules only as a fallback (see _resolve_call), and there a
+        # call through ANY name the body binds itself is the dynamic case too: an assignment, an
+        # `except ... as`, an import in the body (file_parser._local_names).
+        scope_locals |= frozenset(fn.local_names)
     fn_id = ids.method_id(scope_id, fn.name, param_names) if is_method else ids.function_id(scope_id, fn.name, param_names)
     label = "Method" if is_method else "Function"
     annotated_ret = fn.returns is not None
@@ -633,10 +641,17 @@ def _resolve_call(call: RawCall, ctx: _ModCtx, scope_locals: frozenset = frozens
     if ctx.oracle is not None:
         full_name = ctx.oracle.resolve_call(ctx.module_path, call.line, call.col)
         if not full_name:
-            # The oracle found nothing; still surface a bare builtin call (len(), getattr()).
-            if call.is_simple_name and call.name in _BUILTINS:
-                return _External("builtins", call.name)
-            return None
+            # The oracle found nothing: dynamic dispatch, or an import Jedi can't follow (a `src/`
+            # package imported from tests/, a library not installed next to auryn). Bind it by the
+            # ast rules instead of dropping an edge the fast pass draws -- they name a callee from
+            # its import or its own module, and still surface a bare builtin call. Those rules are
+            # module-wide, though: a parameter or local of the calling scope that shadows the name
+            # IS the dynamic case (`def run(client): client.get()`, `db = make(); db.get()`), and
+            # so is a name the module's top-level code rebinds (`from pkg import db`, then
+            # `db = make()`) for every scope of that module -- those stay unresolved.
+            if (call.name if call.is_simple_name else call.receiver) in scope_locals | ctx.rebound:
+                return None
+            return _resolve_call_ast(call, ctx, scope_locals)
         target = ctx.idx.callable_by_qname.get(full_name)
         if target is None:
             if full_name in ctx.idx.class_by_qname:
@@ -651,7 +666,12 @@ def _resolve_call(call: RawCall, ctx: _ModCtx, scope_locals: frozenset = frozens
         # "app.db.Connection.execute" -> "Connection") rather than a second inference.
         receiver_type = full_name.rsplit(".", 2)[-2] if via_member and tlabel == "Method" else None
         return _Call(tid, tlabel, "inferred" if via_member else "resolved", receiver_type)
+    return _resolve_call_ast(call, ctx, scope_locals)
 
+
+def _resolve_call_ast(call: RawCall, ctx: _ModCtx, scope_locals: frozenset = frozenset()) -> _Call | _External | None:
+    """The ast rules for a call: the whole of the ast engine's resolution, and the jedi engine's
+    fallback for a call its oracle couldn't bind (see _resolve_call)."""
     # ast path: import-bound or same-module direct name calls -> project functions first.
     if call.is_simple_name:
         # A name bound locally in this or an enclosing scope -- a parameter, or a nested def (so a call
@@ -694,7 +714,11 @@ def _resolve_call(call: RawCall, ctx: _ModCtx, scope_locals: frozenset = frozens
         # method keys on the class qname, both == the import target. So we do NOT gate on
         # `is_module` (which is False for every `from X import Y`, the common `from pkg import
         # submodule; submodule.fn()` idiom that otherwise goes undetected -> no cross-repo edge).
-        target_dotted = ctx.import_map[call.receiver].target
+        imp = ctx.import_map[call.receiver]
+        # ...except a dotted `import pkg.core`: it binds `pkg`, the package, so `pkg.helper()` is
+        # the package's own `helper`, not `pkg.core.helper` (`import pkg.core as pkg` does bind it).
+        unaliased_dotted = imp.is_module and not imp.aliased and imp.target.startswith(f"{imp.local}.")
+        target_dotted = imp.local if unaliased_dotted else imp.target
         full = f"{target_dotted}.{call.name}"
         hit = ctx.idx.callable_by_qname.get(full)
         if hit and hit[1] == "Function":

@@ -14,9 +14,9 @@ from pathlib import Path
 import pytest
 
 from auryn.core.graph_model import GraphEdge, GraphNode
-from auryn.ingestors.python import resolution
+from auryn.ingestors.python import ids, resolution
 from auryn.ingestors.python.file_parser import parse_module
-from auryn.ingestors.python.jedi_engine import JediOracle
+from auryn.ingestors.python.jedi_engine import JediOracle, _callee_name, build_precomputed_oracle
 
 _SAMPLE = Path(__file__).resolve().parents[3] / "demo" / "python-ingestor" / "sample"
 _PROJ = "python://demo"
@@ -154,6 +154,198 @@ def test_instantiation_resolves_to_constructor(tmp_path):
 
     # Bare has no __init__ -> no edge to a __init__ METHOD (it now edges to the Class node instead, #785)
     assert not any(str(e.to_key["id"]).endswith("bare.method.__init__()") for e in _edges_of(items, "CALLS"))
+
+
+# -- src/ layout: a callee must be named the way the ast pass named the file defining it --------
+
+
+def _materialize(root, files):
+    """Write `files` under `root` and parse them the way _jedi_sync_at does (ingest-wide package
+    context, sorted paths)."""
+    for rel, text in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    pkg_dirs = ids.package_dirs_from_paths(files)
+    return [parse_module(text, rel, pkg_dirs) for rel, text in sorted(files.items())]
+
+
+@pytest.mark.parametrize("oracle_kind", ["inline", "precomputed"])
+def test_src_layout_calls_bind_to_project_callables(tmp_path, oracle_kind):
+    """Jedi names `src/pkg/db.py` by its path under the project root (`src.pkg.db`); the ast pass
+    anchors it at its import root (`pkg.db`). A same-module, relative-import or receiver-typed
+    callee must still land on the project node -- not degrade to an `extern://python/src.pkg...`
+    placeholder -- through both oracles (the precomputed one is what _jedi_sync_at runs)."""
+    modules = _materialize(tmp_path, {
+        "src/pkg/__init__.py": "",
+        "src/pkg/db.py": (
+            "class Connection:\n"
+            "    def execute(self, sql):\n"
+            "        return sql\n"
+            "\n"
+            "\n"
+            "def get_connection():\n"
+            "    return Connection()\n"
+        ),
+        "src/pkg/api.py": (
+            "from .db import get_connection\n"
+            "\n"
+            "\n"
+            "def _sql():\n"
+            "    return 'select 1'\n"
+            "\n"
+            "\n"
+            "def run():\n"
+            "    conn = get_connection()\n"
+            "    return conn.execute(_sql())\n"
+        ),
+    })
+    if oracle_kind == "inline":
+        oracle = JediOracle(str(tmp_path), modules)
+    else:
+        oracle = build_precomputed_oracle(str(tmp_path), modules, workers=1)
+    items = list(resolution.resolve(modules, _PROJ, oracle=oracle))
+
+    calls = {
+        str(e.to_key["id"]): e.properties
+        for e in _edges_of(items, "CALLS")
+        if e.from_key["id"] == "python://demo/module/pkg.api.func.run()"
+    }
+    # the same-module and the `from .db` callee are bound by name -> "resolved"
+    assert calls["python://demo/module/pkg.api.func._sql()"]["resolution"] == "resolved"
+    assert calls["python://demo/module/pkg.db.func.get_connection()"]["resolution"] == "resolved"
+    # the receiver-typed call still reaches the method, as "inferred"
+    execute = calls["python://demo/module/pkg.db.class.connection.method.execute(self,sql)"]
+    assert (execute["resolution"], execute["receiver_type"]) == ("inferred", "Connection")
+    # nothing here is defined outside the project -> not one placeholder
+    assert not [e for e in _edges_of(items, "CALLS") if e.properties["resolution"] == "external"]
+
+
+def test_callee_name_is_left_alone_when_jedi_names_it_as_the_importer_spelled_it():
+    """Jedi stopped at an import inside a project file (a re-export of something it can't follow):
+    the name is the import path, not `<module>.<name>` -- there is no module prefix to re-anchor."""
+    by_file = {"/repo/src/pkg/__init__.py": "pkg"}
+    assert _callee_name("src.pkg.boot", "src.pkg", "/repo/src/pkg/__init__.py", by_file) == "pkg.boot"
+    assert _callee_name("lib.fetch", "src.pkg", "/repo/src/pkg/__init__.py", by_file) == "lib.fetch"
+    assert _callee_name("src.pkgs.fetch", "src.pkg", "/repo/src/pkg/__init__.py", by_file) == "src.pkgs.fetch"
+
+
+def test_callee_in_a_namespace_dir_binds_by_file(tmp_path):
+    """`plugins/` is a PEP-420 namespace dir (no __init__.py), so the ast pass keeps the
+    context-free name for its modules (`src.pkg.plugins.hooks`) while Jedi follows the import and
+    names the callee `pkg.plugins.hooks.fire`. Matching the callee on the *file* that defines it
+    binds it to whatever dotted name that file was indexed under."""
+    modules = _materialize(tmp_path, {
+        "src/pkg/__init__.py": "",
+        "src/pkg/plugins/hooks.py": "def fire():\n    return 1\n",
+        "src/pkg/api.py": "from pkg.plugins.hooks import fire\n\n\ndef run():\n    return fire()\n",
+    })
+    hooks = next(m for m in modules if m.path == "src/pkg/plugins/hooks.py")
+    items = list(resolution.resolve(modules, _PROJ, oracle=JediOracle(str(tmp_path), modules)))
+
+    targets = {str(e.to_key["id"]) for e in _edges_of(items, "CALLS")
+               if e.from_key["id"] == "python://demo/module/pkg.api.func.run()"}
+    assert targets == {f"python://demo/module/{hooks.dotted}.func.fire()"}
+
+
+@pytest.mark.parametrize("oracle_kind", ["inline", "precomputed"])
+def test_call_jedi_cannot_follow_falls_back_to_the_ast_rules(tmp_path, oracle_kind):
+    """Jedi can't follow `from pkg.core import helper` out of tests/ (`src/` isn't on its path), nor
+    an import of a library that isn't installed here, and answers nothing for those calls. They
+    must still bind the way the fast pass binds them -- by the import -- not vanish from the graph."""
+    modules = _materialize(tmp_path, {
+        "src/pkg/__init__.py": "",
+        "src/pkg/core.py": "def helper():\n    return 1\n",
+        "tests/test_core.py": (
+            "from notinstalled_lib import fetch\n"
+            "from pkg import core\n"
+            "from pkg import core as rebound\n"
+            "from pkg.core import helper\n"
+            "\n"
+            "\n"
+            "def test_it():\n"
+            "    fetch(helper())\n"
+            "\n"
+            "\n"
+            "def test_shadowed(fetch, helper):\n"
+            "    fetch(helper())\n"
+            "\n"
+            "\n"
+            "def test_shadowed_by_a_local(make):\n"
+            "    core = make()\n"
+            "    core.helper()\n"
+            "\n"
+            "\n"
+            "def test_shadowed_by_an_except_name():\n"
+            "    try:\n"
+            "        pass\n"
+            "    except ValueError as core:\n"
+            "        core.helper()\n"
+            "\n"
+            "\n"
+            "def test_shadowed_by_a_local_import():\n"
+            "    from notinstalled_lib import core\n"
+            "    core.helper()\n"
+            "\n"
+            "\n"
+            "def test_shadowed_by_the_module():\n"
+            "    rebound.helper()\n"
+            "\n"
+            "\n"
+            "rebound = object()  # its own name: the function-local cases above rest on their own guards\n"
+            "rebound.helper()\n"
+        ),
+    })
+    oracle = JediOracle(str(tmp_path), modules) if oracle_kind == "inline" else build_precomputed_oracle(str(tmp_path), modules, workers=1)
+    items = list(resolution.resolve(modules, _PROJ, oracle=oracle))
+
+    calls = {str(e.to_key["id"]): e.properties["resolution"] for e in _edges_of(items, "CALLS")
+             if e.from_key["id"] == "python://demo/module/tests.test_core.func.test_it()"}
+    assert calls == {
+        "python://demo/module/pkg.core.func.helper()": "resolved",
+        "extern://python/notinstalled_lib::fetch": "external",
+    }
+    # ...but not where the scope's own parameter or local (an assignment, `except ... as`, an
+    # import in the body) shadows the import: that call IS dynamic. Nor where the top-level code
+    # rebinds the name -- at module scope, or in a function that calls through that global.
+    assert not [e for e in _edges_of(items, "CALLS") if "test_shadowed" in str(e.from_key["id"])]
+    top_level = {str(e.to_key["id"]) for e in _edges_of(items, "CALLS")
+                 if e.from_key["id"] == "python://demo/module/tests.test_core"}
+    assert [callee.rsplit("::", 1)[-1] for callee in top_level] == ["object"]  # `object()`, nothing else
+
+
+def test_fallback_steps_aside_for_a_name_the_module_binds_twice(tmp_path):
+    """The ast rules don't look at order: `def helper` followed by `from missing_lib import helper`
+    reads as the module's own function, and `from pkg import core` wins over a `from otherlib
+    import core` under an `if`. Where Jedi found nothing the deep pass has no edge to add there:
+    a name with two module-level bindings stays unresolved, as on main."""
+    modules = _materialize(tmp_path, {
+        "src/pkg/__init__.py": "",
+        "src/pkg/core.py": "def helper():\n    return 1\n",
+        "tests/test_core.py": (
+            "import sys\n"
+            "from pkg import core\n"
+            "\n"
+            "\n"
+            "def helper():\n"
+            "    return 0\n"
+            "\n"
+            "\n"
+            "from missing_lib import helper\n"
+            "\n"
+            "if sys.platform == 'win32':\n"
+            "    from otherlib import core\n"
+            "\n"
+            "\n"
+            "def test_it():\n"
+            "    helper()\n"
+            "    core.helper()\n"
+        ),
+    })
+    items = list(resolution.resolve(modules, _PROJ, oracle=JediOracle(str(tmp_path), modules)))
+
+    assert not [e for e in _edges_of(items, "CALLS")
+                if e.from_key["id"] == "python://demo/module/tests.test_core.func.test_it()"]
 
 
 def test_collect_queries_includes_module_scope_calls():
