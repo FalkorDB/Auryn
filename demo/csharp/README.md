@@ -113,7 +113,7 @@ automatically. Ctrl-C stops the viewer when you're done.
 If you'd rather drive it yourself, `run_demo.py` is just gluing these together:
 
 ```bash
-uv run auryn run --host localhost --port 6379 csharp \
+uv run auryn run csharp \
     --path demo/csharp/src \
     --project-name Widgets.Api \
     --solution-name Acme

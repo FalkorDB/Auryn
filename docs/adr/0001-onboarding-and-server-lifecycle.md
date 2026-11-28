@@ -156,5 +156,6 @@ touched. Removing the binary itself stays a separate `uv tool uninstall auryn`.
   - `mcp`/`view`/`ingest` resolve their connection via `ensure_server(load_backend())` when no
     explicit `--host`; graph name defaults per-repo from `CLAUDE_PROJECT_DIR`/path (`core/project.py`).
     Verified end-to-end: `ingest dir` cold-starts the daemon and writes the derived graph.
-- **Deferred:** Phase 2 (the ingest/use flow polish), wiring `run`/`git-sync` to the backend
-  config (still default to an explicit host), and the opt-in OS-service lifecycle.
+- **Deferred:** Phase 2 (the ingest/use flow polish) and the opt-in OS-service lifecycle.
+  (`run`/`git-sync` were wired to the backend config later: with no `--host` they resolve it
+  like the commands above.)
