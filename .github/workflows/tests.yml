@@ -101,8 +101,10 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Build every package at a local-only version
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ env.LOCAL_VERSION }}   # the packages' own version (hatch-vcs)
         run: |
-          python .github/scripts/stamp_version.py "$LOCAL_VERSION"
+          python .github/scripts/stamp_version.py "$LOCAL_VERSION"   # ...and the auryn-* pins
           mkdir -p "$RUNNER_TEMP/dist"
           uv build --out-dir "$RUNNER_TEMP/dist" .
           for d in packages/*/; do

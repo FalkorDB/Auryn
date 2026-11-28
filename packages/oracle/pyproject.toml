@@ -1,11 +1,14 @@
 [project]
 name = "auryn-oracle"
-version = "0.1.0"
+dynamic = ["version", "dependencies"]
 description = "Oracle-stack plugins for Auryn: live-DB and file-based PL/SQL (vendored ANTLR grammar) and Redgate schema-catalog reconstruction (oraschema). (The generic relational-DB schema ingestor now lives in auryn-sql.)"
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
 requires-python = ">=3.12"
 license = { text = "MIT" }
+# Declared here, not under [project]: hatch_build.py fills each `auryn-*==` pin in with the version
+# being built, so these fields are dynamic (see `dynamic` above).
+[tool.hatch.metadata.hooks.custom]
 dependencies = [
     "auryn-core",
     # oraschema (Redgate schema-catalog reconstruction) reuses the generic relational
@@ -46,10 +49,28 @@ plsql = "auryn.ingestors.plsql.file_ingestor"
 oraschema = "auryn.ingestors.oraschema.ingestor"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 # Includes the vendored ANTLR grammar under src/auryn/ingestors/plsql/grammar/
 # (all generated as .py modules, so they ride along as ordinary package modules).
 [tool.hatch.build.targets.wheel]
 packages = ["src/auryn"]
+
+# ── version: derived from git (hatch-vcs) ────────────────────────────────────
+# Every commit -- and every build of a modified tree (local part `+g<sha>.d<timestamp>`) -- gets
+# its own version, and uv's build cache is keyed on the git commit and the source files (by default
+# it only watches pyproject.toml). Together these stop `uv tool install --force <clone>` from
+# silently reinstalling a stale cached build. An sdist keeps the version it was built with, and a
+# `git archive` / GitHub ZIP reads it from .git_archival.txt; a tree with neither falls back to
+# 0.0.0.dev0 -- a development version, so it can't pass for a release.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0.dev0"
+raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" }, { file = "hatch_build.py" }, { git = { commit = true, tags = true } },
+    { file = "src/**/*.py" }, { file = "src/**/*.js" }, { file = "src/**/*.md" }, { file = "src/**/*.cs" }, { file = "src/**/*.html" }, { file = "src/**/*.css" }, { file = "src/**/*.csproj" },
+]

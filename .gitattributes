@@ -24,3 +24,8 @@
 # Windows-only scripts, if any are ever added, must keep CRLF.
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# `git archive` and GitHub's source ZIPs carry no git history: this fills in the nearest tag and
+# the commits since, so a build from one still gets its real version. With no tag behind it there
+# is nothing to fill in, and the build falls back like any tree without git (see [tool.hatch.version]).
+.git_archival.txt  export-subst

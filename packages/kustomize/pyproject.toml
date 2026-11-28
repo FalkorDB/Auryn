@@ -1,6 +1,6 @@
 [project]
 name = "auryn-kustomize"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Kustomize plugin for Auryn (deployment & infrastructure tier, ADR 0007). Render-free: parses kustomization.yaml into a Resource (overlay/base) that RUNS_IMAGE the shared Image hub for each ref its images: transformer sets (newName/newTag/digest), and DEPENDS_ON the base kustomizations it layers on (resources/bases/components). A deploy-kustomize enrichment runs the shared image lifecycle. Composes with docker/compose/k8s/terraform/helm onto the same hub. Depends on auryn-core and PyYAML."
 readme = "README.md"
 authors = [{ name = "Roi Lipman", email = "roi.lipman@falkordb.com" }]
@@ -18,7 +18,7 @@ kustomize = "auryn.ingestors.kustomize.plugin"
 deploy-kustomize = "auryn.ingestors.kustomize.enrichment"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -26,3 +26,21 @@ packages = ["src/auryn"]
 
 [tool.uv.sources]
 auryn-core = { workspace = true }
+
+# ── version: derived from git (hatch-vcs) ────────────────────────────────────
+# Every commit -- and every build of a modified tree (local part `+g<sha>.d<timestamp>`) -- gets
+# its own version, and uv's build cache is keyed on the git commit and the source files (by default
+# it only watches pyproject.toml). Together these stop `uv tool install --force <clone>` from
+# silently reinstalling a stale cached build. An sdist keeps the version it was built with, and a
+# `git archive` / GitHub ZIP reads it from .git_archival.txt; a tree with neither falls back to
+# 0.0.0.dev0 -- a development version, so it can't pass for a release.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0.dev0"
+raw-options = { root = "../..", local_scheme = "node-and-timestamp" }
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" }, { git = { commit = true, tags = true } },
+    { file = "src/**/*.py" }, { file = "src/**/*.js" }, { file = "src/**/*.md" }, { file = "src/**/*.cs" }, { file = "src/**/*.html" }, { file = "src/**/*.css" }, { file = "src/**/*.csproj" },
+]
