@@ -529,8 +529,9 @@ def install(backend, host, port, username, password, ssl, trigger, git_info, yes
 @click.option("--yes", is_flag=True, default=False, help="Skip the confirmation prompt.")
 def uninstall(purge, force, yes) -> None:
     """Reverse `install`: stop the local server and deregister Auryn from every agent it was
-    registered with. Keeps ~/.auryn (your graphs) unless --purge. Your repos are untouched."""
-    from auryn.core import watcher
+    registered with. Keeps ~/.auryn (your graphs) unless --purge. In your repos, only Auryn's
+    resync block comes out of their git hooks; a repo where it can't is named, and the exit code is 1."""
+    from auryn.core import hooks, watcher
     from auryn.core.app_config import load_config
     from auryn.core.install import do_uninstall
 
@@ -541,11 +542,15 @@ def uninstall(purge, force, yes) -> None:
         if not click.confirm(msg, default=True):
             return
     watcher.stop_watcher()
-    recorded = load_config().agents
+    recorded = load_config()
     removed = do_uninstall(purge=purge, force=force).agents
-    failed = ", ".join(a.name for a in recorded if a not in removed)
+    failed = ", ".join(a.name for a in recorded.agents if a not in removed)
     if removed or not failed:
         click.echo(f"Deregistered from: {', '.join(a.name for a in removed) or '(no agents were registered)'}")
+    stuck = [repo.local_dir for repo in recorded.repos if hooks.is_installed(repo.local_dir)]
+    for local_dir in stuck:  # a hook we couldn't clean: its next commit runs `auryn sync` again
+        click.echo(f"Could not take Auryn's resync block out of the git hooks of {local_dir} -- "
+                   "remove it by hand.", err=True)
     if failed and not force:  # they stay on record, so the next run can retry
         raise click.ClickException(
             f"Could not deregister from: {failed} (see the warning above). Kept on record"
@@ -557,6 +562,8 @@ def uninstall(purge, force, yes) -> None:
     if purge:
         click.echo("Removed ~/.auryn.")
     click.echo("Remove the CLI itself with:  uv tool uninstall auryn")
+    if stuck:  # named above; a script sees it too
+        raise SystemExit(1)
 
 
 @cli.group("git-info")
@@ -846,7 +853,7 @@ def forget(path, graph_opt, project, host, port, username, password, ssl, yes, d
     pass --project to remove just that repo's subgraph (inbound cross-repo edges are cleaned up
     too). Your files are never touched."""
     from auryn.core import lifecycle
-    from auryn.core.app_config import get_repo
+    from auryn.core.app_config import get_repo, unregister_repo
     from auryn.core.project import default_graph_name, resolve_project_root
 
     client = connect_client(_resolve_connection(host, port, username, password, ssl))
@@ -878,13 +885,23 @@ def forget(path, graph_opt, project, host, port, username, password, ssl, yes, d
     if not yes and not click.confirm("Proceed?", default=False):
         click.echo("Aborted.")
         return
-    lifecycle.execute_forget(client, plan)
-    _deregister_repo(path, graph_opt, project, plan.graph_name)
+    local_dir = _unhook_repo(path, graph_opt, project, plan.graph_name)
+    try:
+        lifecycle.execute_forget(client, plan)
+    except Exception:
+        if local_dir:  # still registered, but no longer resynced on commit
+            click.echo(f"The resync hooks of {local_dir} are already removed -- run `auryn forget` again "
+                       "to finish.", err=True)
+        raise
+    if local_dir:
+        unregister_repo(local_dir)
     click.echo(f"Forgot {target}.")
 
 
-def _deregister_repo(path, graph_opt, project, graph_name) -> None:
-    """Remove a forgotten repo's git hooks + registry entry."""
+def _unhook_repo(path, graph_opt, project, graph_name) -> str | None:
+    """Take a repo's resync block out of its git hooks ahead of `forget`'s delete, and return its
+    folder, whose registry entry goes once the delete is done (None when no repo maps there). A
+    hook we can't clean stops `forget` here, with nothing deleted, so running it again retries."""
     from auryn.core import app_config, hooks
     from auryn.core.project import resolve_project_root
 
@@ -895,8 +912,12 @@ def _deregister_repo(path, graph_opt, project, graph_name) -> None:
                       if r.graph_name == graph_name and (project is None or r.project_name == project)), None)
         local_dir = match.local_dir if match else None
     if local_dir:
-        hooks.uninstall(local_dir)
-        app_config.unregister_repo(local_dir)
+        try:
+            hooks.uninstall(local_dir)
+        except (OSError, ValueError) as e:  # a hook we may not write, or a stray marker
+            raise click.ClickException(f"Could not remove the resync hooks from {local_dir} ({e}). Nothing was "
+                                       "deleted: fix that, then run `auryn forget` again.") from e
+    return local_dir
 
 
 @cli.command("sync")
