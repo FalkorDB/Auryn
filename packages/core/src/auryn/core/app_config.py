@@ -74,6 +74,11 @@ class Config:
     disabled_hooks: tuple[str, ...] = ()  # post hooks turned off machine-wide (see core/registry.py)
     embed_mode: str = "background"  # inline | background | off -- how the always-on embed runs (see embedder.embed_mode)
     git_info_enabled: bool = False  # collect local git history and public GitHub metadata on ingest
+    # Graph-schema generation this machine last ingested under (graph_model.GRAPH_SCHEMA_VERSION).
+    # 0 means "never stamped" (pre-#851, or a fresh install). When it trails the running Auryn's
+    # version, local graphs are schema-incompatible and get migrated (see schema_migration). Purely
+    # a version marker -- the graph itself is never inspected to decide this.
+    schema_version: int = 0
 
 
 def _parse_backend(section: dict) -> Backend:
@@ -132,9 +137,13 @@ def load_config() -> Config:
     # is truthy under bool() and would silently opt IN. Require a real TOML boolean `true` in a table.
     gi = data.get("git_info", {})
     git_info_enabled = isinstance(gi, dict) and gi.get("enabled") is True
+    try:
+        schema_version = int(data.get("schema_version", 0))
+    except (TypeError, ValueError):
+        schema_version = 0  # a stray value must never break an ingest
     return Config(backend=backend, agents=agents, resync_trigger=trigger, repos=repos,
                   disabled_hooks=disabled_hooks, embed_mode=embed_mode,
-                  git_info_enabled=git_info_enabled)
+                  git_info_enabled=git_info_enabled, schema_version=schema_version)
 
 
 def load_backend() -> Backend:
@@ -181,6 +190,8 @@ def save_config(config: Config) -> None:
         doc["embeddings"] = {"mode": config.embed_mode}  # only persist a non-default mode
     if config.git_info_enabled:
         doc["git_info"] = {"enabled": True}
+    if config.schema_version:
+        doc["schema_version"] = config.schema_version
     if config.repos:
         doc["repo"] = [
             {k: v for k, v in {
@@ -209,6 +220,15 @@ def set_resync_trigger(trigger: str) -> None:
     if trigger not in VALID_TRIGGERS:
         raise ValueError(f"trigger must be one of {VALID_TRIGGERS}, got {trigger!r}")
     save_config(replace(load_config(), resync_trigger=trigger))
+
+
+def set_schema_version(version: int) -> None:
+    """Persist the graph-schema generation this machine has ingested under (see
+    graph_model.GRAPH_SCHEMA_VERSION / schema_migration). Re-reads first so it only touches that one
+    field, never clobbering a concurrently-written registry entry."""
+    from dataclasses import replace
+
+    save_config(replace(load_config(), schema_version=int(version)))
 
 
 def set_embed_mode(mode: str) -> None:

@@ -130,6 +130,44 @@ def _purge_git_info_backend() -> int:
     return sum(purge_git_info(GraphWriter(client.select_graph(name))) for name in client.list_graphs())
 
 
+def _migrate_schema_if_stale(host, port, username, password, ssl) -> None:
+    """If this machine last ingested under a schema-incompatible older Auryn (#851), migrate before
+    the normal ingest/sync proceeds. Local DB (no --host + local backend): delete each registered
+    graph and re-ingest every registered repo from scratch -- a one-time clean rebuild that keeps the
+    disk hooks and registry. Remote/shared DB (any --host, or a remote backend): never destroyed,
+    only warned about. Detection is a pure version comparison (schema_migration); no graph is scanned."""
+    from pathlib import Path
+    from auryn.core.app_config import load_backend
+    from auryn.core.project import default_graph_name, resolve_project_root
+    from auryn.core.schema_migration import migrate_schema_if_stale
+
+    is_local = host is None and load_backend().mode == "local"
+
+    def _graph_for(repo) -> str:
+        return repo.graph_name or default_graph_name(resolve_project_root(repo.local_dir))
+
+    def local_migrate(repos) -> None:
+        from auryn.core import ingest as ingest_mod
+
+        client = connect_client(_resolve_connection(host, port, username, password, ssl))
+        for name in sorted({_graph_for(r) for r in repos}):  # drop each distinct graph once
+            try:
+                client.select_graph(name).delete()
+            except Exception:  # noqa: BLE001 -- a graph not present yet is fine
+                pass
+        for repo in repos:
+            root = Path(repo.local_dir)
+            if not root.exists():
+                click.secho(f"  schema migration: skipping {repo.local_dir} (path is gone)", fg="yellow", err=True)
+                continue
+            ingest_mod.ingest_directory(
+                GraphWriter(client.select_graph(_graph_for(repo))), str(root),
+                project_name=repo.project_name,
+            )
+
+    migrate_schema_if_stale(is_local=is_local, local_migrate=local_migrate)
+
+
 @cli.command("view")
 @click.option("--host", default="127.0.0.1", show_default=True, help="Host the viewer's web server binds to.")
 @click.option("--port", default=8080, show_default=True, type=int, help="Port the viewer's web server binds to.")
@@ -914,6 +952,7 @@ def sync(path, host, port, username, password, ssl, deep) -> None:
     from auryn.core.project import default_graph_name, resolve_project_root
     from auryn.core.sync_lock import sync_lock
 
+    _migrate_schema_if_stale(host, port, username, password, ssl)  # #851: one-time re-ingest across a schema upgrade
     root = resolve_project_root(path)
     # One sync per repo at a time: the git hooks fire a burst of these (a rebase starts one per
     # commit) and overlapping syncs of one project corrupt its subgraph. See core/sync_lock.py.
@@ -1316,6 +1355,8 @@ def ingest_dir(ctx: click.Context, path: str, project_name: str | None, solution
     if workers is not None:
         os.environ["AURYN_PARSE_WORKERS"] = str(workers)  # one knob for every language's parse pool
     _validate_hook_names(only_hooks + skip_hooks)
+    o = ctx.obj
+    _migrate_schema_if_stale(o["host"], o["port"], o["username"], o["password"], o["ssl"])  # #851
     graph = ctx.obj["graph_name"] or default_graph_name(resolve_project_root(path))
     writer = _ingest_writer(ctx, graph)
     try:
@@ -1374,6 +1415,8 @@ def ingest_repo(
     if workers is not None:
         os.environ["AURYN_PARSE_WORKERS"] = str(workers)  # one knob for every language's parse pool
     _validate_hook_names(only_hooks + skip_hooks)
+    o = ctx.obj
+    _migrate_schema_if_stale(o["host"], o["port"], o["username"], o["password"], o["ssl"])  # #851
     _filters = dict(include_dirs=include_dirs, exclude_dirs=exclude_dirs,
                     include_suffixes=include_suffixes, exclude_suffixes=exclude_suffixes,
                     enrichment_only=only_hooks, enrichment_skip=skip_hooks)
