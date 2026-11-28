@@ -101,6 +101,145 @@ def test_forget_demotes_inbound_cross_repo_edges(falkordb_connection, tmp_path):
         g.delete()
 
 
+# Three repos in two languages, joined through every seam a shared graph stitches: a TS caller ->
+# HTTP -> a FastAPI handler (a `pyapi://` route), a cross-repo Python call, a Kafka topic between a
+# publisher and a subscriber, and `extern://` placeholders used by one repo (json, uuid) or two (kafka).
+_SYSTEM = {
+    "web": {
+        "src/client.ts": (
+            "export async function placeOrder(items: string[]) {\n"
+            '  return fetch("/api/orders", { method: "POST", body: JSON.stringify(items) });\n'
+            "}\n"
+            "export async function getOrder(id: string) {\n"
+            "  return fetch(`/api/orders/${id}`);\n"
+            "}\n"
+        ),
+    },
+    "orders": {
+        "orders/__init__.py": "",
+        "orders/api.py": (
+            "from fastapi import FastAPI\n"
+            "from orders.service import place_order\n\n"
+            "app = FastAPI()\n\n\n"
+            '@app.post("/api/orders")\n'
+            "def create_order(payload):\n"
+            "    return place_order(payload)\n\n\n"
+            '@app.get("/api/orders/{order_id}")\n'
+            "def read_order(order_id):\n"
+            "    return order_id\n"
+        ),
+        "orders/service.py": (
+            "import json\n"
+            "from kafka import KafkaProducer\n"
+            "from pay.charges import charge\n\n\n"
+            "def place_order(payload):\n"
+            "    charge(payload, 100)\n"
+            '    KafkaProducer().send("order.placed", json.dumps(payload))\n'
+        ),
+    },
+    "pay": {
+        "pay/__init__.py": "",
+        "pay/charges.py": (
+            "import uuid\n"
+            "from kafka import KafkaConsumer\n\n\n"
+            "def charge(customer, amount):\n"
+            "    return str(uuid.uuid4())\n\n\n"
+            "def listen():\n"
+            '    KafkaConsumer().subscribe(["order.placed"])\n'
+        ),
+    },
+}
+
+
+def _shape(g) -> tuple[set, set, dict]:
+    """What two graphs must agree on: node ids, (source, type, target) edges, and each HTTP
+    endpoint's `resolved` flag."""
+    nodes = {r[0] for r in g.ro_query("MATCH (n) RETURN n.id").result_set}
+    edges = {tuple(r) for r in g.ro_query("MATCH (a)-[e]->(b) RETURN a.id, type(e), b.id").result_set}
+    resolved = dict(g.ro_query("MATCH (e:APIEndpoint) RETURN e.id, e.resolved").result_set)
+    return nodes, edges, resolved
+
+
+@pytest.mark.parametrize("gone", ["web", "orders", "pay"])
+def test_forget_in_shared_graph_leaves_what_the_other_repos_build_alone(falkordb_connection, tmp_path, gone):
+    # Regression: forget used to delete only the `<lang>://<repo>/` ids, so the repo's placeholders,
+    # routes, topics and HTTP seams stayed, and the endpoints it served still read `resolved`.
+    client = falkordb_connection
+    shared, alone = f"sys_{uuid4().hex}", f"rest_{uuid4().hex}"
+    for name, files in _SYSTEM.items():
+        _write(tmp_path / name, files)
+        _ingest(client, shared, tmp_path / name, name)
+        if name != gone:
+            _ingest(client, alone, tmp_path / name, name)
+    g, ref = client.select_graph(shared), client.select_graph(alone)
+    try:
+        # Every seam is in the shared graph, so the comparison below covers each of them.
+        assert _count(g, "MATCH (:Topic)<-[:SUBSCRIBES_TO]-() RETURN count(*)") == 1
+        assert _count(g, "MATCH (e:APIEndpoint) WHERE e.id STARTS WITH 'pyapi://' RETURN count(e)") == 2
+        assert _count(g, "MATCH ()-[:INVOKES]->() RETURN count(*)") == 2
+        assert _count(g, "MATCH (a)-[:CALLS]->(b) WHERE a.id STARTS WITH 'python://orders/' "
+                         "AND b.id STARTS WITH 'python://pay/' RETURN count(*)") == 1
+
+        lifecycle.execute_forget(client, lifecycle.plan_forget(client, shared, gone))
+
+        assert _shape(g) == _shape(ref)
+    finally:
+        g.delete()
+        ref.delete()
+
+
+def test_forget_takes_dot_continued_ids_but_not_a_nested_project(falkordb_connection, tmp_path):
+    # Regression: a PL/SQL table is `plsql://db.table.t` -- after a ".", not a "/" -- so forget
+    # left every table behind. Project `db.v2` sits inside that "." range and must survive.
+    client = falkordb_connection
+    gname, alone = f"dot_{uuid4().hex}", f"dotref_{uuid4().hex}"
+    for name in ("db", "db.v2", "db-x"):
+        _write(tmp_path / name, {"schema.sql": f"CREATE TABLE {name.replace('.', '_').replace('-', '_')}_t (id INTEGER PRIMARY KEY);\n"})
+        _ingest(client, gname, tmp_path / name, name)
+        if name != "db":
+            _ingest(client, alone, tmp_path / name, name)
+    g, ref = client.select_graph(gname), client.select_graph(alone)
+    try:
+        assert _count(g, "MATCH (t:Table) WHERE t.id STARTS WITH 'plsql://db.table.' RETURN count(t)") == 1
+
+        plan = lifecycle.plan_forget(client, gname, "db")
+        own = _count(g, "MATCH (n) WHERE n.id = 'plsql://db' OR n.id STARTS WITH 'plsql://db.' "
+                        "AND NOT n.id STARTS WITH 'plsql://db.v2' RETURN count(n)")
+        assert plan.nodes == own
+        lifecycle.execute_forget(client, plan)
+
+        assert _shape(g) == _shape(ref)
+    finally:
+        g.delete()
+        ref.delete()
+
+
+def test_cli_forget_by_graph_removes_a_registration_without_a_project_name(falkordb_connection, tmp_path, monkeypatch):
+    # Regression: `forget --graph G --project P` matched the stored `project_name`, which is empty
+    # for a repo indexed under its folder's name (always, through the MCP index tools), so the entry
+    # -- and its resync trigger -- stayed.
+    from click.testing import CliRunner
+
+    from auryn.cli import cli
+    from auryn.core.app_config import load_config
+
+    client = falkordb_connection
+    gname = f"reg_{uuid4().hex}"
+    for name in ("aa", "bb"):
+        _write(tmp_path / name, {"m.py": "def f():\n    return 1\n"})
+        _ingest(client, gname, tmp_path / name, name)
+        lifecycle.wire_trigger(str(tmp_path / name), gname, None, "manual")  # what the MCP tools pass
+    monkeypatch.setattr("auryn.cli._resolve_connection", lambda *conn: None)
+    monkeypatch.setattr("auryn.cli.connect_client", lambda config: client)
+    try:
+        res = CliRunner().invoke(cli, ["forget", "--graph", gname, "--project", "aa", "--yes"])
+
+        assert res.exit_code == 0, res.output
+        assert [r.local_dir for r in load_config().repos] == [str(tmp_path / "bb")]
+    finally:
+        client.select_graph(gname).delete()
+
+
 # --- wire_trigger: the shared post-ingest step (CLI == MCP), honouring the install-time choice ---
 
 

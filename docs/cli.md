@@ -193,7 +193,10 @@ Connection options only.
 Delete an ingested repo from the graph — the counter to `ingest`. Give a `<path>`, or `--graph`
 (by graph name) / `--project` (one project in a shared multi-repo graph). `--dry-run` shows what
 would be deleted; `--yes` skips the prompt. (Cross-repo references into the removed repo demote to
-placeholders rather than vanish — ADR 0004.)
+placeholders rather than vanish — ADR 0004.) In a shared graph it also removes what only that repo
+used outside its own ids — its `extern://` placeholders, framework routes, topics and HTTP endpoints —
+and re-runs the post hooks, so the graph matches the other repos indexed without it. The repo's
+registry entry and resync trigger go too, whether it was indexed from the CLI or an MCP tool.
 
 ### `stats`
 How an agent is using the code graph: MCP tool-call counts by operation, error rate, and result

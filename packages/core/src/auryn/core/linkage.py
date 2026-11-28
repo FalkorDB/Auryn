@@ -285,41 +285,68 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
     return stats
 
 
-def demote_cross_repo(graph, project_prefixes: list[str]) -> None:
+PROJECT_ID_SEPS = ("/", ".")
+"""How a node's id continues its project's id: `python://p/module/...`, but `plsql://p.table.t`
+and a C++ or Rust top-level `cpp://p.func.x()` (see the ingestors' ids.py). A project owns the ids
+after either separator; the separator keeps a sibling out (`acme/`, `acme.` never match `acme-api`)."""
+
+
+def owned_ranges(project_id: str) -> list[tuple[str, str]]:
+    """The id ranges a project owns under `project_id`, one per PROJECT_ID_SEPS: `lo <= id < hi`
+    exactly when the id continues `project_id` with that separator, so a per-label query on a range
+    is an index seek. `hi` is `lo` with its last character bumped (`p/` -> `p0`), not
+    `lo + chr(0xFFFF)`: FalkorDB's index scan can stop short of that non-ASCII bound and miss rows."""
+    return [(project_id + sep, project_id + chr(ord(sep) + 1)) for sep in PROJECT_ID_SEPS]
+
+
+def in_projects(var: str, param: str) -> str:
+    """Cypher: node `var` belongs to one of the projects whose ids are in list parameter `param`
+    (the Project node itself, or an id continuing it per PROJECT_ID_SEPS). The concatenation is
+    parenthesized: FalkorDB reads `x STARTS WITH q + '.'` as `(x STARTS WITH q) + '.'`."""
+    tails = " OR ".join(f"{var}.id STARTS WITH (q + '{sep}')" for sep in PROJECT_ID_SEPS)
+    return f"any(q IN ${param} WHERE {var}.id = q OR {tails})"
+
+
+def demote_cross_repo(graph, project_prefixes: list[str], nested: list[str] = ()) -> None:
     """Reverse of `_absorb`, run BEFORE a project's subgraph is deleted (`forget`, ADR 0003/0004):
     preserve references from *other* repos into this one. For each externally-visible node in this
     project that a node outside it still points at, re-materialize a shallow placeholder at the
     node's `linkage` and repoint those inbound edges onto it -- so the consumer keeps an (now
     unresolved) reference instead of losing the edge when the definer is deleted. Intra-project
-    edges are left to die with the subgraph. Point/range seeks per (prefix, label, rel); no scan.
+    edges are left to die with the subgraph. Point/range seeks per (prefix, separator, label, rel);
+    no scan.
 
-    `project_prefixes` is the project's `<lang>://<name>` roots (one per language)."""
+    `project_prefixes` is the project's `<lang>://<name>` roots (one per language). `nested` is
+    the other projects whose ids fall in those ranges (`api.v2` under `api`): their nodes are
+    neither demoted nor taken for this project's callers."""
     exacts = list(project_prefixes)
-    rngs = [p + "/" for p in project_prefixes]
+    rngs = [p + sep for p in project_prefixes for sep in PROJECT_ID_SEPS]
     labels = _present(graph, LINKABLE_LABELS)
     for exact in exacts:
-        lo, hi = exact + "/", exact + "/" + chr(0xFFFF)
-        for label in labels:
-            for rel in _REF_RELS:
-                # `real` is index-seeked by a pure id range (linkable nodes always live under the
-                # `<prefix>/` subtree, never at the Project root) -- deliberately NOT `id = exact OR
-                # (range)`, whose OR form over-matches sibling projects. `c` is filtered to nodes
-                # OUTSIDE this project (its inbound edge is the cross-repo one worth preserving).
-                graph.query(
-                    f"""
-                    MATCH (c)-[e:{rel}]->(real:{label})
-                    WHERE real.id >= $lo AND real.id < $hi
-                      AND real.linkage_key IS NOT NULL
-                      AND NOT (c.id IN $exacts OR any(pfx IN $rngs WHERE c.id STARTS WITH pfx))
-                    MERGE (ph:{label} {{id: real.linkage_key}})
-                      ON CREATE SET ph.name = real.name, ph.linkage_key = real.linkage_key,
-                                    ph.resolved = false, ph.origin = 'external', ph:{SHARED_NODE_LABEL}
-                    MERGE (c)-[e2:{rel}]->(ph)
-                      ON CREATE SET e2 = e, e2.resolution = 'external'
-                    DELETE e
-                    """,
-                    {"lo": lo, "hi": hi, "exacts": exacts, "rngs": rngs},
-                )
+        for lo, hi in owned_ranges(exact):
+            for label in labels:
+                for rel in _REF_RELS:
+                    # `real` is index-seeked by a pure id range (linkable nodes always live under
+                    # the prefix, never at the Project root) -- deliberately NOT `id = exact OR
+                    # (range)`, whose OR form over-matches sibling projects. `c` is filtered to nodes
+                    # OUTSIDE this project (its inbound edge is the cross-repo one worth preserving).
+                    graph.query(
+                        f"""
+                        MATCH (c)-[e:{rel}]->(real:{label})
+                        WHERE real.id >= $lo AND real.id < $hi
+                          AND real.linkage_key IS NOT NULL
+                          AND NOT {in_projects('real', 'nested')}
+                          AND (NOT (c.id IN $exacts OR any(pfx IN $rngs WHERE c.id STARTS WITH pfx))
+                               OR {in_projects('c', 'nested')})
+                        MERGE (ph:{label} {{id: real.linkage_key}})
+                          ON CREATE SET ph.name = real.name, ph.linkage_key = real.linkage_key,
+                                        ph.resolved = false, ph.origin = 'external', ph:{SHARED_NODE_LABEL}
+                        MERGE (c)-[e2:{rel}]->(ph)
+                          ON CREATE SET e2 = e, e2.resolution = 'external'
+                        DELETE e
+                        """,
+                        {"lo": lo, "hi": hi, "exacts": exacts, "rngs": rngs, "nested": list(nested)},
+                    )
 
 
 def demote_node(writer: GraphWriter, proj_prefix: str, label: str, node_id: str, child_sep: str = ".") -> str | None:

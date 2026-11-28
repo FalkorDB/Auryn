@@ -203,6 +203,20 @@ def test_stitch_gcs_orphaned_endpoint(graph):
     assert graph.query("MATCH (e:APIEndpoint {route:'/widgets/list'}) RETURN count(e)").result_set == [[1]]
 
 
+def test_stitch_gcs_endpoint_whose_last_caller_is_gone(graph):
+    # Regression: the GC ran after resolving, so the EXPOSES edge this hook had just re-added to the
+    # handler kept an endpoint alive once its caller was removed (or its repo forgotten).
+    eid = _seed_caller(graph)
+    _seed_controller(graph)
+    assert stitch(GraphWriter(graph))["resolved"] == 1
+
+    graph.query("MATCH (f:Function {id:'ts://ui/module/api.js.func.load'}) DETACH DELETE f")
+    report = stitch(GraphWriter(graph))
+
+    assert report["orphans_removed"] == 1 and report["exposes_edges"] == 0
+    assert graph.query("MATCH (e:APIEndpoint {id:$eid}) RETURN count(e)", {"eid": eid}).result_set == [[0]]
+
+
 def _seed_python_endpoint(graph, route="/charge", method="POST", proj="python://platform"):
     """A pyframework-style DECLARED endpoint: a Function handler (not a Method) EXPOSES a
     `pyapi://` APIEndpoint. This is how Python FastAPI/Flask routes land in the graph."""

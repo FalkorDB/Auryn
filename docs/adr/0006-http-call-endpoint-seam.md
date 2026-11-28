@@ -85,5 +85,6 @@ the caller-side unresolved endpoint is a placeholder `APIEndpoint`, not a bespok
 - **Shared-node lifecycle.** Because the endpoint id is route-keyed, it sits *outside* any single
   project's id-prefix, so a project's own resync can't reclaim it (the same property caller placeholders
   already had). The hook GCs an endpoint once it has neither a caller nor a handler — the residue of a
-  route or call removed from the code.
+  route or call removed from the code, or of a forgotten repo. It does so right after clearing its own
+  `http-stitch` edges, so only a declared handler counts; a stitched one would be re-added each run.
 - Non-goal (for now): request/response *body* shape inference; only the routing edge is synthesized.

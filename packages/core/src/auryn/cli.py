@@ -844,9 +844,9 @@ def forget(path, graph_opt, project, host, port, username, password, ssl, yes, d
     Targets the repo at PATH (default: the current directory), or a graph by --graph. A
     dedicated graph (the default one-graph-per-repo) is dropped wholesale; in a shared graph,
     pass --project to remove just that repo's subgraph (inbound cross-repo edges are cleaned up
-    too). Your files are never touched."""
+    too, and so are the placeholders, routes and seams only it used). Your files are never touched."""
     from auryn.core import lifecycle
-    from auryn.core.app_config import get_repo
+    from auryn.core.app_config import get_repo, registered_project_name
     from auryn.core.project import default_graph_name, resolve_project_root
 
     client = connect_client(_resolve_connection(host, port, username, password, ssl))
@@ -862,7 +862,7 @@ def forget(path, graph_opt, project, host, port, username, password, ssl, yes, d
         if reg and reg.graph_name:
             graph_name = reg.graph_name
             if project is None:
-                project = reg.project_name or root.name
+                project = registered_project_name(reg)
         else:
             graph_name = default_graph_name(root)
     try:
@@ -879,22 +879,28 @@ def forget(path, graph_opt, project, host, port, username, password, ssl, yes, d
         click.echo("Aborted.")
         return
     lifecycle.execute_forget(client, plan)
-    _deregister_repo(path, graph_opt, project, plan.graph_name)
+    _deregister_repo(path, graph_opt, plan)
     click.echo(f"Forgot {target}.")
 
 
-def _deregister_repo(path, graph_opt, project, graph_name) -> None:
-    """Remove a forgotten repo's git hooks + registry entry."""
+def _deregister_repo(path, graph_opt, plan) -> None:
+    """Remove a forgotten repo's git hooks + registry entry.
+
+    Forgot by --graph: every entry that maps to the forgotten project. An entry stores no
+    project name when it is the folder's own, so the match is on the name the graph holds
+    (`registered_project_name`), not on the stored field -- which is empty for a repo indexed
+    without `--project-name` and for every repo the MCP index tools register. Such an entry
+    would stay, and its hook or watcher re-ingest the repo on the next commit or save."""
     from auryn.core import app_config, hooks
     from auryn.core.project import resolve_project_root
 
     if not graph_opt:
-        local_dir = str(resolve_project_root(path))
-    else:  # forgot by --graph: find the registry entry that maps there
-        match = next((r for r in app_config.load_config().repos
-                      if r.graph_name == graph_name and (project is None or r.project_name == project)), None)
-        local_dir = match.local_dir if match else None
-    if local_dir:
+        local_dirs = [str(resolve_project_root(path))]
+    else:
+        local_dirs = [r.local_dir for r in app_config.load_config().repos
+                      if r.graph_name == plan.graph_name
+                      and app_config.registered_project_name(r) == plan.project_name]
+    for local_dir in local_dirs:
         hooks.uninstall(local_dir)
         app_config.unregister_repo(local_dir)
 

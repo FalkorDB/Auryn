@@ -7,7 +7,10 @@ has two shapes:
   * dedicated graph (the repo is the only project in it): GRAPH.DELETE the whole graph;
   * shared graph: delete just that project's subgraph, prefix-scoped WITH THE TRAILING
     SEPARATOR so `acme` never takes `acme-api` with it, per-label so it uses the id range
-    index, and via DETACH DELETE so inbound cross-repo edges are removed too.
+    index, and via DETACH DELETE so inbound cross-repo edges are removed too. Then reclaim the
+    nodes outside every project's ids that only this repo used (its placeholders, framework
+    routes, topics, HTTP seams) and re-run the post hooks, so the graph matches the remaining
+    repos indexed without it.
 """
 
 from __future__ import annotations
@@ -109,28 +112,103 @@ def execute_forget(client, plan: ForgetPlan) -> None:
     if plan.mode == "drop_graph":
         g.delete()
         return
+    from auryn.core.linkage import demote_cross_repo, in_projects, owned_ranges
+
+    prefixes = [f"{lang}://{plan.project_name}" for lang in plan.languages]
+    nested = _nested_projects(g, prefixes)
     # Preserve cross-repo references INTO this project before deleting it: demote each of its
     # still-referenced externally-visible nodes back to a placeholder (ADR 0004), so a consumer
     # repo keeps an unresolved edge rather than losing it to DETACH DELETE.
-    from auryn.core.linkage import demote_cross_repo
-
-    demote_cross_repo(g, [f"{lang}://{plan.project_name}" for lang in plan.languages])
+    demote_cross_repo(g, prefixes, nested)
 
     labels = _labels(g)
-    for lang in plan.languages:
-        prefix = f"{lang}://{plan.project_name}"
-        lo, hi = prefix + "/", prefix + "/" + chr(0xFFFF)  # trailing "/" -> acme never takes acme-api
+    seams = _seam_neighbours(g, prefixes, labels)  # before the delete: DETACH drops the edges that find them
+    for prefix in prefixes:
         for label in labels:
-            # Two index-backed deletes per label -- the subtree by id range, the Project root by
-            # exact id. NOT a single `id = exact OR (id >= lo AND id < hi)`: that OR form makes
-            # FalkorDB drop the range's upper bound and delete sibling projects sorting after this
-            # one (a shared-graph data-loss bug). DETACH also clears inbound cross-repo edges left
-            # after demote_cross_repo has preserved the ones worth keeping.
-            g.query(
-                f"MATCH (n:{label}) WHERE n.id >= $lo AND n.id < $hi DETACH DELETE n",
-                {"lo": lo, "hi": hi},
-            )
+            # Index-backed deletes per label -- the subtree by id range (one per separator), the
+            # Project root by exact id. NOT a single `id = exact OR (id >= lo AND id < hi)`: that OR
+            # form makes FalkorDB drop the range's upper bound and delete sibling projects sorting
+            # after this one (a shared-graph data-loss bug). DETACH also clears inbound cross-repo
+            # edges left after demote_cross_repo has preserved the ones worth keeping.
+            for lo, hi in owned_ranges(prefix):
+                g.query(
+                    f"MATCH (n:{label}) WHERE n.id >= $lo AND n.id < $hi "
+                    f"AND NOT {in_projects('n', 'nested')} DETACH DELETE n",
+                    {"lo": lo, "hi": hi, "nested": nested},
+                )
             g.query(f"MATCH (n:{label} {{id: $exact}}) DETACH DELETE n", {"exact": prefix})
+    _reclaim_unreferenced(g, seams)
+    _rerun_post_hooks(g)
+
+
+def _nested_projects(g, prefixes: list[str]) -> list[str]:
+    """Other projects whose id continues one of `prefixes` -- `python://api.v2` under
+    `python://api`. Their nodes fall in the forgotten project's "." range; every delete and count
+    here leaves them out."""
+    from auryn.core.linkage import PROJECT_ID_SEPS
+
+    starts = tuple(p + sep for p in prefixes for sep in PROJECT_ID_SEPS)
+    ids = [str(r[0]) for r in g.ro_query("MATCH (p:Project) RETURN p.id").result_set]
+    return sorted(q for q in ids if q not in prefixes and q.startswith(starts))
+
+
+def _seam_neighbours(g, prefixes: list[str], labels: list[str]) -> list[str]:
+    """Ids of the nodes outside every project's ids that this project's nodes link to: its
+    `extern://` placeholders, its framework routes (`pyapi://`, `javaapi://`), the `topic://` and
+    `extern://http/` seams it publishes to or calls. Some are this project's alone, some are shared
+    with the repos that stay; `_reclaim_unreferenced` tells them apart once the project is gone.
+    One index seek per (prefix, range, label), expanded to the neighbours -- no scan."""
+    from auryn.core.linkage import PROJECT_ID_SEPS, owned_ranges
+
+    found: set[str] = set()
+    for prefix in prefixes:
+        for lo, hi in owned_ranges(prefix):
+            for label in labels:
+                rows = g.ro_query(
+                    f"MATCH (n:{label}) WHERE n.id >= $lo AND n.id < $hi WITH n MATCH (n)--(m) "
+                    "WHERE NOT (m.id >= $lo AND m.id < $hi) RETURN DISTINCT m.id",
+                    {"lo": lo, "hi": hi},
+                ).result_set
+                found.update(str(r[0]) for r in rows if r[0] is not None)
+        rows = g.ro_query("MATCH (p:Project {id: $exact})--(m) RETURN DISTINCT m.id", {"exact": prefix}).result_set
+        found.update(str(r[0]) for r in rows if r[0] is not None)
+    # A node of ANY project -- this one's own, or a sibling's reached by a cross-repo edge -- is not
+    # a seam.
+    projects = [str(r[0]) for r in g.ro_query("MATCH (p:Project) RETURN p.id").result_set]
+    starts = tuple(p + sep for p in projects for sep in PROJECT_ID_SEPS)
+    return sorted(i for i in found if i not in projects and not i.startswith(starts))
+
+
+def _reclaim_unreferenced(g, seams: list[str]) -> int:
+    """Delete each seam node the deleted project leaves with no edge at all -- the placeholders,
+    routes and topics only it used. A seam a remaining repo still links to keeps that edge and
+    stays. Test and delete are one query, the same way a sync reclaims its orphaned placeholders
+    (graph_sync._reclaim_orphan_placeholders). Seams whose last edge is a derived one (the HTTP
+    stitch's EXPOSES_ENDPOINT) are left to that hook's GC (see _rerun_post_hooks)."""
+    if not seams:
+        return 0
+    from auryn.core.graph_client import SHARED_NODE_LABEL
+
+    rows = g.query(
+        f"UNWIND $ids AS sid MATCH (n:{SHARED_NODE_LABEL} {{id: sid}}) WHERE NOT (n)--() "
+        "WITH n, n.id AS gone DELETE n RETURN count(gone)",
+        {"ids": seams},
+    ).result_set
+    return int(rows[0][0]) if rows and rows[0][0] else 0
+
+
+def _rerun_post_hooks(g) -> None:
+    """Re-run the post hooks over what is left, as an ingest does after its languages: each
+    rebuilds its derived layer from the remaining graph (the HTTP seam's EXPOSES/INVOKES edges and
+    `resolved` flags, framework routes, topics, image flags) and GCs the seam nodes only the
+    forgotten repo held. There is no repo to read -- the built-in hooks read only the graph
+    (grpc-contract keeps the contract it has) -- so `repo` is None; a local hook that needs it
+    fails alone, logged (see ingest.run_post_hooks). Install-wide disables apply."""
+    from auryn.core.app_config import effective_disabled_hooks
+    from auryn.core.graph_client import GraphWriter
+    from auryn.core.ingest import run_post_hooks
+
+    run_post_hooks(GraphWriter(g), None, "", disabled=effective_disabled_hooks(None))
 
 
 def _labels(g) -> list[str]:
@@ -143,16 +221,20 @@ def _labels(g) -> list[str]:
 
 
 def _count_project_nodes(g, project_name: str, langs: list[str]) -> int:
+    from auryn.core.linkage import in_projects, owned_ranges
+
     labels = _labels(g)
+    prefixes = [f"{lang}://{project_name}" for lang in langs]
+    nested = _nested_projects(g, prefixes)
     total = 0
-    for lang in langs:
-        prefix = f"{lang}://{project_name}"
-        lo, hi = prefix + "/", prefix + "/" + chr(0xFFFF)
+    for prefix in prefixes:
         for label in labels:
-            total += g.ro_query(
-                f"MATCH (n:{label}) WHERE n.id >= $lo AND n.id < $hi RETURN count(n)",
-                {"lo": lo, "hi": hi},
-            ).result_set[0][0]
+            for lo, hi in owned_ranges(prefix):
+                total += g.ro_query(
+                    f"MATCH (n:{label}) WHERE n.id >= $lo AND n.id < $hi "
+                    f"AND NOT {in_projects('n', 'nested')} RETURN count(n)",
+                    {"lo": lo, "hi": hi, "nested": nested},
+                ).result_set[0][0]
             total += g.ro_query(
                 f"MATCH (n:{label} {{id: $exact}}) RETURN count(n)", {"exact": prefix}
             ).result_set[0][0]
