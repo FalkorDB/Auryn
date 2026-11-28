@@ -161,6 +161,17 @@ def _deep_sync_at(writer, source, target_sha: str, files, proj_id: str, project_
         return None
 
     locations = resolution.callable_locations(files, proj_id)
+    # DELIBERATELY un-gated (no require_call_site / require_syntactic_call), like C++ (#840) -- the last
+    # language decision in the SCIP deep v2 line/column-precise arc (#802). The line/column gate DROPS a
+    # SCIP-resolved reference when the fast parse recorded no syntactic call at that (name, line)/position
+    # (scip_resolve, "a value reference, not a call"). That is safe only where the fast parse sees every
+    # resolvable call. Rust's doesn't: macro-EXPANDED calls (a call generated inside a `macro_rules!`/proc-
+    # macro body) have no source call site to record -- the tree-sitter pass can't name them (they are not
+    # in `called_names`, only counted as `unresolved_macro_calls`), yet rust-analyzer's SCIP resolves them.
+    # Generic/trait-dispatch calls through type parameters are the same shape. Gating would delete exactly
+    # those hard-won deep edges with no replacement -- a regression -- so Rust keeps the coarser overlay,
+    # and the precise gate stays with the languages whose fast parse records a site for every call it names
+    # (Go/Java line-precise, TS line+column).
     deep = resolve_calls(scip_bytes, locations)
     loc_by_id = {loc.id: loc for loc in locations}
     unresolved_by_id = {cid: _recompute_unresolved(loc_by_id[cid], deep.seen_by_caller.get(cid, set()))
