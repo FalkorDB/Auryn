@@ -696,12 +696,24 @@ def _import_map(rf: RawFile) -> dict:
 
 
 def _import_paths(rf: RawFile) -> dict:
-    """alias -> full import path (keyed exactly like `_import_map`), so an external call's origin
-    (stdlib vs third-party) can be classified from the path's first segment (ADR 0004)."""
+    """alias -> full import path, so a qualified call names its package's path (the extern placeholder
+    key, whose first segment classifies stdlib vs third-party -- ADR 0004). An aliased import is keyed
+    by its alias. A non-aliased one binds its package's `package` clause, which the fast pass can't
+    read for a module outside the project, so it is keyed by its last path segment AND by the name Go
+    tooling assumes (gomod.package_name: `chi` for `github.com/go-chi/chi/v5`). The assumed name is
+    the weaker key: it never displaces an alias or a last segment, and two imports assuming the same
+    name bind neither."""
     out: dict = {}
+    assumed: dict[str, set[str]] = defaultdict(set)
     for imp in rf.imports:
-        seg = imp.path.rstrip("/").split("/")[-1]
-        out[imp.alias or seg] = imp.path
+        if imp.alias:
+            out[imp.alias] = imp.path
+            continue
+        out[imp.path.rstrip("/").split("/")[-1]] = imp.path
+        assumed[gomod.package_name(imp.path)].add(imp.path)
+    for name, paths in assumed.items():
+        if name and len(paths) == 1:
+            out.setdefault(name, next(iter(paths)))
     return out
 
 
