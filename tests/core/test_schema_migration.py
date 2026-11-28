@@ -176,11 +176,13 @@ def test_cli_explicit_host_is_treated_as_remote_not_destroyed(monkeypatch, tmp_p
     assert deleted == []  # a --host target is never auto-destroyed/re-ingested
 
 
-def test_cli_missing_source_dir_graph_not_deleted_and_stamp_not_advanced(monkeypatch, tmp_path):
-    # A registered repo whose source dir is GONE must not have its graph deleted (we can't rebuild it),
-    # and the machine isn't fully migrated -> stamp stays put so it retries / the user can `forget`.
+def test_cli_missing_source_dir_graph_is_preserved_not_destroyed(monkeypatch, tmp_path):
+    # A registered repo whose source dir is GONE must NOT have its graph deleted (we can't rebuild it) --
+    # it's left untouched and warned about. The stamp still advances (best-effort): a dead registry entry
+    # must not force every future ingest to re-destroy+rebuild the healthy graphs.
     import auryn.cli as cli
     from auryn.core import app_config, ingest as ingest_mod
+    from auryn.core.graph_model import GRAPH_SCHEMA_VERSION
 
     schema_migration._state = type(schema_migration._state)()
     monkeypatch.setattr(app_config, "config_path", lambda: tmp_path / "config.toml")
@@ -202,5 +204,39 @@ def test_cli_missing_source_dir_graph_not_deleted_and_stamp_not_advanced(monkeyp
 
     cli._migrate_schema_if_stale(None, None, None, None, False)
 
-    assert deleted == []  # the un-rebuildable graph was NOT destroyed
-    assert app_config.load_config().schema_version == 0  # not fully migrated -> stamp unchanged
+    assert deleted == []  # the un-rebuildable graph was NOT destroyed (its data is preserved)
+    assert app_config.load_config().schema_version == GRAPH_SCHEMA_VERSION  # advanced (no infinite re-migration)
+
+
+def test_cli_shared_graph_with_a_missing_repo_is_not_destroyed(monkeypatch, tmp_path):
+    # Two repos share one graph; one's source is gone. Rebuilding would delete the shared graph and lose
+    # the gone repo's subgraph, so the graph is left untouched entirely (the live repo isn't rebuilt either).
+    import auryn.cli as cli
+    from auryn.core import app_config, ingest as ingest_mod
+
+    schema_migration._state = type(schema_migration._state)()
+    monkeypatch.setattr(app_config, "config_path", lambda: tmp_path / "config.toml")
+    live = tmp_path / "live"
+    live.mkdir()
+    gone = tmp_path / "gone"
+    app_config.save_config(Config(backend=Backend(mode="local"), schema_version=0, repos=(
+        RepoRegistration(local_dir=str(live), graph_name="shared"),
+        RepoRegistration(local_dir=str(gone), graph_name="shared"),
+    )))
+    deleted, reingested = [], []
+
+    class _Client:
+        def list_graphs(self):
+            return ["shared"]
+
+        def select_graph(self, name):
+            return type("G", (), {"delete": lambda s: deleted.append(name)})()
+
+    monkeypatch.setattr(cli, "_resolve_connection", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "connect_client", lambda config: _Client())
+    monkeypatch.setattr(ingest_mod, "ingest_directory", lambda w, p, **k: reingested.append(p))
+
+    cli._migrate_schema_if_stale(None, None, None, None, False)
+
+    assert deleted == []        # the shared graph is NOT destroyed...
+    assert reingested == []      # ...and neither repo (even the live one) is rebuilt into it

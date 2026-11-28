@@ -16,10 +16,34 @@ before ``install`` has ever run. Reading uses stdlib ``tomllib``; writing uses `
 
 from __future__ import annotations
 
+import contextlib
 import tomllib
 from dataclasses import dataclass, field, replace
 
 from auryn.core.home import config_path
+
+try:
+    import fcntl
+except ImportError:  # native Windows -- config RMW stays unserialized there (as it was before)
+    fcntl = None
+
+
+@contextlib.contextmanager
+def _config_lock():
+    """Serialize read-modify-write updates to config.toml so two concurrent updaters -- e.g. a schema
+    migration bumping the version while a commit hook's register_repo runs -- can't clobber each
+    other's change (load A, load B, save A, save B loses B). fcntl-based; best-effort on Windows."""
+    if fcntl is None:
+        yield
+        return
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(path.name + ".lock"), "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
@@ -224,11 +248,10 @@ def set_resync_trigger(trigger: str) -> None:
 
 def set_schema_version(version: int) -> None:
     """Persist the graph-schema generation this machine has ingested under (see
-    graph_model.GRAPH_SCHEMA_VERSION / schema_migration). Re-reads first so it only touches that one
-    field, never clobbering a concurrently-written registry entry."""
-    from dataclasses import replace
-
-    save_config(replace(load_config(), schema_version=int(version)))
+    graph_model.GRAPH_SCHEMA_VERSION / schema_migration). Locked read-modify-write so it touches only
+    that one field without clobbering a concurrently-written registry entry (and vice versa)."""
+    with _config_lock():
+        save_config(replace(load_config(), schema_version=int(version)))
 
 
 def set_embed_mode(mode: str) -> None:
@@ -248,22 +271,22 @@ def set_git_info_enabled(enabled: bool) -> None:
 
 
 def register_repo(reg: RepoRegistration) -> None:
-    """Upsert a repo registration (replacing any existing entry for the same local_dir)."""
-    from dataclasses import replace
-
-    cfg = load_config()
-    kept = tuple(r for r in cfg.repos if r.local_dir != reg.local_dir)
-    save_config(replace(cfg, repos=kept + (reg,)))
+    """Upsert a repo registration (replacing any existing entry for the same local_dir). Locked
+    read-modify-write so a concurrent config update (e.g. a schema migration) isn't clobbered."""
+    with _config_lock():
+        cfg = load_config()
+        kept = tuple(r for r in cfg.repos if r.local_dir != reg.local_dir)
+        save_config(replace(cfg, repos=kept + (reg,)))
 
 
 def unregister_repo(local_dir: str) -> RepoRegistration | None:
-    """Remove and return a repo registration by local_dir (None if it wasn't registered)."""
-    from dataclasses import replace
-
-    cfg = load_config()
-    match = next((r for r in cfg.repos if r.local_dir == local_dir), None)
-    if match is not None:
-        save_config(replace(cfg, repos=tuple(r for r in cfg.repos if r.local_dir != local_dir)))
+    """Remove and return a repo registration by local_dir (None if it wasn't registered). Locked
+    read-modify-write so a concurrent config update isn't clobbered."""
+    with _config_lock():
+        cfg = load_config()
+        match = next((r for r in cfg.repos if r.local_dir == local_dir), None)
+        if match is not None:
+            save_config(replace(cfg, repos=tuple(r for r in cfg.repos if r.local_dir != local_dir)))
     return match
 
 
