@@ -207,15 +207,45 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
     # file-path spelling, e.g. `backend.llm_client` vs `plugins.com.esl.feltfixinator.backend.backend.
     # llm_client`). The reference SHOULD have resolved; the exact-string match just missed by the prefix.
     #
-    # Candidates come from a GRAPH-WIDE, name-indexed seek (not just this ingest's touched linkage keys):
-    # `name` is indexed on every linkable label, so this is scan-free, and it is the only way the uniqueness
-    # gate below is honest -- a definition under an AMBIGUOUS linkage key, or one from a PRIOR ingest, still
-    # counts. Of the same-language, suffix-compatible definitions found:
-    #   - exactly ONE distinct definition -> AUTO-RESOLVE (absorb the placeholder into it). Uniqueness is the
-    #     safety ADR 0004 decision 6 called for -- the false-join risk exists only with 2+ candidates.
+    # Resolved in BOTH ingest orders (order-independent convergence is the contract):
+    #   A. placeholder-first: a reference unresolved THIS ingest (stats.unresolved) finds its definition.
+    #   B. definition-first (#852): a definition ingested THIS pass is the missing match for a PRE-EXISTING
+    #      placeholder from an earlier, separate ingest. This pass never touches that placeholder's key, so
+    #      direction A alone would miss it; we discover such placeholders by the new definitions' NAMES
+    #      (name is indexed -> scan-free) and fold them into the SAME resolution. (An exact-key pre-existing
+    #      placeholder is already absorbed by the main loop above, since it shares the key this pass touched;
+    #      B only adds the prefix-MISMATCH case.)
+    #
+    # Either way, candidates come from a GRAPH-WIDE, name-indexed seek -- the only way the uniqueness gate is
+    # honest (a definition under an AMBIGUOUS linkage key, or from a PRIOR ingest, still counts). Of the
+    # same-language, suffix-compatible definitions found for a placeholder:
+    #   - exactly ONE distinct definition -> AUTO-RESOLVE (absorb into it). Uniqueness is the safety ADR 0004
+    #     decision 6 called for -- the false-join risk exists only with 2+ candidates.
     #   - TWO+ distinct definitions -> a genuine clash; left unresolved + warned, never merged.
-    if stats.unresolved:
-        ph_parsed = [(ph, _parse_linkage(ph)) for ph in stats.unresolved]
+    this_ingest = set(stats.unresolved)  # only these feed the post-reconcile "still unresolved" diagnostic
+    attempt: list[str] = list(stats.unresolved)
+    # Direction B: pre-existing placeholders matching a canonical definition newly ingested this pass.
+    def_names = sorted({p[2] for link in canonical_links
+                        if (p := _parse_linkage(link)) is not None and p[0] in _FILE_PATH_KEYED_LANGS})
+    canonical_set = set(canonical_links)
+    for label in present if def_names else ():
+        rows = writer.ro_query(
+            f"MATCH (n:{label}) WHERE n.name IN $names AND n.linkage_key IS NOT NULL "
+            "AND coalesce(n.resolved, true) = false "  # placeholders only (a real def is never a B-candidate)
+            "RETURN n.linkage_key, n.id",
+            {"names": def_names},
+        ).result_set
+        for link, nid in rows:
+            link, nid = str(link), str(nid)
+            if link in this_ingest or link in canonical_set:
+                continue  # already handled by direction A or absorbed above
+            if all(nid != eid for eid, *_ in by_link.get(link, [])):
+                by_link.setdefault(link, []).append((nid, False, None, "external"))  # make it absorbable below
+            if link not in attempt:
+                attempt.append(link)
+
+    if attempt:
+        ph_parsed = [(ph, _parse_linkage(ph)) for ph in attempt]
         # Only file-path-keyed languages can have a package-root prefix leak, so seek candidate names for
         # THOSE placeholders only -- a Java/Go unresolved ref never triggers a (wasted) graph-wide name query.
         wanted = sorted({p[2] for _, p in ph_parsed if p is not None and p[0] in _FILE_PATH_KEYED_LANGS})
@@ -234,7 +264,8 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
             if p is None or p[0] not in _FILE_PATH_KEYED_LANGS:
                 # Only file-path-derived keys (Python) can suffer a package-root prefix leak; for declared-
                 # name languages (Java/C++/Go/…) a suffix mismatch is a genuinely different symbol -> leave it.
-                still_unresolved.append(ph)
+                if ph in this_ingest:
+                    still_unresolved.append(ph)
                 continue
             lang, qual, name = p
             ph_is_module = _is_module_key(ph)
@@ -252,8 +283,9 @@ def reconcile_linkages(writer: GraphWriter, real_linkages, placeholder_ids) -> R
                 stats.resolved_near_misses.append((ph, matches[0][0]))
             elif targets:
                 stats.near_misses.append((ph, matches[0][0]))  # 2+ distinct defs -> ambiguous, don't merge
-                still_unresolved.append(ph)
-            else:
+                if ph in this_ingest:
+                    still_unresolved.append(ph)
+            elif ph in this_ingest:
                 still_unresolved.append(ph)
         stats.unresolved = still_unresolved
 

@@ -24,8 +24,10 @@ class _Result:
 
 class _FakeWriter:
     """GraphWriter stand-in. Rows are (linkage_key, id, resolved, defined, origin, name). Serves:
-    `CALL db.labels()`, the `linkage_key IN $ls` seek (-> linkage_key,id,resolved,defined,origin), and the
-    graph-wide `name IN $names` seek (-> name,linkage_key,id, only canonical rows). Records `query` writes."""
+    `CALL db.labels()`; the `linkage_key IN $ls` seek (-> linkage_key,id,resolved,defined,origin); the
+    graph-wide canonical `name IN $names` seek (-> name,linkage_key,id, only canonical rows, direction A);
+    and the direction-B `name IN $names ... resolved = false` seek (-> linkage_key,id, placeholders only,
+    #852). Records `query` writes."""
 
     def __init__(self, rows, labels=("Function",)):
         self._rows = rows
@@ -35,8 +37,11 @@ class _FakeWriter:
     def ro_query(self, cypher, params=None):
         if "db.labels()" in cypher:
             return _Result([[lb] for lb in self._labels])
-        if "n.name IN $names" in cypher:  # the graph-wide, name-indexed candidate seek (canonical only)
+        if "n.name IN $names" in cypher:
             names = set((params or {}).get("names", []))
+            if "coalesce(n.resolved, true) = false" in cypher:  # direction B: pre-existing placeholders by name
+                return _Result([[r[0], r[1]] for r in self._rows if r[5] in names and r[2] is False])
+            # direction A: graph-wide, name-indexed canonical candidates (-> name, linkage_key, id)
             return _Result([[r[5], r[0], r[1]] for r in self._rows
                             if r[5] in names and r[2] is not False and r[3] is not False])
         sel = set((params or {}).get("ls", []))  # the linkage_key IN seek
@@ -187,6 +192,74 @@ def test_module_import_resolves_end_to_end_on_a_real_graph(graph):
 
     assert stats.absorbed == 1 and (ph, real) in stats.resolved_near_misses
     # the placeholder is folded away and the import now points at the real module
+    assert graph.query("MATCH (m:Module {id:'ph_mod'}) RETURN count(m)").result_set == [[0]]
+    assert graph.query(
+        "MATCH (:Module {id:'caller'})-[:IMPORTS]->(:Module {id:'real_mod'}) RETURN count(*)"
+    ).result_set == [[1]]
+
+
+def test_definition_first_resolves_a_preexisting_placeholder():
+    # #852 (direction B): the def arrives in a LATER ingest that touches ONLY the def's key; the
+    # placeholder was ingested earlier under a prefix-mismatched key. Direction A alone misses it
+    # (this ingest's unresolved set is empty); direction B discovers it by name and resolves it.
+    real = "extern://python/plugins.com.esl.feltfixinator.backend.backend.llm_client"  # def, this ingest
+    ph = "extern://python/backend.llm_client"  # pre-existing placeholder from an earlier, separate ingest
+    writer = _FakeWriter([
+        (real, "py://real/mod", None, None, "local", "llm_client"),
+        (ph, ph, False, None, "external", "llm_client"),
+    ], labels=("Module",))
+    stats = reconcile_linkages(writer, real_linkages=[real], placeholder_ids=[])  # only the def this pass
+    assert stats.absorbed == 1
+    assert stats.resolved_near_misses == [(ph, real)]
+    assert stats.unresolved == []  # the pre-existing placeholder is not re-reported as this ingest's miss
+
+
+def test_definition_first_ambiguous_match_is_not_resolved():
+    # Two canonical defs suffix-match the pre-existing placeholder -> ambiguous -> never auto-merged,
+    # same safety as direction A.
+    real_new = "extern://python/plugins.backend.core::charge"       # def ingested this pass
+    other = "extern://python/vendor.wrapped.backend.core::charge"   # another existing def (the ambiguity)
+    ph = "extern://python/backend.core::charge"                     # pre-existing placeholder
+    writer = _FakeWriter([
+        (real_new, "py://a/charge", None, None, "local", "charge"),
+        (other, "py://b/charge", None, None, "local", "charge"),
+        (ph, ph, False, None, "external", "charge"),
+    ])
+    stats = reconcile_linkages(writer, real_linkages=[real_new], placeholder_ids=[])
+    assert stats.absorbed == 0
+    assert stats.near_misses and stats.near_misses[0][0] == ph
+
+
+def test_definition_first_declared_namespace_language_not_resolved():
+    # Java keys are declared names, not file paths -> a suffix mismatch is a DIFFERENT type, never a
+    # package-root leak. Direction B must respect the same file-path-keyed-lang guard as direction A.
+    real = "extern://java/com.acme.billing.Charger#charge"  # def this pass
+    ph = "extern://java/acme.billing.Charger#charge"        # pre-existing placeholder
+    writer = _FakeWriter([
+        (real, "java://a/charge", None, None, "local", "charge"),
+        (ph, ph, False, None, "external", "charge"),
+    ], labels=("Method",))
+    stats = reconcile_linkages(writer, real_linkages=[real], placeholder_ids=[])
+    assert stats.absorbed == 0 and stats.resolved_near_misses == []
+
+
+def test_definition_first_resolves_preexisting_placeholder_on_a_real_graph(graph):
+    # The reported repro shape in the OPPOSITE ingest order, against a real FalkorDB: the consumer
+    # (placeholder) was ingested first; now the defining repo is ingested and must bind the earlier
+    # import to the real module.
+    w = GraphWriter(graph)
+    real = "extern://python/plugins.com.esl.feltfixinator.backend.backend.llm_client"
+    ph = "extern://python/backend.llm_client"
+    w.merge_node(GraphNode("Module", {"id": "ph_mod"},
+                           {"name": "llm_client", "linkage_key": ph, "resolved": False, "origin": "external"}))
+    w.merge_node(GraphNode("Module", {"id": "caller"}, {"name": "feltfixinator_bridge"}))
+    w.merge_edge(GraphEdge("IMPORTS", "Module", {"id": "caller"}, "Module", {"id": "ph_mod"}))
+    # The defining repo is ingested later (a separate pass that touches only the def's key):
+    w.merge_node(GraphNode("Module", {"id": "real_mod"}, {"name": "llm_client", "linkage_key": real}))
+
+    stats = reconcile_linkages(w, real_linkages=[real], placeholder_ids=[])
+
+    assert stats.absorbed == 1 and (ph, real) in stats.resolved_near_misses
     assert graph.query("MATCH (m:Module {id:'ph_mod'}) RETURN count(m)").result_set == [[0]]
     assert graph.query(
         "MATCH (:Module {id:'caller'})-[:IMPORTS]->(:Module {id:'real_mod'}) RETURN count(*)"
